@@ -315,7 +315,9 @@ impl LayoutSystem for TraditionalLayoutSystem {
                     self.add_window_after_selection(layout, wid);
                 }
             }
-            WindowChange::Remove(window) => self.tiles.remove_window(window),
+            WindowChange::Remove(window) => {
+                self.tiles.remove_window(window);
+            }
             WindowChange::RemoveAndRebalance(window) => {
                 super::tiles::remove_and_rebalance(&mut self.tiles, window)
             }

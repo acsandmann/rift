@@ -663,17 +663,15 @@ pub(crate) struct WindowNodeInfo {
 pub(crate) struct WindowNodeInfoVec(pub(crate) Vec<WindowNodeInfo>);
 
 impl WindowIndex {
-    pub(crate) fn layouts_for(&self, wid: WindowId) -> Vec<LayoutId> {
-        self.window_nodes
-            .get(&wid)
-            .map(|nodes| nodes.0.iter().map(|info| info.layout).collect())
-            .unwrap_or_default()
+    pub(crate) fn occurrences(&self, wid: WindowId) -> &[WindowNodeInfo] {
+        self.window_nodes.get(&wid).map_or(&[], |nodes| &nodes.0)
     }
 
     pub(crate) fn node_for(&self, layout: LayoutId, wid: WindowId) -> Option<NodeId> {
-        self.window_nodes.get(&wid).and_then(|nodes| {
-            nodes.0.iter().find(|info| info.layout == layout).map(|info| info.node)
-        })
+        self.occurrences(wid)
+            .iter()
+            .find(|info| info.layout == layout)
+            .map(|info| info.node)
     }
 
     pub(crate) fn set_window(
@@ -718,13 +716,8 @@ impl WindowIndex {
         self.window_nodes.entry(to).or_default().0.extend(nodes.0);
     }
 
-    pub(crate) fn take_nodes_for(&mut self, wid: WindowId) -> impl Iterator<Item = NodeId> + use<> {
-        self.window_nodes
-            .remove(&wid)
-            .unwrap_or_default()
-            .0
-            .into_iter()
-            .map(|info| info.node)
+    pub(crate) fn take_window(&mut self, wid: WindowId) -> Vec<WindowNodeInfo> {
+        self.window_nodes.remove(&wid).unwrap_or_default().0
     }
 
     pub(crate) fn take_nodes_for_app(

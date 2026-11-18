@@ -60,7 +60,7 @@ impl From<StoredMasterStack> for MasterStackLayoutSystem {
                     let (master, stack) = system.create_containers(root);
                     let mut count = 0;
                     for child in children {
-                        let n = system.windows_in_container(child).count();
+                        let n = system.count_windows(child);
                         let target = if count < system.settings.master_count {
                             master
                         } else {
@@ -150,10 +150,14 @@ impl MasterStackLayoutSystem {
         )
     }
 
-    fn windows_in_container(&self, container: NodeId) -> impl Iterator<Item = WindowId> + '_ {
+    fn count_windows(&self, container: NodeId) -> usize {
+        if self.tiles.window_at(container).is_some() {
+            return 1;
+        }
         container
-            .traverse_preorder(self.tiles.map())
-            .filter_map(|node| self.tiles.window_at(node))
+            .children(self.tiles.map())
+            .map(|child| self.count_windows(child))
+            .sum()
     }
 
     fn focused_container(&self, layout: LayoutId, master: NodeId, stack: NodeId) -> Option<NodeId> {
@@ -241,28 +245,66 @@ impl MasterStackLayoutSystem {
         } else {
             source.last_descendant(self.tiles.map())
         };
+        let protected = keep_in_master
+            .filter(|_| overflow && desired != 0)
+            .and_then(|window| self.tiles.window_node(layout, window));
         let next_window = |system: &Self, start: Option<NodeId>| {
             let map = system.tiles.map();
             std::iter::successors(start, |node| node.step(source, map, forward))
-                .filter_map(|node| system.tiles.window_at(node).map(|window| (node, window)))
-                .find(|&(_, window)| !overflow || desired == 0 || Some(window) != keep_in_master)
+                .find(|&node| Some(node) != protected && map.window(node).is_some())
         };
         let mut next = next_window(self, Some(start));
         if next.is_none() {
             return false;
         }
-        let selected = self.tiles.selected_window(layout);
+        let selected = self.tiles.focused_leaf(layout).map(|(node, _)| node);
         let front = overflow == self.master_first();
-        for i in 0..count {
-            let Some((node, window)) = next else { break };
-            // Find the next leaf before editing. Removing the current leaf can collapse
-            // its parent, but the next leaf keeps its identity and order in the region.
-            if i + 1 < count {
-                next = next_window(self, node.step(source, self.tiles.map(), forward));
+        let mut remaining = count;
+        while let Some(leaf) = next {
+            let map = self.tiles.map();
+            let (mut node, mut moved) = (leaf, 1);
+            if remaining > 1 {
+                // Count each sibling subtree once as we walk outward from this leaf.
+                // A complete group can move atomically while a partial quota still moves leaves.
+                let mut child = leaf;
+                let mut size = 1;
+                while let Some(parent) = child.parent(map).filter(|&node| node != source) {
+                    size += parent
+                        .children(map)
+                        .filter(|&node| node != child)
+                        .map(|node| self.count_windows(node))
+                        .sum::<usize>();
+                    if size > remaining
+                        || protected.is_some_and(|keep| {
+                            keep.ancestors(map).any(|ancestor| ancestor == parent)
+                        })
+                    {
+                        break;
+                    }
+                    if size > 1 {
+                        (node, moved) = (parent, size);
+                    }
+                    child = parent;
+                }
             }
+            let restore_focus =
+                selected.filter(|&focus| focus.ancestors(map).any(|ancestor| ancestor == node));
+            remaining -= moved;
+            next = if remaining == 0 {
+                None
+            } else {
+                // The next leaf retains its identity even if removing this branch
+                // collapses an ancestor.
+                let edge = if forward {
+                    node.last_descendant(map)
+                } else {
+                    node
+                };
+                next_window(self, edge.step(source, map, forward))
+            };
             self.move_to_region(node, destination, front);
-            if Some(window) == selected {
-                self.tiles.select(node);
+            if let Some(focus) = restore_focus {
+                self.tiles.select(focus);
             }
         }
         true
@@ -298,13 +340,7 @@ impl MasterStackLayoutSystem {
 
     fn distribute_regions(&mut self, layout: LayoutId) -> bool {
         let (_, master, stack) = self.region_roots(layout);
-        self.enforce_master_count(
-            layout,
-            master,
-            stack,
-            self.windows_in_container(master).count(),
-            None,
-        )
+        self.enforce_master_count(layout, master, stack, self.count_windows(master), None)
     }
 
     pub fn adjust_master_ratio(&mut self, _layout: LayoutId, delta: f64) {
@@ -482,10 +518,8 @@ impl LayoutSystem for MasterStackLayoutSystem {
         match change {
             WindowChange::Add(layout, window, _) => self.add_window_after_selection(layout, window),
             WindowChange::Remove(window) | WindowChange::RemoveAndRebalance(window) => {
-                let layouts = self.tiles.layouts_for_window(window);
-                self.tiles.remove_window(window);
-                for layout in layouts {
-                    self.distribute_regions(layout);
+                for info in self.tiles.remove_window(window) {
+                    self.distribute_regions(info.layout);
                 }
             }
             WindowChange::CloseApp(pid) => {
@@ -501,10 +535,13 @@ impl LayoutSystem for MasterStackLayoutSystem {
                 }
             }
             WindowChange::Reconcile(layout, pid, desired) => {
-                for wid in self.tiles.reconcile_windows(layout, pid, desired) {
+                let additions = self.tiles.reconcile_windows(layout, pid, desired);
+                if additions.is_empty() {
+                    self.distribute_regions(layout);
+                }
+                for wid in additions {
                     self.add_window_after_selection(layout, wid);
                 }
-                self.distribute_regions(layout);
             }
             WindowChange::Replace(from, to) => self.tiles.replace_window(from, to),
             WindowChange::Resize {
@@ -561,7 +598,7 @@ impl LayoutSystem for MasterStackLayoutSystem {
                             to,
                             target_master,
                             target_stack,
-                            self.windows_in_container(target_master).count(),
+                            self.count_windows(target_master),
                         ),
                         None,
                     )
@@ -630,7 +667,7 @@ impl MasterStackLayoutSystem {
             return;
         }
         let (_root, master, stack) = self.region_roots(layout);
-        let count = self.windows_in_container(master).count();
+        let count = self.count_windows(master);
         let target = self.target_container_for_new_window(layout, master, stack, count);
         let node = self.insert_window_in_container(layout, target, wid);
         self.tiles.select(node);
@@ -821,6 +858,43 @@ mod tests {
     }
 
     #[test]
+    fn master_count_moves_a_complete_nested_group_without_flattening_it() {
+        use crate::layout_engine::WindowDropAction;
+        let mut system = MasterStackLayoutSystem::default();
+        let layout = system.create_layout();
+        for window in [w(1), w(2), w(3), w(4)] {
+            system.update(WindowChange::Add(layout, window, None));
+        }
+        for (source, action) in [
+            (w(3), WindowDropAction::Stack),
+            (w(4), WindowDropAction::Insert(Direction::Right)),
+        ] {
+            assert!(
+                system.edit(layout, LayoutEdit::Drop { source, target: w(2), action }).changed()
+            );
+        }
+        system.focus(layout, Focus::Select(w(2))).handled;
+        let before = system.container_tree(layout);
+        let group = &before.children[1].children[0];
+        assert!(group.children.iter().any(|child| child.children.len() == 2));
+
+        system.adjust_master_count(layout, 3);
+
+        let after = system.container_tree(layout);
+        assert_eq!(after.children[0].node_id, before.children[0].node_id);
+        assert_eq!(after.children[1].node_id, before.children[1].node_id);
+        assert!(after.children[1].children.is_empty());
+        let moved = after.children[0]
+            .children
+            .iter()
+            .find(|child| child.node_id == group.node_id)
+            .expect("the complete group moved into the master region");
+        assert_eq!(moved.node_id, group.node_id);
+        assert_eq!(moved.children, group.children);
+        assert_eq!(system.selected_window(layout), Some(w(2)));
+    }
+
+    #[test]
     fn transferring_a_region_preserves_regions_and_updates_membership_indexes() {
         let mut system = MasterStackLayoutSystem::default();
         let from = system.create_layout();
@@ -828,6 +902,11 @@ mod tests {
         system.add_window_after_selection(from, w(1));
         system.add_window_after_selection(from, w(2));
         let before = system.container_tree(from);
+        let clone = system.clone_layout(from);
+        assert!(!system.edit(from, LayoutEdit::Transfer(clone)).changed());
+        assert_eq!(system.container_tree(from), before);
+        assert_eq!(system.selected_window(clone), Some(w(2)));
+        system.remove_layout(clone);
         assert!(system.focus(from, Focus::Ascend).handled);
         system.edit(from, LayoutEdit::Transfer(to)).discard();
         assert!(system.contains_window(to, w(2)));

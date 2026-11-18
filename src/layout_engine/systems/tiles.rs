@@ -305,7 +305,8 @@ pub(super) fn stack_layout_result(
 
 pub(super) fn remove_and_rebalance(tiles: &mut GroupLayouts, window: WindowId) {
     tiles.inactive.remove(&window);
-    for node in tiles.tree.window.take_nodes_for(window) {
+    for info in tiles.tree.window.take_window(window) {
+        let node = info.node;
         let parent = node.parent(tiles.map());
         tiles.tree.remove(node);
         if let Some(parent) = parent.filter(|&node| tiles.map().contains(node)) {

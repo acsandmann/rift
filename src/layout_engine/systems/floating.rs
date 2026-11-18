@@ -365,15 +365,13 @@ impl FloatingLayoutSystem {
     }
 
     pub fn store_frame(&mut self, wid: WindowId, frame: CGRect) {
-        let layouts = self.groups.layouts_for_window(wid);
-        if !layouts.iter().any(|layout| self.groups.window_is_visible(*layout, wid)) {
+        let occurrences = self.groups.tree.window.occurrences(wid);
+        if !occurrences.iter().any(|info| self.groups.node_is_visible(info.node)) {
             return;
         }
         self.geometry.entry(wid).or_default().frame = Some(frame);
-        for layout in layouts {
-            let Some(node) = self.groups.window_node(layout, wid) else {
-                continue;
-            };
+        for info in occurrences {
+            let node = info.node;
             // The outermost stack contains all members that share this frame.
             let stack = node
                 .ancestors(self.groups.map())

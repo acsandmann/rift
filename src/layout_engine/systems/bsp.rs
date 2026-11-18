@@ -387,7 +387,10 @@ impl BspLayoutSystem {
     }
 
     fn participating_window(&self, node: NodeId) -> Option<WindowId> {
-        let members = self.members(node)?;
+        self.participating_member(self.members(node)?)
+    }
+
+    fn participating_member(&self, members: &LeafMembers) -> Option<WindowId> {
         members
             .active()
             .filter(|w| self.window_participates(*w))
@@ -524,10 +527,17 @@ impl BspLayoutSystem {
     }
 
     fn node_for_window_in_layout(&self, layout: LayoutId, wid: WindowId) -> Option<NodeId> {
-        let root = self.layouts.get(layout)?.root;
-        self.preorder(root).find(|&node| {
-            self.members(node).is_some_and(|members| members.windows().contains(&wid))
-        })
+        fn find(arena: &SlotMap<NodeId, Node>, node: NodeId, window: WindowId) -> Option<NodeId> {
+            match &arena[node].kind {
+                NodeKind::Split { children: [first, second], .. } => {
+                    find(arena, *first, window).or_else(|| find(arena, *second, window))
+                }
+                NodeKind::Leaf { members, .. } => {
+                    members.windows().contains(&window).then_some(node)
+                }
+            }
+        }
+        find(&self.nodes, self.layouts.get(layout)?.root, wid)
     }
 
     fn make_leaf(&mut self, window: Option<WindowId>) -> NodeId {
@@ -715,7 +725,7 @@ impl BspLayoutSystem {
         for node in self.postorder(root) {
             let axes = match self.kind(node) {
                 Some(NodeKind::Leaf { members, .. }) => {
-                    let active = self.participating_window(node);
+                    let active = self.participating_member(members);
                     if active.is_none()
                         && !(self.inactive.is_empty() && matches!(members, LeafMembers::Empty))
                     {
@@ -730,16 +740,15 @@ impl BspLayoutSystem {
                         })
                     })
                 }
-                Some(NodeKind::Split { orientation, .. }) => {
-                    let children =
-                        || self.child_iter(node).filter_map(|child| prepared.get(&child));
-                    if children().next().is_none() {
+                Some(NodeKind::Split { orientation, children, .. }) => {
+                    let children = children.map(|child| prepared.get(&child));
+                    if children == [None; 2] {
                         continue;
                     }
                     let kind = LayoutKind::from(*orientation);
                     [false, true].map(|horizontal| {
                         let mut summary = container_axis_constraints(
-                            children().map(|axes| axes[horizontal as usize]),
+                            children.into_iter().flatten().map(|axes| axes[horizontal as usize]),
                             kind,
                             horizontal,
                             if horizontal {
@@ -781,27 +790,25 @@ struct BspProjection<'a> {
 
 impl BspProjection<'_> {
     fn apply(&self, node: NodeId, slot: CGRect, out: &mut Vec<(WindowId, CGRect)>) {
-        if !self.prepared.contains_key(&node) {
-            return;
-        }
+        let Some(axes) = self.prepared.get(&node) else { return };
         match &self.system.nodes[node].kind {
             NodeKind::Leaf {
+                members,
                 fullscreen,
                 fullscreen_within_gaps,
                 ..
             } => {
-                let Some(window) = self.system.participating_window(node) else {
+                let Some(window) = self.system.participating_member(members) else {
                     return;
                 };
                 let frame = if *fullscreen {
                     self.screen
                 } else if *fullscreen_within_gaps {
                     self.tiling
+                } else if self.constraints.contains_key(&window) {
+                    constrain_frame(slot, |horizontal| axes[horizontal as usize])
                 } else {
-                    self.constraints.get(&window).map_or(slot, |limits| {
-                        let limits = limits.normalized();
-                        constrain_frame(slot, |horizontal| bsp_leaf_constraints(limits, horizontal))
-                    })
+                    slot
                 };
                 out.push((window, frame));
             }
@@ -1539,14 +1546,11 @@ impl BspLayoutSystem {
         }
         if self.layouts.get(layout).is_some() {
             if self.window_insertion_point == WindowInsertionPoint::EndOfTree {
-                let root = self.layouts[layout].root;
-                if let Some(leaf) = self
-                    .preorder(root)
-                    .filter(|node| matches!(self.kind(*node), Some(NodeKind::Leaf { .. })))
-                    .last()
-                {
-                    self.select(leaf);
+                let mut leaf = self.layouts[layout].root;
+                while let Some([_, right]) = self.children(leaf) {
+                    leaf = right;
                 }
+                self.select(leaf);
                 self.insert_window_at_selection(layout, wid);
                 return;
             }
