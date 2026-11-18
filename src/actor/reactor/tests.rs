@@ -8890,7 +8890,7 @@ fn native_stack_focus_repairs_covered_edges_in_order_without_requesting_focus() 
         workspace: None,
         mode: LayoutMode::Stack,
     });
-    let mut windows = [1, 2, 3, 4].map(|pid| WindowId::new(pid, 1));
+    let mut windows = [1, 2, 3, 4, 5].map(|pid| WindowId::new(pid, 1));
     for window in windows {
         apps.make_app_and_settle(&mut reactor, window.pid, make_windows(1));
     }
@@ -8898,7 +8898,9 @@ fn native_stack_focus_repairs_covered_edges_in_order_without_requesting_focus() 
         let origin = reactor.state.windows.window(*window).unwrap().frame_monotonic.origin;
         (origin.x as i32, origin.y as i32)
     });
-    let [a, b, c, d] = windows;
+    let [a, b, minimized, c, d] = windows;
+    reactor.handle_event(Event::WindowMinimized(minimized));
+
     let (raise_tx, mut raise_rx) = actor::channel();
     reactor.communication_manager.raise_manager_tx = raise_tx;
     let mut observe = |order: [WindowId; 4]| {

@@ -71,6 +71,7 @@ pub use replay::{Record, replay};
 use rift_protocol::DirectionalDistance;
 use serde::{Deserialize, Serialize};
 use serde_with::serde_as;
+use stack_repair::PendingStackReorder;
 use tokio::sync::oneshot;
 use tracing::{debug, instrument, trace, warn};
 use transaction_manager::TransactionId;
@@ -434,7 +435,7 @@ pub struct Reactor {
     spaces_tx: Option<crate::actor::spaces::Sender>,
     topology_guard: crate::actor::spaces::TopologyGuard,
     main_window_tracker: MainWindowTracker,
-    pending_stack_raise: Option<WindowId>,
+    pending_stack_reorder: Option<PendingStackReorder>,
     pending_mouse_focus: Option<(WindowId, Instant)>,
     overview_focus: Option<(SpaceId, WindowId, Instant)>,
     mouse_inventory_hit: Option<WindowServerId>,
@@ -533,7 +534,7 @@ impl Reactor {
             last_screen_frames: HashMap::default(),
             space_activation_policy: SpaceActivationPolicy::new(),
             main_window_tracker: MainWindowTracker::default(),
-            pending_stack_raise: None,
+            pending_stack_reorder: None,
             pending_mouse_focus: None,
             overview_focus: None,
             mouse_inventory_hit: None,
@@ -1646,13 +1647,13 @@ impl Reactor {
                 }
                 let focus_changed = previous_native_focus != Some(window);
                 if focus_changed {
-                    self.pending_stack_raise = None;
+                    self.pending_stack_reorder = None;
                 }
 
-                if (focus_changed || self.pending_stack_raise.is_some())
+                if (focus_changed || self.pending_stack_reorder.is_some())
                     && self.is_space_active(reported_space)
                 {
-                    self.pending_stack_raise =
+                    self.pending_stack_reorder =
                         self.repair_stack_after_focus(reported_space, window);
                 }
 

@@ -3,12 +3,18 @@ use crate::actor::app::Request;
 use crate::common::config::LayoutMode;
 use crate::layout_engine::systems::LayoutSystem;
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum PendingStackReorder {
+    FocusedWindow,
+    BackgroundRaise(WindowId),
+}
+
 impl Reactor {
     pub(super) fn repair_stack_after_focus(
         &self,
         space: SpaceId,
         focused: WindowId,
-    ) -> Option<WindowId> {
+    ) -> Option<PendingStackReorder> {
         let workspaces = self.layout_manager.layout_engine.workspaces();
         let (workspace, layout) = workspaces.active_layout_for_space(space)?;
         let workspace = &workspaces[workspace];
@@ -19,8 +25,12 @@ impl Reactor {
         }
 
         let system = &workspace.layout_system;
-        let members = system.stack_members(layout, focused);
-        if members.len() < 3 || system.has_any_fullscreen_node(layout) {
+        let mut members = system.stack_members(layout, focused);
+        members.retain(|&window| system.window_participates(window));
+        if members.len() < 3
+            || !members.contains(&focused)
+            || system.has_any_fullscreen_node(layout)
+        {
             return None;
         }
 
@@ -36,13 +46,14 @@ impl Reactor {
 
         // The key-window notification can precede the corresponding reorder.
         if order.first() != Some(&focused) {
-            return Some(focused);
+            return Some(PendingStackReorder::FocusedWindow);
         }
 
         let window = background_raises(&members, focused, &order).into_iter().next()?;
+        let pending = PendingStackReorder::BackgroundRaise(window);
         // AXRaise can return before WindowServer changes the order. Each
         // reorder wakes the focus resolver; advance only from the observed order.
-        if self.pending_stack_raise != Some(window) {
+        if self.pending_stack_reorder != Some(pending) {
             self.app_manager
                 .apps
                 .get(&window.pid)?
@@ -51,7 +62,7 @@ impl Reactor {
                 .ok()?;
         }
 
-        Some(window)
+        Some(pending)
     }
 }
 
