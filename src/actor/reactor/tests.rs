@@ -10044,6 +10044,57 @@ fn single_display_remap_replaces_an_already_initialized_catalog() {
 }
 
 #[test]
+fn closing_an_unvisited_native_desktop_preserves_the_current_workspace_catalog() {
+    let settings = crate::common::config::VirtualWorkspaceSettings {
+        mode: crate::common::config::WorkspaceMode::Global,
+        default_workspace_count: 4,
+        workspace_names: (1..=4).map(|index| index.to_string()).collect(),
+        ..Default::default()
+    };
+    let mut reactor = test_reactor_with_workspace_settings(&settings);
+    let frame = CGRect::new(CGPoint::ZERO, CGSize::new(1000., 800.));
+    let (current, other) = (SpaceId::new(801), SpaceId::new(802));
+    let (window, wsid) = (WindowId::new(1, 1), WindowServerId::new(101));
+    let snapshot = |native_spaces, window_space, removed| {
+        space_state_event_with(vec![frame], vec![Some(current)], |state| {
+            state.display_space_ids.insert("test-display-0".into(), native_spaces);
+            state.membership_complete = true;
+            state.should_force_refresh_layout = removed;
+            if removed {
+                state.destroyed_spaces.insert(other);
+            }
+            if let Some(space) = window_space {
+                state.active_window_spaces.insert(wsid, space);
+            }
+        })
+    };
+    reactor.handle_event(snapshot(vec![current, other], Some(current), false));
+    reactor.add_test_app(window.pid);
+    reactor.add_test_window(window, wsid, Some(current), frame);
+    let original = reactor.query_workspaces(None);
+    assert_eq!(original.len(), 4);
+    assert!(reactor.assign_test_window_to_workspace(current, window, original[0].workspace_id));
+    reactor.mark_test_window_visible_in_space(wsid, current);
+
+    // Moving a window to the other desktop can initialize it without ever showing it.
+    window_server::set_window_spaces_override(wsid, Some(vec![other.get()]));
+    reactor.handle_event(snapshot(vec![current, other], None, false));
+    window_server::set_window_spaces_override(wsid, None);
+    assert_eq!(reactor.assigned_space_for_window_id(window), Some(other));
+
+    // macOS returns the window to the surviving desktop when the other one closes.
+    window_server::set_window_spaces_override(wsid, Some(vec![current.get()]));
+    reactor.handle_event(snapshot(vec![current], Some(current), true));
+    window_server::set_window_spaces_override(wsid, None);
+    let queried = reactor.query_workspaces(None);
+    assert_eq!(
+        queried.iter().map(|workspace| workspace.workspace_id).collect::<Vec<_>>(),
+        original.iter().map(|workspace| workspace.workspace_id).collect::<Vec<_>>(),
+    );
+    assert_eq!(reactor.assigned_space_for_window_id(window), Some(current));
+}
+
+#[test]
 fn shared_destroyed_desktop_evacuates_even_when_its_display_stays_connected() {
     let (a, b, replacement) = (SpaceId::new(1), SpaceId::new(2), SpaceId::new(3));
     let (mut apps, mut reactor, ids, wsids) = shared_two_display_fixture();
@@ -10768,6 +10819,7 @@ fn shared_move_workspace_to_display_moves_a_rule_bound_workspace_and_suspends_th
             &reactor.space_state.screens.clone(),
             false,
             None,
+            &[],
             &[],
         );
         reactor.apply_event_outcome(outcome);
