@@ -122,10 +122,10 @@ impl Tree {
 
     fn delete_subtree(&mut self, root: NodeId) {
         let Some(node) = self.map.map.remove(root) else { return };
-        if let Some(window) = node.window {
+        if let Some(window) = node.window() {
             self.window.remove_node(window, root);
         }
-        let mut child = node.first_child;
+        let mut child = node.children().and_then(|children| children.first);
         while let Some(node) = child {
             child = node.next_sibling(&self.map);
             self.delete_subtree(node);
@@ -175,10 +175,10 @@ impl NodeMap {
 
     pub fn reserve(&mut self, additional: usize) { self.map.reserve(additional) }
 
-    pub(crate) fn window(&self, node: NodeId) -> Option<WindowId> { self.map.get(node)?.window }
+    pub(crate) fn window(&self, node: NodeId) -> Option<WindowId> { self.map.get(node)?.window() }
 
     pub(crate) fn selection_info(&self, node: NodeId) -> Option<SelectionInfo> {
-        self.map.get(node)?.selection
+        self.map.get(node)?.children()?.selection
     }
 
     pub fn contains(&self, id: NodeId) -> bool { self.map.contains_key(id) }
@@ -207,28 +207,36 @@ impl NodeId {
 
     #[track_caller]
     pub fn children(self, map: &NodeMap) -> impl Iterator<Item = NodeId> + '_ {
-        ChildIterator {
-            cur: map.map.get(self).and_then(|n| n.first_child),
-            map,
-        }
+        std::iter::successors(self.first_child(map), |node| node.next_sibling(map))
     }
 
     #[track_caller]
     pub fn children_rev(self, map: &NodeMap) -> impl Iterator<Item = NodeId> + '_ {
-        ChildRevIterator {
-            cur: map.map.get(self).and_then(|n| n.last_child),
-            map,
-        }
+        std::iter::successors(self.last_child(map), |node| node.prev_sibling(map))
     }
 
     #[track_caller]
     pub fn traverse_postorder(self, map: &NodeMap) -> impl Iterator<Item = NodeId> + '_ {
-        PostorderTraversal::new(map, self)
+        fn leftmost(mut node: NodeId, map: &NodeMap) -> NodeId {
+            while let Some(child) = node.first_child(map) {
+                node = child;
+            }
+            node
+        }
+        std::iter::successors(Some(leftmost(self, map)), move |&node| {
+            if node == self {
+                None
+            } else if let Some(next) = node.next_sibling(map) {
+                Some(leftmost(next, map))
+            } else {
+                node.parent(map)
+            }
+        })
     }
 
     #[track_caller]
     pub fn traverse_preorder(self, map: &NodeMap) -> impl Iterator<Item = NodeId> + '_ {
-        PreorderTraversal::new(map, self)
+        std::iter::successors(Some(self), move |node| node.next_in_subtree(self, map))
     }
 
     pub fn next_in_subtree(self, root: NodeId, map: &NodeMap) -> Option<NodeId> {
@@ -322,18 +330,14 @@ impl NodeId {
 
     #[track_caller]
     pub fn first_child(self, map: &NodeMap) -> Option<NodeId> {
-        map.map.get(self).and_then(|n| n.first_child)
+        map.map.get(self)?.children()?.first
     }
 
     #[track_caller]
-    pub fn last_child(self, map: &NodeMap) -> Option<NodeId> {
-        map.map.get(self).and_then(|n| n.last_child)
-    }
+    pub fn last_child(self, map: &NodeMap) -> Option<NodeId> { map.map.get(self)?.children()?.last }
 
     #[track_caller]
-    pub fn is_empty(self, map: &NodeMap) -> bool {
-        map.map.get(self).map(|n| n.first_child.is_none()).unwrap_or(true)
-    }
+    pub fn is_empty(self, map: &NodeMap) -> bool { self.first_child(map).is_none() }
 }
 
 #[derive(Default, Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
@@ -349,19 +353,114 @@ pub(crate) struct LayoutInfo {
     pub(crate) is_fullscreen_within_gaps: bool,
 }
 
-#[derive(Clone, Default, PartialEq, Debug, Serialize, Deserialize)]
+#[derive(Clone, Copy, Default, PartialEq, Debug, Serialize, Deserialize)]
+#[serde(from = "StoredNode", into = "StoredNode")]
 pub struct Node {
+    parent: Option<NodeId>,
+    prev_sibling: Option<NodeId>,
+    next_sibling: Option<NodeId>,
+    pub(crate) layout: LayoutInfo,
+    contents: Contents,
+}
+
+#[derive(Clone, Copy, PartialEq, Debug)]
+enum Contents {
+    Container(Children),
+    Window(WindowId),
+}
+
+impl Default for Contents {
+    fn default() -> Self { Self::Container(Children::default()) }
+}
+
+#[derive(Clone, Copy, Default, PartialEq, Debug)]
+struct Children {
+    first: Option<NodeId>,
+    last: Option<NodeId>,
+    selection: Option<SelectionInfo>,
+}
+
+// Keep the saved SlotMap entry shape, including its original links and keys.
+#[derive(Serialize, Deserialize)]
+struct StoredNode {
     parent: Option<NodeId>,
     prev_sibling: Option<NodeId>,
     next_sibling: Option<NodeId>,
     first_child: Option<NodeId>,
     last_child: Option<NodeId>,
     #[serde(default)]
-    pub(crate) layout: LayoutInfo,
+    layout: LayoutInfo,
     #[serde(default)]
-    pub(crate) selection: Option<SelectionInfo>,
+    selection: Option<SelectionInfo>,
     #[serde(default)]
-    pub(crate) window: Option<WindowId>,
+    window: Option<WindowId>,
+}
+
+impl From<StoredNode> for Node {
+    fn from(stored: StoredNode) -> Self {
+        Self {
+            parent: stored.parent,
+            prev_sibling: stored.prev_sibling,
+            next_sibling: stored.next_sibling,
+            layout: stored.layout,
+            contents: stored.window.map_or(
+                Contents::Container(Children {
+                    first: stored.first_child,
+                    last: stored.last_child,
+                    selection: stored.selection,
+                }),
+                Contents::Window,
+            ),
+        }
+    }
+}
+
+impl From<Node> for StoredNode {
+    fn from(node: Node) -> Self {
+        let children = node.children().copied().unwrap_or_default();
+        Self {
+            parent: node.parent,
+            prev_sibling: node.prev_sibling,
+            next_sibling: node.next_sibling,
+            first_child: children.first,
+            last_child: children.last,
+            layout: node.layout,
+            selection: children.selection,
+            window: node.window(),
+        }
+    }
+}
+
+impl Node {
+    fn children(&self) -> Option<&Children> {
+        match &self.contents {
+            Contents::Container(children) => Some(children),
+            Contents::Window(_) => None,
+        }
+    }
+
+    fn children_mut(&mut self) -> &mut Children {
+        match &mut self.contents {
+            Contents::Container(children) => children,
+            Contents::Window(_) => unreachable!("window cannot own children"),
+        }
+    }
+
+    fn window(&self) -> Option<WindowId> {
+        match self.contents {
+            Contents::Window(window) => Some(window),
+            Contents::Container(_) => None,
+        }
+    }
+
+    pub(crate) fn set_window(&mut self, window: WindowId) {
+        assert!(self.children().is_none_or(|children| children.first.is_none()));
+        self.contents = Contents::Window(window);
+    }
+
+    pub(crate) fn selection_mut(&mut self) -> &mut Option<SelectionInfo> {
+        &mut self.children_mut().selection
+    }
 }
 
 impl NodeMap {
@@ -380,143 +479,31 @@ impl NodeMap {
         if let Some(prev) = prev {
             self[prev].next_sibling = Some(id);
         } else {
-            self[parent].first_child = Some(id);
+            self[parent].children_mut().first = Some(id);
         }
         if let Some(next) = next {
             self[next].prev_sibling = Some(id);
         } else {
-            self[parent].last_child = Some(id);
+            self[parent].children_mut().last = Some(id);
         }
     }
 
     #[track_caller]
     pub(crate) fn unlink(&mut self, id: NodeId) {
-        if let Some((prev_sibling, next_sibling, parent)) =
-            self.map.get(id).map(|n| (n.prev_sibling, n.next_sibling, n.parent))
-        {
-            if let Some(prev) = prev_sibling {
-                if let Some(prev_node) = self.map.get_mut(prev) {
-                    prev_node.next_sibling = next_sibling;
-                }
-            }
-            if let Some(next) = next_sibling {
-                if let Some(next_node) = self.map.get_mut(next) {
-                    next_node.prev_sibling = prev_sibling;
-                }
-            }
-            if let Some(parent) = parent {
-                if let Some(parent_node) = self.map.get_mut(parent) {
-                    if parent_node.first_child == Some(id) {
-                        parent_node.first_child = next_sibling;
-                    }
-                    if parent_node.last_child == Some(id) {
-                        parent_node.last_child = prev_sibling;
-                    }
-                }
-            }
-
-            if let Some(node) = self.map.get_mut(id) {
-                node.prev_sibling = None;
-                node.next_sibling = None;
-                node.parent = None;
-            }
+        let Some(node) = self.map.get_mut(id) else { return };
+        let prev = node.prev_sibling.take();
+        let next = node.next_sibling.take();
+        let Some(parent) = node.parent.take() else { return };
+        if let Some(prev) = prev {
+            self[prev].next_sibling = next;
+        } else {
+            self[parent].children_mut().first = next;
         }
-    }
-}
-
-struct ChildIterator<'a> {
-    cur: Option<NodeId>,
-    map: &'a NodeMap,
-}
-
-impl<'a> Iterator for ChildIterator<'a> {
-    type Item = NodeId;
-
-    fn next(&mut self) -> Option<Self::Item> {
-        let id = self.cur?;
-        self.cur = self.map.map.get(id).and_then(|n| n.next_sibling);
-        Some(id)
-    }
-}
-
-struct ChildRevIterator<'a> {
-    cur: Option<NodeId>,
-    map: &'a NodeMap,
-}
-
-impl<'a> Iterator for ChildRevIterator<'a> {
-    type Item = NodeId;
-
-    fn next(&mut self) -> Option<Self::Item> {
-        let id = self.cur?;
-        self.cur = self.map.map.get(id).and_then(|n| n.prev_sibling);
-        Some(id)
-    }
-}
-
-struct PostorderTraversal<'a> {
-    cur: Option<NodeId>,
-    top: NodeId,
-    map: &'a NodeMap,
-}
-
-impl<'a> PostorderTraversal<'a> {
-    fn new(map: &'a NodeMap, root: NodeId) -> Self {
-        Self {
-            top: root,
-            cur: Some(Self::descend_left(root, map)),
-            map,
+        if let Some(next) = next {
+            self[next].prev_sibling = prev;
+        } else {
+            self[parent].children_mut().last = prev;
         }
-    }
-
-    fn descend_left(mut node: NodeId, map: &'a NodeMap) -> NodeId {
-        while let Some(child) = node.first_child(map) {
-            node = child;
-        }
-        node
-    }
-}
-
-impl<'a> Iterator for PostorderTraversal<'a> {
-    type Item = NodeId;
-
-    fn next(&mut self) -> Option<Self::Item> {
-        let node = self.cur?;
-        self.cur = None;
-        if node != self.top {
-            if let Some(next) = node.next_sibling(self.map) {
-                self.cur = Some(Self::descend_left(next, self.map));
-            } else {
-                self.cur = node.parent(self.map);
-            }
-        }
-        Some(node)
-    }
-}
-
-struct PreorderTraversal<'a> {
-    top: NodeId,
-    cur: Option<NodeId>,
-    map: &'a NodeMap,
-}
-
-impl<'a> PreorderTraversal<'a> {
-    fn new(map: &'a NodeMap, root: NodeId) -> Self {
-        Self {
-            top: root,
-            cur: Some(root),
-            map,
-        }
-    }
-}
-
-impl<'a> Iterator for PreorderTraversal<'a> {
-    type Item = NodeId;
-
-    fn next(&mut self) -> Option<Self::Item> {
-        let node = self.cur?;
-        self.cur = node.next_in_subtree(self.top, self.map);
-        Some(node)
     }
 }
 
@@ -555,11 +542,8 @@ impl WindowIndex {
         node: NodeId,
         wid: WindowId,
     ) {
-        let existing = map[node].window.replace(wid);
-        assert!(
-            existing.is_none(),
-            "Attempted to overwrite window for node {node:?} from {existing:?} to {wid:?}"
-        );
+        assert!(map.window(node).is_none(), "window already assigned to {node:?}");
+        map[node].set_window(wid);
         self.window_nodes
             .entry(wid)
             .or_default()
@@ -588,7 +572,7 @@ impl WindowIndex {
             return;
         }
         for info in &nodes.0 {
-            map[info.node].window = Some(to);
+            map[info.node].set_window(to);
         }
         self.window_nodes.entry(to).or_default().0.extend(nodes.0);
     }

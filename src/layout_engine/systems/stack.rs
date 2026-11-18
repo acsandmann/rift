@@ -587,10 +587,7 @@ impl LayoutSystem for StackLayoutSystem {
                 s.members.insert(target, member);
                 true
             }),
-            LayoutEdit::Transfer(to) => {
-                self.move_selection_to_layout_after_selection(layout, to);
-                EditResult::Changed
-            }
+            LayoutEdit::Transfer(to) => EditResult::from(self.transfer_selection(layout, to)),
             LayoutEdit::Fullscreen { within_gaps } => {
                 EditResult::Raise(self.toggle_fullscreen(layout, within_gaps))
             }
@@ -644,6 +641,9 @@ impl StackLayoutSystem {
     }
 
     fn add_window_after_selection(&mut self, layout: LayoutId, window: WindowId) {
+        if self.contains_window(layout, window) {
+            return;
+        }
         let id = self.node_id();
         self.layouts[layout].insert(
             Member {
@@ -740,16 +740,21 @@ impl StackLayoutSystem {
         true
     }
 
-    fn move_selection_to_layout_after_selection(&mut self, from: LayoutId, to: LayoutId) {
-        if from == to || self.layouts[from].root_selected {
-            return;
-        }
-        let Some(i) = self.layouts[from].active_index(&self.inactive) else {
-            return;
+    fn transfer_selection(&mut self, from: LayoutId, to: LayoutId) -> bool {
+        let Some(source) = self.layouts.get(from).filter(|s| !s.root_selected) else {
+            return false;
         };
-        let m = self.layouts[from].members[i].clone();
-        self.layouts[from].remove(m.window);
-        self.layouts[to].insert(m, true);
+        let Some(index) = source.active_index(&self.inactive) else {
+            return false;
+        };
+        let member = &source.members[index];
+        if !self.contains_layout(to) || self.contains_window(to, member.window) {
+            return false;
+        }
+        let member = member.clone();
+        self.layouts[from].remove(member.window);
+        self.layouts[to].insert(member, true);
+        true
     }
 }
 
@@ -800,6 +805,21 @@ mod tests {
     use crate::layout_engine::systems::LayoutEdit;
 
     fn w(idx: u32) -> WindowId { WindowId::new(1, idx) }
+
+    #[test]
+    fn transferring_to_a_clone_leaves_both_stacks_intact() {
+        let mut system = StackLayoutSystem::default();
+        let source = system.create_layout();
+        system.update(WindowChange::Add(source, w(1), None));
+        let clone = system.clone_layout(source);
+
+        assert!(matches!(
+            system.edit_layout(source, LayoutEdit::Transfer(clone)),
+            EditResult::Unchanged
+        ));
+        assert_eq!(system.windows(source, WindowQuery::All), vec![w(1)]);
+        assert_eq!(system.windows(clone, WindowQuery::All), vec![w(1)]);
+    }
 
     #[test]
     fn legacy_stack_restoration_preserves_identity_selection_and_fullscreen() {

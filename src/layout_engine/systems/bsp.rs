@@ -379,7 +379,7 @@ impl BspLayoutSystem {
         Some(members)
     }
 
-    fn stack(&self, node: NodeId) -> Option<&Vec<WindowId>> {
+    fn stack(&self, node: NodeId) -> Option<&[WindowId]> {
         match self.members(node)? {
             LeafMembers::Stack { windows, .. } => Some(windows),
             _ => None,
@@ -679,15 +679,20 @@ impl BspLayoutSystem {
         let Some(node) = self.node_for_window_in_layout(layout, wid) else {
             return false;
         };
+        self.remove_member(layout, node, wid);
+        true
+    }
+
+    fn remove_member(&mut self, layout: LayoutId, node: NodeId, wid: WindowId) {
         let Some(NodeKind::Leaf { members, .. }) = self.kind_mut(node) else {
-            return false;
+            unreachable!("a window must belong to a BSP leaf");
         };
         if let LeafMembers::Stack { windows, active } = members {
             windows.retain(|window| *window != wid);
             if !windows.is_empty() {
                 *active = windows.len() - 1;
                 self.select(node);
-                return true;
+                return;
             }
         }
         *members = LeafMembers::Empty;
@@ -698,7 +703,6 @@ impl BspLayoutSystem {
         let selection = self.current_selection(self.layouts[layout].root);
         let leaf = self.descend_to_leaf(selection);
         self.select(leaf);
-        true
     }
 
     fn prepare_geometry(
@@ -1061,7 +1065,7 @@ impl LayoutSystem for BspLayoutSystem {
                         ..
                     })
                 )
-                && !self.stack(state.root).is_some()
+                && self.stack(state.root).is_none()
             {
                 let (width, height) = if frame.size.width > frame.size.height * ratio {
                     (frame.size.height * ratio, frame.size.height)
@@ -1110,8 +1114,8 @@ impl LayoutSystem for BspLayoutSystem {
             WindowQuery::Stack(window) => self
                 .node_for_window_in_layout(layout, window)
                 .and_then(|node| self.stack(node))
-                .cloned()
-                .unwrap_or_default(),
+                .unwrap_or_default()
+                .to_vec(),
             WindowQuery::App(pid) => self
                 .layouts
                 .get(layout)
@@ -1227,17 +1231,19 @@ impl LayoutSystem for BspLayoutSystem {
                     self.window_participates(w)
                 });
                 for wid in delta.removals {
-                    if let Some(node) = self.node_for_window_in_layout(layout, wid)
-                        && let Some(NodeKind::Leaf {
-                            fullscreen,
-                            fullscreen_within_gaps,
-                            ..
-                        }) = self.kind(node)
+                    let Some(node) = self.node_for_window_in_layout(layout, wid) else {
+                        continue;
+                    };
+                    if let Some(NodeKind::Leaf {
+                        fullscreen,
+                        fullscreen_within_gaps,
+                        ..
+                    }) = self.kind(node)
                         && (*fullscreen || *fullscreen_within_gaps)
                     {
                         continue;
                     }
-                    self.remove_window_internal(layout, wid);
+                    self.remove_member(layout, node, wid);
                 }
                 for wid in delta.additions {
                     self.add_window_after_selection(layout, wid);

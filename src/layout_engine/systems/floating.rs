@@ -107,8 +107,7 @@ impl FloatingLayoutSystem {
                 let selected =
                     self.groups.local_selection(node).or_else(|| children.first().copied())?;
                 let index = children.iter().position(|child| *child == selected)?;
-                let wid = self.groups.visible_windows_in_subtree(selected).first().copied()?;
-                let window = self.groups.window_node(layout, wid)?;
+                let (window, wid) = self.groups.first_visible_window(selected)?;
                 if self.groups.fullscreen_frame(window, screen, gaps).is_some() {
                     return None;
                 }
@@ -186,7 +185,7 @@ impl FloatingLayoutSystem {
         let origin = source.mid();
         let horizontal = matches!(direction, Direction::Left | Direction::Right);
         let mut best: Option<(WindowId, bool, f64)> = None;
-        self.groups.visit_visible_windows(self.groups.root(layout), &mut |node, wid| {
+        let _ = self.groups.visit_visible_windows(self.groups.root(layout), &mut |node, wid| {
             if wid != focused
                 && !exclude.is_some_and(|parent| {
                     node.ancestors(self.groups.map()).any(|ancestor| ancestor == parent)
@@ -217,6 +216,7 @@ impl FloatingLayoutSystem {
                     }
                 }
             }
+            std::ops::ControlFlow::<()>::Continue(())
         });
         best.map(|(wid, _, _)| wid)
     }
@@ -726,7 +726,9 @@ impl FloatingLayoutSystem {
 }
 
 impl FloatingLayoutSystem {
-    pub(crate) fn draw_tree(&self, layout: LayoutId) -> String { self.groups.draw_tree(layout) }
+    pub(crate) fn draw_tree(&self, layout: LayoutId) -> String {
+        self.groups.draw_tree(layout, None)
+    }
 
     pub(crate) fn container_tree(&self, layout: LayoutId) -> rift_protocol::ContainerTreeNode {
         self.groups.container_tree(layout)

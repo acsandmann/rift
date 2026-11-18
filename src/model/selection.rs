@@ -51,7 +51,7 @@ impl NodeMap {
     pub(crate) fn select_locally(&mut self, node: NodeId) -> bool {
         let Some(parent) = node.parent(self) else { return false };
         self[parent]
-            .selection
+            .selection_mut()
             .replace(SelectionInfo {
                 selected_child: node,
                 stop_here: false,
@@ -60,12 +60,12 @@ impl NodeMap {
     }
 
     pub(crate) fn select(&mut self, selection: NodeId) {
-        if let Some(info) = self[selection].selection.as_mut() {
-            info.stop_here = true;
+        if self.selection_info(selection).is_some() {
+            self[selection].selection_mut().as_mut().unwrap().stop_here = true;
         }
         let mut node = selection;
         while let Some(parent) = node.parent(self) {
-            self[parent].selection = Some(SelectionInfo {
+            *self[parent].selection_mut() = Some(SelectionInfo {
                 selected_child: node,
                 stop_here: false,
             });
@@ -80,8 +80,10 @@ impl NodeMap {
         old_child: NodeId,
         new_child: NodeId,
     ) {
-        if let Some(info) = self[source].selection.filter(|info| info.selected_child == old_child) {
-            self[destination].selection = Some(SelectionInfo {
+        if let Some(info) =
+            self.selection_info(source).filter(|info| info.selected_child == old_child)
+        {
+            *self[destination].selection_mut() = Some(SelectionInfo {
                 selected_child: new_child,
                 ..info
             });
@@ -90,9 +92,9 @@ impl NodeMap {
 
     pub(crate) fn detach_selection(&mut self, node: NodeId) {
         let parent = node.parent(self).unwrap();
-        if let Some(info) = self[parent].selection.filter(|info| info.selected_child == node) {
+        if let Some(info) = self.selection_info(parent).filter(|info| info.selected_child == node) {
             let replacement = node.next_sibling(self).or_else(|| node.prev_sibling(self));
-            self[parent].selection =
+            *self[parent].selection_mut() =
                 replacement.map(|selected_child| SelectionInfo { selected_child, ..info });
         }
     }

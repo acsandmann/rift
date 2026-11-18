@@ -727,7 +727,9 @@ impl TraditionalLayoutSystem {
 }
 
 impl TraditionalLayoutSystem {
-    pub(crate) fn draw_tree(&self, layout: LayoutId) -> String { self.tiles.draw_tree(layout) }
+    pub(crate) fn draw_tree(&self, layout: LayoutId) -> String {
+        self.tiles.draw_tree(layout, None)
+    }
 
     pub(crate) fn container_tree(&self, layout: LayoutId) -> rift_protocol::ContainerTreeNode {
         self.tiles.container_tree(layout)

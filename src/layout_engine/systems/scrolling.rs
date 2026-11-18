@@ -1981,8 +1981,7 @@ impl LayoutSystem for ScrollingLayoutSystem {
                 has_display_neighbor: _,
             } => EditResult::from(self.move_selection(layout, direction)),
             LayoutEdit::Transfer(to) => {
-                self.move_selection_to_layout_after_selection(layout, to);
-                EditResult::Changed
+                EditResult::from(self.move_selection_to_layout_after_selection(layout, to))
             }
             LayoutEdit::Fullscreen { within_gaps } => {
                 EditResult::Raise(self.toggle_fullscreen(layout, within_gaps))
@@ -2276,13 +2275,13 @@ impl ScrollingLayoutSystem {
         moved
     }
 
-    fn move_selection_to_layout_after_selection(&mut self, from: LayoutId, to: LayoutId) {
-        if from == to || !self.layouts.contains_key(to) {
-            return;
-        }
+    fn move_selection_to_layout_after_selection(&mut self, from: LayoutId, to: LayoutId) -> bool {
         let Some(wid) = self.selected_window(from) else {
-            return;
+            return false;
         };
+        if !self.contains_layout(to) || self.contains_window(to, wid) {
+            return false;
+        }
         let fullscreen = self.layouts[from].arrangement.fullscreen.remove(&wid);
         self.layouts[from].camera.transient_restore = None;
         let fullscreen_restore = self.layouts[from].camera.fullscreen_restore.clone();
@@ -2310,6 +2309,7 @@ impl ScrollingLayoutSystem {
                     });
         });
         self.layouts[to].reveal(&self.settings);
+        true
     }
 
     fn join_selection_with_direction(&mut self, layout: LayoutId, direction: Direction) {
@@ -2637,8 +2637,14 @@ pub(crate) mod tests {
             .x;
         assert_eq!(new_x, old_x);
 
+        assert!(matches!(
+            f.system.edit_layout(f.layout, LayoutEdit::Transfer(clone)),
+            EditResult::Unchanged
+        ));
+        assert_eq!(f.selected(), Some(wid(2)));
+
         let destination = f.system.create_layout();
-        f.system.move_selection_to_layout_after_selection(f.layout, destination);
+        assert!(f.system.move_selection_to_layout_after_selection(f.layout, destination));
         assert_eq!(f.system.selected_window(destination), Some(wid(2)));
         assert_eq!(f.selected(), Some(wid(1)));
         assert!(!f.system.contains_window(f.layout, wid(2)));

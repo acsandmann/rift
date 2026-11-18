@@ -1,3 +1,5 @@
+use std::ops::ControlFlow;
+
 use objc2_core_foundation::CGRect;
 use serde::{Deserialize, Serialize};
 use slotmap::Key;
@@ -107,10 +109,10 @@ pub(super) fn deserialize_tile_tree<'de, D: serde::Deserializer<'de>>(
         map[node].layout = layout;
     }
     for (node, selection) in data.selection.nodes {
-        map[node].selection = Some(selection);
+        *map[node].selection_mut() = Some(selection);
     }
     for (node, window) in data.window.windows {
-        map[node].window = Some(window);
+        map[node].set_window(window);
     }
     Ok(Tree {
         map,
@@ -720,13 +722,6 @@ impl TileLayouts {
         EditResult::Changed
     }
 
-    pub(super) fn draw_tree(&self, layout: LayoutId) -> String {
-        let tree = self.get_ascii_tree_with_labels(self.root(layout), None);
-        let mut out = String::new();
-        ascii_tree::write_tree(&mut out, &tree).unwrap();
-        out
-    }
-
     pub(super) fn container_tree(&self, layout: LayoutId) -> rift_protocol::ContainerTreeNode {
         self.container_tree_with_roles(layout, &HashMap::default())
     }
@@ -739,7 +734,7 @@ impl TileLayouts {
         )
     }
 
-    pub(super) fn get_ascii_tree_with_labels(
+    fn get_ascii_tree_with_labels(
         &self,
         node: NodeId,
         labels: Option<&HashMap<NodeId, &'static str>>,
@@ -822,16 +817,12 @@ impl TileLayouts {
         snapshot(self, self.root(layout), self.selection(layout), roles)
     }
 
-    pub(super) fn visible_windows_in_subtree(&self, node: NodeId) -> Vec<WindowId> {
-        self.visible_windows_under_internal(node)
-    }
-
-    pub(super) fn draw_tree_with_labels(
+    pub(super) fn draw_tree(
         &self,
         layout: LayoutId,
-        labels: &HashMap<NodeId, &'static str>,
+        labels: Option<&HashMap<NodeId, &'static str>>,
     ) -> String {
-        let tree = self.get_ascii_tree_with_labels(self.root(layout), Some(labels));
+        let tree = self.get_ascii_tree_with_labels(self.root(layout), labels);
         let mut out = String::new();
         ascii_tree::write_tree(&mut out, &tree).unwrap();
         out
@@ -932,40 +923,47 @@ impl TileLayouts {
 
     pub(super) fn visible_windows_under_internal(&self, node: NodeId) -> Vec<WindowId> {
         let mut windows = Vec::new();
-        self.visit_visible_windows(node, &mut |_, window| windows.push(window));
+        self.visit_visible_windows(node, &mut |_, window| {
+            windows.push(window);
+            ControlFlow::<()>::Continue(())
+        })
+        .continue_value();
         windows
     }
 
-    pub(super) fn visit_visible_windows(
+    pub(super) fn first_visible_window(&self, node: NodeId) -> Option<(NodeId, WindowId)> {
+        self.visit_visible_windows(node, &mut |node, window| ControlFlow::Break((node, window)))
+            .break_value()
+    }
+
+    pub(super) fn visit_visible_windows<B>(
         &self,
         node: NodeId,
-        visit: &mut impl FnMut(NodeId, WindowId),
-    ) -> bool {
+        visit: &mut impl FnMut(NodeId, WindowId) -> ControlFlow<B>,
+    ) -> ControlFlow<B, bool> {
         if let Some(window) = self.window_at(node) {
-            if !self.window_participates(window) {
-                return false;
+            let active = self.window_participates(window);
+            if active {
+                visit(node, window)?;
             }
-            visit(node, window);
-            return true;
+            return ControlFlow::Continue(active);
         }
-        let mut children = node.children(self.map());
-        if self.layout(node).is_group() {
-            let selected = self.tree.map.local_selection(node);
-            if self.inactive.is_empty() {
-                return selected
-                    .or_else(|| children.next())
-                    .is_some_and(|child| self.visit_visible_windows(child, visit));
+        let grouped = self.layout(node).is_group();
+        let selected = grouped.then(|| self.tree.map.local_selection(node)).flatten();
+        if let Some(selected) = selected {
+            let visited = self.visit_visible_windows(selected, visit)?;
+            if visited || self.inactive.is_empty() {
+                return ControlFlow::Continue(visited);
             }
-            return selected.is_some_and(|child| self.visit_visible_windows(child, visit))
-                || children.any(|child| {
-                    Some(child) != selected && self.visit_visible_windows(child, visit)
-                });
         }
         let mut visited = false;
-        for child in children {
-            visited |= self.visit_visible_windows(child, visit);
+        for child in node.children(self.map()).filter(|&child| Some(child) != selected) {
+            visited |= self.visit_visible_windows(child, visit)?;
+            if grouped && (visited || self.inactive.is_empty()) {
+                break;
+            }
         }
-        visited
+        ControlFlow::Continue(visited)
     }
 
     pub(super) fn move_over(&self, from: NodeId, direction: Direction) -> Option<NodeId> {
@@ -1404,6 +1402,9 @@ impl TileLayouts {
         let (Some(moving), Some(anchor)) = (tab(source), tab(target)) else {
             return false;
         };
+        if moving == anchor {
+            return false;
+        }
         let forward = stack.children(map).position(|c| c == moving)
             < stack.children(map).position(|c| c == anchor);
         let place = if forward {
@@ -1436,8 +1437,8 @@ impl TileLayouts {
         // Exchange the occupants of the slots without restructuring the tree.
         // Reparenting a leaf can collapse a single-child container mid-swap.
         let index = &mut self.tree.window;
-        self.tree.map[node_a].window = Some(b);
-        self.tree.map[node_b].window = Some(a);
+        self.tree.map[node_a].set_window(b);
+        self.tree.map[node_b].set_window(a);
         for (wid, from, to) in [(a, node_a, node_b), (b, node_b, node_a)] {
             let info = index
                 .window_nodes
