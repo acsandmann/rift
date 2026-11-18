@@ -3933,6 +3933,15 @@ impl Reactor {
                 outcome.arrange.space_scope = screen.space;
             }
         }
+        let display_count = self.space_state.screens.len();
+        // Preserve the shared catalog through remaps on either side of a display change.
+        // A remap can replace a destination catalog only if both topologies are local.
+        if display_count > 1 {
+            self.layout_manager
+                .layout_engine
+                .workspaces_mut()
+                .update_display_count(display_count);
+        }
         for (previous_space, space) in space_remaps {
             if let Some(frame) = self.last_screen_frames.remove(&previous_space) {
                 self.last_screen_frames.insert(space, frame);
@@ -3943,6 +3952,12 @@ impl Reactor {
                 previous_space,
                 space,
             );
+        }
+        if display_count == 1 {
+            self.layout_manager
+                .layout_engine
+                .workspaces_mut()
+                .update_display_count(display_count);
         }
         for screen in &self.space_state.screens {
             let (Some(space), Some(display_uuid)) = (screen.space, screen.display_uuid_opt())
@@ -3956,10 +3971,6 @@ impl Reactor {
         self.space_activation_policy
             .on_spaces_updated(activation_config, &self.space_state.screens);
         let previously_active = self.set_active_spaces_from_snapshot(&authoritative_spaces);
-        self.layout_manager
-            .layout_engine
-            .workspaces_mut()
-            .update_display_count(self.space_state.screens.len());
         let engine = &self.layout_manager.layout_engine;
         let mut refits = Vec::new();
         for screen in &self.space_state.screens {
@@ -4102,6 +4113,7 @@ impl Reactor {
         // even when its display stays connected and borrows another desktop.
         let placements: Vec<_> = {
             let engine = &self.layout_manager.layout_engine;
+            let single_display = previous_screens.len() == 1 && screens.len() == 1;
             // Resolve each configured display once, rather than scanning all pins
             // and displays again for every workspace.
             let mut rule_targets = HashMap::default();
@@ -4123,6 +4135,14 @@ impl Reactor {
                         });
                     let desktop_lost =
                         invalidated_spaces.contains(&workspace.space) && native_owner.is_none();
+                    let keep_local = single_display
+                        && owner
+                            .is_some_and(|display| screens[0].display_uuid_opt() == Some(display));
+                    if desktop_lost && keep_local {
+                        // Without a remap, the same display's current desktop owns a
+                        // separate catalog. Physical departures can still evacuate.
+                        return None;
+                    }
                     let home_target = home.and_then(|(space, display)| {
                         let target = screens.iter().position(|screen| {
                             live(screen) && screen.display_uuid_opt() == Some(display)

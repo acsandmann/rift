@@ -10007,6 +10007,43 @@ fn retrying_native_transfer_does_not_reveal_an_inactive_virtual_workspace() {
 }
 
 #[test]
+fn single_display_remap_replaces_an_already_initialized_catalog() {
+    let settings = crate::common::config::VirtualWorkspaceSettings {
+        mode: crate::common::config::WorkspaceMode::Global,
+        default_workspace_count: 4,
+        workspace_names: (1..=4).map(|index| index.to_string()).collect(),
+        ..Default::default()
+    };
+    let a = SpaceId::new(801);
+    let b = SpaceId::new(802);
+    let frame = CGRect::new(CGPoint::ZERO, CGSize::new(1000., 800.));
+
+    let mut reactor = test_reactor_with_workspace_settings(&settings);
+    let mut show = |space, inventory, replacement| {
+        reactor.handle_event(space_state_event_with(vec![frame], vec![Some(space)], |state| {
+            state.display_space_ids.insert("test-display-0".into(), inventory);
+            state.membership_complete = true;
+            if replacement {
+                state.space_remaps.push((a, b));
+            }
+        }));
+        reactor.query_workspaces(None)
+    };
+    let original = show(a, vec![a, b], false);
+    let independent = show(b, vec![a, b], false);
+    assert_ne!(original[0].workspace_id, independent[0].workspace_id);
+
+    for _ in 0..2 {
+        let queried = show(b, vec![b], true);
+        assert_eq!(queried.len(), 4);
+        for (actual, expected) in queried.iter().zip(&original) {
+            assert_eq!(actual.workspace_id, expected.workspace_id);
+            assert_eq!(actual.is_active, expected.is_active);
+        }
+    }
+}
+
+#[test]
 fn shared_destroyed_desktop_evacuates_even_when_its_display_stays_connected() {
     let (a, b, replacement) = (SpaceId::new(1), SpaceId::new(2), SpaceId::new(3));
     let (mut apps, mut reactor, ids, wsids) = shared_two_display_fixture();

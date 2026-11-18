@@ -882,6 +882,48 @@ fn resizing_during_a_native_space_switch_preserves_both_workspace_catalogs() {
 }
 
 #[test]
+fn removing_native_desktops_during_display_changes_keeps_one_workspace_catalog() {
+    use crate::common::config::{VirtualWorkspaceSettings, WorkspaceMode};
+
+    let settings = VirtualWorkspaceSettings {
+        mode: WorkspaceMode::Global,
+        default_workspace_count: 4,
+        workspace_names: (1..=4).map(|index| index.to_string()).collect(),
+        ..Default::default()
+    };
+    let mut rig = Rig::new();
+    let mut reactor = Reactor::new_for_test(crate::layout_engine::LayoutEngine::new(
+        &settings,
+        &Default::default(),
+        None,
+    ));
+    let mut snapshot = sample(vec![screen(1, "laptop", 1)]);
+    snapshot.inventory.insert("laptop".into(), (1..=3).map(SpaceId::new).collect());
+    for id in [3, 1, 2] {
+        snapshot.screens[0].space = Some(SpaceId::new(id));
+        let accepted = rig.tick(0, Some(snapshot.clone())).unwrap();
+        reactor.handle_events(vec![reactor::Event::SpaceStateChanged(accepted)]);
+    }
+    let expected = reactor.query_workspaces(None);
+    assert_eq!(expected.len(), 4);
+    for id in [1, 3] {
+        snapshot.inventory.get_mut("laptop").unwrap().retain(|space| space.get() != id);
+        snapshot.screens[0].frame.size.width += 50.;
+        assert!(rig.tick(0, Some(snapshot.clone())).is_none());
+        let accepted = rig.tick(1, Some(snapshot.clone())).unwrap();
+        reactor.handle_events(vec![reactor::Event::SpaceStateChanged(accepted)]);
+        let actual = reactor.query_workspaces(None);
+        assert_eq!(actual.len(), 4);
+        for (index, (actual, expected)) in actual.iter().zip(&expected).enumerate() {
+            assert_eq!(actual.index, index);
+            assert_eq!(actual.name, settings.workspace_names[index]);
+            assert_eq!(actual.workspace_id, expected.workspace_id);
+            assert_eq!(actual.is_active, expected.is_active);
+        }
+    }
+}
+
+#[test]
 fn queued_active_space_notification_waits_for_a_real_switch_or_bounded_membership_refresh() {
     for changed_space in [true, false] {
         let mut rig = Rig::new();

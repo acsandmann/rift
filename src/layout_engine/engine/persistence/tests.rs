@@ -1106,6 +1106,30 @@ fn persistence_preserves_layouts_through_every_lifecycle() {
 }
 
 #[test]
+fn single_display_restore_keeps_the_surviving_desktops_catalog() {
+    let settings = VirtualWorkspaceSettings {
+        mode: WorkspaceMode::Global,
+        default_workspace_count: 2,
+        workspace_names: vec!["1".into(), "2".into()],
+        ..Default::default()
+    };
+    let (old, current) = (SpaceId::new(801), SpaceId::new(802));
+    let mut engine = LayoutEngine::new(&settings, &LayoutSettings::default(), None);
+    for space in [old, current] {
+        engine.workspaces.ensure_visible_spaces(&[space], 1, |_| None);
+        engine.update_space_display(space, Some("display".into()));
+    }
+    let expected = engine.workspaces.workspace_ids(current);
+    let saved = engine.serialize_to_string(&WindowStore::default());
+    let (mut engine, mut store) = boot(&settings, &saved);
+    resolve(&mut engine, &mut store, &[(current, "display")], &[(
+        "display",
+        &[current],
+    )]);
+    assert_eq!(engine.workspaces.workspace_ids(current), expected);
+}
+
+#[test]
 fn global_single_display_restore_stays_in_the_windows_native_space() {
     let settings = VirtualWorkspaceSettings {
         mode: WorkspaceMode::Global,
