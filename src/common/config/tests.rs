@@ -86,6 +86,7 @@ fn app_rules_parse_placement_size_and_focus() {
                     floating = true,
                     position = { x = 0.4, y = 0.7 },
                     size = { w = 640, h = 480 },
+                    respect_min_size = true,
                     focus = true
                 }]
             "#,
@@ -96,6 +97,7 @@ fn app_rules_parse_placement_size_and_focus() {
     assert_eq!(rule.position, Some(AppRulePosition { x: 0.4, y: 0.7 }));
     assert_eq!(rule.size, Some(AppRuleSize { w: Some(640.0), h: Some(480.0) }));
     assert!(rule.focus);
+    assert!(rule.respect_min_size);
     assert!(settings.validate().is_empty());
 
     let height_only: VirtualWorkspaceSettings = toml::from_str(
@@ -111,6 +113,7 @@ fn app_rules_parse_placement_size_and_focus() {
         height_only.app_rules[0].size,
         Some(AppRuleSize { w: None, h: Some(320.0) })
     );
+    assert!(!height_only.app_rules[0].respect_min_size);
     assert!(height_only.validate().is_empty());
 }
 
@@ -126,6 +129,7 @@ fn app_rule_geometry_validation_rejects_invalid_values() {
             w: Some(0.0),
             h: Some(f64::NAN),
         }),
+        respect_min_size: false,
         focus: false,
         manage: Some(true),
         app_name: None,

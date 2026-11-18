@@ -362,6 +362,11 @@ workspace_names = [
 #     0.0 (top/left) to 1.0 (bottom/right); the window remains freely movable afterward.
 #   - size ({ w, h }): initial size in logical pixels. Either dimension may be omitted. Floating
 #     windows are initially resized; tiled windows receive a one-time resize after insertion.
+#   - respect_min_size (boolean): never tile the window smaller than the minimum size it
+#     reports. Otherwise the traditional and master_stack layouts ignore resizable windows'
+#     minimums so splits stay even, and a window that can't shrink to fit its slot overlaps
+#     its neighbours. (bsp and scrolling always respect them.)
+#     Applies when rift observes a window, so a change reaches open windows once rift sees them again.
 #   - focus (boolean): focus the window after applying the rule, switching to its virtual workspace.
 #   - manage (boolean): optional explicit management override. Set to false to ignore the
 #     matching window completely, or true to override Rift/macOS manageability heuristics

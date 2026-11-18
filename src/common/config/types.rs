@@ -148,6 +148,10 @@ pub struct AppWorkspaceRule {
     /// Preferred window size in logical pixels.
     #[setting(custom)]
     pub size: Option<AppRuleSize>,
+    /// Never tile the window below the minimum size it reports.
+    #[serde(default)]
+    #[setting(custom)]
+    pub respect_min_size: bool,
     /// Focus the window after applying this rule, switching virtual workspaces if needed.
     #[serde(default)]
     #[setting(custom)]

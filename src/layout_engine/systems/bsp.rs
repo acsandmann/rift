@@ -605,11 +605,11 @@ impl BspLayoutSystem {
                         let desired_w = c
                             .fixed_for_axis(true)
                             .unwrap_or(target.size.width)
-                            .max(c.min_for_axis(true));
+                            .max(c.reported_min(true));
                         let desired_h = c
                             .fixed_for_axis(false)
                             .unwrap_or(target.size.height)
-                            .max(c.min_for_axis(false));
+                            .max(c.reported_min(false));
                         let desired_w = if c.max_for_axis(true) > 0.0 {
                             desired_w.min(c.max_for_axis(true))
                         } else {
@@ -713,7 +713,7 @@ impl BspLayoutSystem {
                     if let Some(c) = constraints.get(wid).copied() {
                         let c = c.normalized();
                         return (
-                            c.min_for_axis(horizontal),
+                            c.reported_min(horizontal),
                             c.fixed_for_axis(horizontal),
                             (c.max_for_axis(horizontal) > 0.0).then(|| c.max_for_axis(horizontal)),
                             c.resizable_for_axis(horizontal),
@@ -787,6 +787,7 @@ mod tests {
     use objc2_core_foundation::CGPoint;
 
     use super::*;
+    use crate::layout_engine::systems::Sizing;
 
     fn w(idx: u32) -> WindowId { WindowId::new(1, idx) }
 
@@ -1420,7 +1421,7 @@ mod tests {
         constraints.insert(
             w(101),
             WindowLayoutConstraints {
-                is_resizable: true,
+                sizing: Sizing::Resizable { advisory_min: CGSize::ZERO },
                 max_width: 600.0,
                 ..Default::default()
             }
@@ -1436,8 +1437,9 @@ mod tests {
         constraints.insert(
             w(107),
             WindowLayoutConstraints {
-                is_resizable: true,
-                min_width: 400.0,
+                sizing: Sizing::Resizable {
+                    advisory_min: CGSize::new(400.0, 0.0),
+                },
                 ..Default::default()
             }
             .normalized(),
@@ -1457,7 +1459,7 @@ mod tests {
         constraints.insert(
             w(103),
             WindowLayoutConstraints {
-                is_resizable: true,
+                sizing: Sizing::Resizable { advisory_min: CGSize::ZERO },
                 max_height: 200.0,
                 ..Default::default()
             }

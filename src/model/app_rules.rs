@@ -25,6 +25,7 @@ pub struct AppRuleDecision {
     pub floating: bool,
     pub position: Option<AppRulePosition>,
     pub size: Option<AppRuleSize>,
+    pub respect_min_size: bool,
     pub focus: bool,
 }
 
@@ -44,6 +45,7 @@ pub struct AppRuleEffects {
     pub floating: bool,
     pub position: Option<AppRulePosition>,
     pub size: Option<AppRuleSize>,
+    pub respect_min_size: bool,
     pub focus: bool,
     pub was_rule_floating: bool,
 }
@@ -277,6 +279,7 @@ impl CompiledRule {
             floating,
             position,
             size,
+            respect_min_size,
             focus,
             manage,
             app_name,
@@ -327,6 +330,7 @@ impl CompiledRule {
                 floating,
                 position,
                 size,
+                respect_min_size,
                 focus,
             },
             app_id,
@@ -444,6 +448,7 @@ mod tests {
                 floating: true,
                 position: Some(AppRulePosition { x: 0.4, y: 0.7 }),
                 size: Some(AppRuleSize { w: Some(640.0), h: Some(480.0) }),
+                respect_min_size: false,
                 focus: true,
             })
         );

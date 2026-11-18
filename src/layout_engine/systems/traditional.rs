@@ -10,7 +10,7 @@ use crate::layout_engine::systems::constraints::{
     AxisConstraints, ConstraintCache, container_axis_constraints, solve_axis_lengths,
 };
 use crate::layout_engine::systems::{
-    LayoutSystem, WindowLayoutConstraints, reconcile_app_membership,
+    LayoutSystem, Sizing, WindowLayoutConstraints, reconcile_app_membership,
 };
 use crate::layout_engine::utils::compute_tiling_area;
 use crate::layout_engine::{Direction, LayoutId, LayoutKind, Orientation, ResizeOrientation};
@@ -2653,20 +2653,16 @@ impl Layout {
         horizontal: bool,
     ) -> (f64, Option<f64>, Option<f64>, bool) {
         let c = c.normalized();
-        let min = c.min_for_axis(horizontal);
+        let min = c.tiled_min(horizontal);
         let max = (c.max_for_axis(horizontal) > 0.0).then(|| c.max_for_axis(horizontal));
-        if c.is_resizable {
-            if let Some(fixed) = c.fixed_for_axis(horizontal) {
-                return (min, Some(fixed), Some(fixed), false);
-            }
-            // Some apps report transient or overly conservative min/max bounds while still
-            // being user-resizable. In traditional tiling, honoring those bounds at split
-            // time causes visibly uneven insertion (e.g. 2:1 right after a 50/50 split).
-            return (0.0, None, max, true);
+        if let Sizing::Fixed { .. } = c.sizing {
+            let fixed = c.fixed_for_axis(horizontal).filter(|v| *v > 0.0);
+            return (min, fixed, max.or(fixed), fixed.is_none());
         }
-        let fixed = c.fixed_for_axis(horizontal).filter(|v| *v > 0.0);
-        let can_grow = fixed.is_none();
-        (min, fixed, max.or(fixed), can_grow)
+        if let Some(fixed) = c.fixed_for_axis(horizontal) {
+            return (fixed, Some(fixed), Some(fixed), false);
+        }
+        (min, None, max, true)
     }
 
     fn handle_event(&mut self, map: &NodeMap, event: TreeEvent, windows: &WindowIndex) {
@@ -4255,11 +4251,9 @@ mod tests {
             constraints.insert(
                 wid,
                 WindowLayoutConstraints {
-                    is_resizable: false,
+                    sizing: Sizing::Fixed { min: CGSize::new(280.0, 120.0) },
                     locked_width: 280.0,
                     locked_height: 120.0,
-                    min_width: 280.0,
-                    min_height: 120.0,
                     max_width: 280.0,
                     max_height: 120.0,
                 }
@@ -4314,11 +4308,9 @@ mod tests {
         constraints.insert(
             settings,
             WindowLayoutConstraints {
-                is_resizable: false,
+                sizing: Sizing::Fixed { min: CGSize::new(320.0, 200.0) },
                 locked_width: 320.0,
                 locked_height: 200.0,
-                min_width: 320.0,
-                min_height: 200.0,
                 max_width: 320.0,
                 max_height: 200.0,
             }
@@ -4375,11 +4367,9 @@ mod tests {
         constraints.insert(
             constrained,
             WindowLayoutConstraints {
-                is_resizable: false,
+                sizing: Sizing::Fixed { min: CGSize::new(320.0, 200.0) },
                 locked_width: 320.0,
                 locked_height: 200.0,
-                min_width: 320.0,
-                min_height: 200.0,
                 max_width: 320.0,
                 max_height: 200.0,
             }
@@ -4454,11 +4444,9 @@ mod tests {
         constraints.insert(
             w1,
             WindowLayoutConstraints {
-                is_resizable: false,
+                sizing: Sizing::Fixed { min: CGSize::new(360.0, 200.0) },
                 locked_width: 360.0,
                 locked_height: 200.0,
-                min_width: 360.0,
-                min_height: 200.0,
                 max_width: 360.0,
                 max_height: 200.0,
             }
@@ -4508,11 +4496,9 @@ mod tests {
         constraints.insert(
             w1,
             WindowLayoutConstraints {
-                is_resizable: false,
+                sizing: Sizing::Fixed { min: CGSize::new(200.0, 300.0) },
                 locked_width: 200.0,
                 locked_height: 300.0,
-                min_width: 200.0,
-                min_height: 300.0,
                 max_width: 200.0,
                 max_height: 300.0,
             }
@@ -4562,11 +4548,9 @@ mod tests {
         constraints.insert(
             w1,
             WindowLayoutConstraints {
-                is_resizable: true,
+                sizing: Sizing::Resizable { advisory_min: CGSize::ZERO },
                 locked_width: 0.0,
                 locked_height: 0.0,
-                min_width: 0.0,
-                min_height: 0.0,
                 max_width: 360.0,
                 max_height: 0.0,
             }
@@ -4616,11 +4600,9 @@ mod tests {
         constraints.insert(
             constrained,
             WindowLayoutConstraints {
-                is_resizable: true,
+                sizing: Sizing::Resizable { advisory_min: CGSize::ZERO },
                 locked_width: 0.0,
                 locked_height: 0.0,
-                min_width: 0.0,
-                min_height: 0.0,
                 max_width: 320.0,
                 max_height: 0.0,
             }
@@ -4723,11 +4705,9 @@ mod tests {
         constraints.insert(
             constrained,
             WindowLayoutConstraints {
-                is_resizable: true,
+                sizing: Sizing::Resizable { advisory_min: CGSize::ZERO },
                 locked_width: 0.0,
                 locked_height: 0.0,
-                min_width: 0.0,
-                min_height: 0.0,
                 max_width: 0.0,
                 max_height: 200.0,
             }
@@ -4785,11 +4765,9 @@ mod tests {
         constraints.insert(
             constrained,
             WindowLayoutConstraints {
-                is_resizable: true,
+                sizing: Sizing::Resizable { advisory_min: CGSize::ZERO },
                 locked_width: 0.0,
                 locked_height: 0.0,
-                min_width: 0.0,
-                min_height: 0.0,
                 max_width: 320.0,
                 max_height: 0.0,
             }
@@ -4844,11 +4822,9 @@ mod tests {
             constraints.insert(
                 wid,
                 WindowLayoutConstraints {
-                    is_resizable: true,
+                    sizing: Sizing::Resizable { advisory_min: CGSize::ZERO },
                     locked_width: 0.0,
                     locked_height: 0.0,
-                    min_width: 0.0,
-                    min_height: 0.0,
                     max_width: 320.0,
                     max_height: 0.0,
                 }
@@ -5104,11 +5080,9 @@ mod tests {
             constraints.insert(
                 wid,
                 WindowLayoutConstraints {
-                    is_resizable: false,
+                    sizing: Sizing::Fixed { min: CGSize::ZERO },
                     locked_width: 0.0,
                     locked_height: 300.0,
-                    min_width: 0.0,
-                    min_height: 0.0,
                     max_width: 0.0,
                     max_height: 0.0,
                 }
@@ -5160,11 +5134,9 @@ mod tests {
         constraints.insert(
             stacked,
             WindowLayoutConstraints {
-                is_resizable: false,
+                sizing: Sizing::Fixed { min: CGSize::ZERO },
                 locked_width: 0.0,
                 locked_height: 300.0,
-                min_width: 0.0,
-                min_height: 0.0,
                 max_width: 0.0,
                 max_height: 0.0,
             }
@@ -5257,11 +5229,9 @@ mod tests {
         constraints.insert(
             constrained,
             WindowLayoutConstraints {
-                is_resizable: true,
+                sizing: Sizing::Resizable { advisory_min: CGSize::ZERO },
                 locked_width: 0.0,
                 locked_height: 0.0,
-                min_width: 0.0,
-                min_height: 0.0,
                 max_width: 0.0,
                 max_height: 200.0,
             }
@@ -5320,11 +5290,9 @@ mod tests {
         constraints.insert(
             constrained,
             WindowLayoutConstraints {
-                is_resizable: false,
+                sizing: Sizing::Fixed { min: CGSize::new(280.0, 200.0) },
                 locked_width: 280.0,
                 locked_height: 200.0,
-                min_width: 280.0,
-                min_height: 200.0,
                 max_width: 280.0,
                 max_height: 200.0,
             }
@@ -5626,11 +5594,9 @@ mod tests {
         constraints.insert(
             w1,
             WindowLayoutConstraints {
-                is_resizable: false,
+                sizing: Sizing::Fixed { min: CGSize::ZERO },
                 locked_width: 1000.0,
                 locked_height: 800.0,
-                min_width: 0.0,
-                min_height: 0.0,
                 max_width: 0.0,
                 max_height: 0.0,
             }
@@ -5639,11 +5605,9 @@ mod tests {
         constraints.insert(
             w2,
             WindowLayoutConstraints {
-                is_resizable: false,
+                sizing: Sizing::Fixed { min: CGSize::ZERO },
                 locked_width: 500.0,
                 locked_height: 800.0,
-                min_width: 0.0,
-                min_height: 0.0,
                 max_width: 0.0,
                 max_height: 0.0,
             }
@@ -5691,11 +5655,11 @@ mod tests {
         constraints.insert(
             w1,
             WindowLayoutConstraints {
-                is_resizable: true,
+                sizing: Sizing::Resizable {
+                    advisory_min: CGSize::new(1000.0, 0.0),
+                },
                 locked_width: 0.0,
                 locked_height: 0.0,
-                min_width: 1000.0,
-                min_height: 0.0,
                 max_width: 0.0,
                 max_height: 0.0,
             }
@@ -5704,11 +5668,9 @@ mod tests {
         constraints.insert(
             w2,
             WindowLayoutConstraints {
-                is_resizable: true,
+                sizing: Sizing::Resizable { advisory_min: CGSize::ZERO },
                 locked_width: 0.0,
                 locked_height: 0.0,
-                min_width: 0.0,
-                min_height: 0.0,
                 max_width: 0.0,
                 max_height: 0.0,
             }
@@ -5752,11 +5714,11 @@ mod tests {
         constraints.insert(
             w1,
             WindowLayoutConstraints {
-                is_resizable: true,
+                sizing: Sizing::Resizable {
+                    advisory_min: CGSize::new(1000.0, 0.0),
+                },
                 locked_width: 0.0,
                 locked_height: 0.0,
-                min_width: 1000.0,
-                min_height: 0.0,
                 max_width: 1000.0,
                 max_height: 0.0,
             }
@@ -5765,11 +5727,9 @@ mod tests {
         constraints.insert(
             w2,
             WindowLayoutConstraints {
-                is_resizable: true,
+                sizing: Sizing::Resizable { advisory_min: CGSize::ZERO },
                 locked_width: 0.0,
                 locked_height: 0.0,
-                min_width: 0.0,
-                min_height: 0.0,
                 max_width: 0.0,
                 max_height: 0.0,
             }
@@ -5814,11 +5774,9 @@ mod tests {
         constraints.insert(
             w1,
             WindowLayoutConstraints {
-                is_resizable: true,
+                sizing: Sizing::Resizable { advisory_min: CGSize::ZERO },
                 locked_width: 0.0,
                 locked_height: 0.0,
-                min_width: 0.0,
-                min_height: 0.0,
                 max_width: 600.0,
                 max_height: 0.0,
             }
