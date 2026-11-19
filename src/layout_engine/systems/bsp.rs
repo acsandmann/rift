@@ -1174,9 +1174,9 @@ mod tests {
             w(1),
             crate::layout_engine::WindowDropAction::Stack
         ));
-        assert!(system.select_window(layout, w(3)));
+        assert!(system.focus(layout, Focus::Select(w(3))).handled);
         system.join_selection_with_direction(layout, Direction::Left);
-        assert_eq!(system.stack_members(layout, w(3)), vec![w(1), w(2), w(3)]);
+        assert_eq!(system.all_windows_in_layout(layout), vec![w(1), w(2), w(3)]);
         assert_eq!(system.visible_windows_in_layout(layout), vec![w(3)]);
     }
 }
