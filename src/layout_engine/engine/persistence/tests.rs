@@ -40,6 +40,7 @@ fn live_state(window: WindowId) -> WindowState {
             is_root: true,
             is_minimized: false,
             is_resizable: true,
+            close_or_minimize_disabled: false,
             min_size: None,
             max_size: None,
             title: saved.title.unwrap(),
@@ -1157,4 +1158,34 @@ fn global_single_display_restore_stays_in_the_windows_native_space() {
         );
         assert_eq!(store.workspace_for_window(window), Some(target));
     }
+}
+
+#[test]
+fn restored_window_keeps_saved_tiling_over_heuristic_float() {
+    let settings = VirtualWorkspaceSettings::default();
+    let space = SpaceId::new(900);
+    let window = win(7, 1);
+    let (mut engine, mut store) = boot(&settings, &session(&settings, &[(space, "x", &[window])]));
+    resolve(&mut engine, &mut store, &[(space, "x")], &[("x", &[space])]);
+
+    let mut state = live_state(window);
+    state.info.is_resizable = false;
+    store.insert_window(window, state);
+    let saved = evidence(window);
+    let result = engine.assign_window_with_app_info(
+        &mut store,
+        window,
+        space,
+        crate::model::WindowRuleContext {
+            app_bundle_id: saved.app_id.as_deref(),
+            window_title: saved.title.as_deref(),
+            ..Default::default()
+        },
+        false,
+    );
+
+    let Ok(AppRuleResult::Managed(effects)) = result else {
+        panic!("restored window must be managed: {result:?}");
+    };
+    assert!(!effects.should_float(engine.is_window_floating(window)));
 }
