@@ -673,7 +673,7 @@ impl Request {
     #[inline]
     fn disables_enhanced_ui(&self) -> bool {
         match self {
-            Self::SetWindowFrames(_, _, FrameMode::Full, enabled, _) => *enabled,
+            Self::SetWindowFrames(_, _, _, enabled, _) => *enabled,
             _ => false,
         }
     }
@@ -936,8 +936,8 @@ fn write_frame(
 /// `hint` is the last observed or intended frame. It only selects setters: AX
 /// notifications are asynchronous, so it may be stale, and the returned frame is
 /// always read back, unless the app did not answer a setter: the readback would
-/// queue behind it and wait out the same timeout. `before_write` runs only
-/// before writes that include a resize.
+/// queue behind it and wait out the same timeout. `before_write` runs before
+/// each group of setters, including position-only writes.
 fn reconcile_frame(
     elem: &impl FrameTarget,
     hint: CGRect,
@@ -954,9 +954,7 @@ fn reconcile_frame(
     let planned = FrameWrites::between(hint, target, mode);
     let mut failed = FrameWrites::default();
     if planned.any() {
-        if planned.size {
-            before_write();
-        }
+        before_write();
         failed = write_frame(elem, hint, target, planned)?;
     }
     let mut frame = elem.frame()?;
@@ -974,9 +972,7 @@ fn reconcile_frame(
             position: !failed.position,
             size: missed.size,
         };
-        if fix.size {
-            before_write();
-        }
+        before_write();
         let fix_failed = write_frame(elem, frame, target, fix)?;
         failed.position |= fix_failed.position;
         failed.size |= fix_failed.size;
@@ -986,6 +982,7 @@ fn reconcile_frame(
     // Reuse the readback already required by reconciliation, never requested size.
     let constrained = constrain(CGRect::new(target.origin, frame.size));
     if !failed.position && !constrained.origin.same_as(frame.origin) && bounds.is_some() {
+        before_write();
         elem.set_position(constrained.origin)?;
         frame = elem.frame()?;
     }
@@ -1023,7 +1020,7 @@ fn write_interactive_frame(
     }
 }
 
-/// Batch-scoped Enhanced UI suppression, acquired before the batch's first resize.
+/// Batch-scoped Enhanced UI suppression, acquired before the batch's first frame write.
 #[derive(Debug, PartialEq, Eq)]
 enum BatchEui {
     NotRequested,
@@ -1266,7 +1263,7 @@ impl State {
         if !should_terminate && !pending_frames.is_empty() {
             let mut state = this.borrow_mut();
             for (wid, frame) in pending_frames {
-                if let Err(err) = state.apply_interactive_frame(wid, frame) {
+                if let Err(err) = state.apply_interactive_frame(wid, frame, &mut eui) {
                     warn!(?wid, ?err, "Failed to apply animation frame");
                 }
             }
@@ -1288,10 +1285,18 @@ impl State {
         }
     }
 
+    fn require_batch_eui(&mut self, eui: &mut BatchEui) {
+        if *eui == BatchEui::NotRequested {
+            *eui = BatchEui::Deferred;
+        }
+        self.hold_batch_eui(eui);
+    }
+
     fn apply_interactive_frame(
         &mut self,
         wid: WindowId,
         pending: PendingFrame,
+        eui: &mut BatchEui,
     ) -> Result<(), AxError> {
         if !pending.authority.is_current()
             || !self.frame_write_is_current(self.window(wid)?.window_server_id, pending.txid)
@@ -1308,19 +1313,17 @@ impl State {
             ..
         } = pending;
         let _guard = span.enter();
-        // Acquire lazily: animation startup and position-only samples need no EUI.
-        let needs_resize = {
-            let window = self.window_mut(wid)?;
-            authority.1.is_none()
-                && (set_size
-                    || (source != FrameSource::Drag
-                        && !window.last_known_frame.size.same_as(frame.size)))
-                && !window.animation_eui_held
-        };
-        if needs_resize {
-            let app = self.app.clone();
-            self.enhanced_ui.acquire(&app);
-            self.window_mut(wid)?.animation_eui_held = true;
+        // AX can animate position-only samples too. Keep suppression across
+        // an animation, or just across this batch for unbracketed drag samples.
+        let window = self.window_mut(wid)?;
+        if window.is_animating {
+            if !window.animation_eui_held {
+                let app = self.app.clone();
+                self.enhanced_ui.acquire(&app);
+                self.window_mut(wid)?.animation_eui_held = true;
+            }
+        } else {
+            self.require_batch_eui(eui);
         }
         let window = self.window_mut(wid)?;
         window.last_seen_txid = txid;
@@ -1631,7 +1634,7 @@ impl State {
                         .get(&wid)
                         .is_some_and(|frame| !authority.is_older_than(&frame.authority))
                     && let Some(frame) = pending_frames.remove(&wid)
-                    && let Err(err) = self.apply_interactive_frame(wid, frame)
+                    && let Err(err) = self.apply_interactive_frame(wid, frame, eui)
                 {
                     warn!(?wid, ?err, "Failed to flush animation frame on end");
                 }
@@ -1699,12 +1702,7 @@ impl State {
                             frame,
                             target,
                             FrameMode::Full,
-                            || {
-                                if *eui == BatchEui::NotRequested {
-                                    *eui = BatchEui::Deferred;
-                                }
-                                self.hold_batch_eui(eui);
-                            },
+                            || self.require_batch_eui(eui),
                         )
                     });
                     frame = match self.handle_frame_result(wid, last_seen_txid, result)? {
@@ -3151,6 +3149,28 @@ mod frame_tests {
         let target = rect(10.0, 20.0, 300.0, 200.0);
         assert_eq!(reconcile(&window, target).unwrap(), target);
         assert_eq!(*window.calls.borrow(), ["position", "size", "frame"]);
+    }
+
+    #[test]
+    fn position_only_reconciliation_suppresses_animation_before_writing() {
+        let initial = rect(0., 0., 300., 200.);
+        let target = rect(50., 50., 300., 200.);
+        for hint in [initial, target] {
+            let window = FakeWindow {
+                frame: Cell::new(initial),
+                ..Default::default()
+            };
+            let frame = reconcile_frame(&window, hint, target, FrameMode::Position, || {
+                window.calls.borrow_mut().push("suppress animation");
+            })
+            .unwrap();
+            let mut expected = vec!["suppress animation", "position", "frame"];
+            if hint == target {
+                expected.insert(0, "frame");
+            }
+            assert_eq!(*window.calls.borrow(), expected);
+            assert_eq!(frame, target);
+        }
     }
 
     #[test]

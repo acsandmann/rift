@@ -376,6 +376,34 @@ fn restores_legacy_slots_and_atomically_installs_workspace_contents() {
 }
 
 #[test]
+fn single_display_restore_keeps_the_surviving_desktops_catalog() {
+    let settings = VirtualWorkspaceSettings {
+        mode: WorkspaceMode::Global,
+        default_workspace_count: 2,
+        workspace_names: vec!["1".into(), "2".into()],
+        ..Default::default()
+    };
+    let (old, current) = (SpaceId::new(801), SpaceId::new(802));
+    for exposed in [true, false] {
+        let mut engine = LayoutEngine::new(&settings, &LayoutSettings::default(), None);
+        engine.workspaces.ensure_visible_spaces(&[current], 1, |_| None);
+        engine.workspaces.ensure_space_initialized(old);
+        if exposed {
+            engine.update_space_display(old, Some("display".into()));
+        }
+        engine.update_space_display(current, Some("display".into()));
+        let expected = engine.workspaces.workspace_ids(current);
+        let saved = engine.serialize_to_string(&WindowStore::default());
+        let (mut engine, mut store) = boot(&settings, &saved);
+        resolve(&mut engine, &mut store, &[(current, "display")], &[(
+            "display",
+            &[current],
+        )]);
+        assert_eq!(engine.workspaces.workspace_ids(current), expected);
+    }
+}
+
+#[test]
 fn global_single_display_restore_stays_in_the_windows_native_space() {
     let settings = VirtualWorkspaceSettings {
         mode: WorkspaceMode::Global,

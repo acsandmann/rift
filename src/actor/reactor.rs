@@ -1624,12 +1624,16 @@ impl Reactor {
                     application_workflow::ApplicationActivatedPayload { pid, quiet },
                 )?;
                 if quiet == Quiet::No && self.main_window_tracker.is_globally_frontmost(pid) {
-                    // Use only the app thread's resolved main window; pending
+                    // Prefer the app thread's resolved main window; pending
                     // AX admission can leave the previous main window cached.
+                    // Some apps leave AXMainWindow unset, so a sole admitted
+                    // window is the only target Rift can follow.
                     let activation_window = if self.state.windows.has_pending_window_for_pid(pid) {
                         None
                     } else {
-                        self.main_window_tracker.app_main_window(pid)
+                        self.main_window_tracker
+                            .app_main_window(pid)
+                            .or_else(|| self.sole_admitted_window(pid))
                     };
                     outcome.absorb(self.auto_switch_to_window_workspace(activation_window));
                     outcome.focused_window = activation_window;
@@ -2570,6 +2574,7 @@ impl Reactor {
                         &self.space_state.screens.clone(),
                         false,
                         Some(&activated),
+                        &[],
                         &[],
                     ));
                 }
@@ -3835,24 +3840,36 @@ impl Reactor {
         );
         // Compare all native Spaces, including inactive ones. A current-Space
         // switch alone does not invalidate ownership.
-        let invalidated_spaces: Vec<_> = self
-            .space_state
-            .display_space_ids
-            .iter()
-            .filter(|_| space_state.display_set_changed || space_state.should_force_refresh_layout)
-            .flat_map(|(display, spaces)| {
-                spaces
-                    .iter()
-                    .filter(|space| {
-                        !space_state
-                            .display_space_ids
-                            .get(display)
-                            .is_some_and(|current| current.contains(space))
-                    })
-                    .copied()
-            })
-            .filter(|space| !space_state.space_remaps.iter().any(|(previous, _)| previous == space))
-            .collect();
+        let sole_display = match (
+            self.space_state.screens.as_slice(),
+            space_state.screens.as_slice(),
+        ) {
+            ([previous], [current]) if previous.display_uuid == current.display_uuid => {
+                current.display_uuid_opt()
+            }
+            _ => None,
+        };
+        let mut invalidated_spaces = Vec::new();
+        let mut lost_local_desktops = Vec::new();
+        if space_state.display_set_changed || space_state.should_force_refresh_layout {
+            for (display, spaces) in &self.space_state.display_space_ids {
+                let current = space_state.display_space_ids.get(display);
+                for &space in spaces {
+                    if current.is_some_and(|ids| ids.contains(&space))
+                        || space_state.space_remaps.iter().any(|(old, _)| *old == space)
+                    {
+                        continue;
+                    }
+                    invalidated_spaces.push(space);
+                    // The native inventory also knows the owners of unvisited desktops.
+                    if sole_display == Some(display.as_str())
+                        && !space_state.display_space_ids.values().any(|ids| ids.contains(&space))
+                    {
+                        lost_local_desktops.push(space);
+                    }
+                }
+            }
+        }
         if !space_state.membership_complete && !invalidated_spaces.is_empty() {
             // Retry exhaustion is not evidence of ownership. SpacesActor owns paced
             // resampling; retain the logical model until membership is observable.
@@ -3984,6 +4001,15 @@ impl Reactor {
                 outcome.arrange.space_scope = screen.space;
             }
         }
+        let display_count = self.space_state.screens.len();
+        // Preserve the shared catalog through remaps on either side of a display change.
+        // A remap can replace a destination catalog only if both topologies are local.
+        if display_count > 1 {
+            self.layout_manager
+                .layout_engine
+                .workspaces_mut()
+                .update_display_count(display_count);
+        }
         for (previous_space, space) in space_remaps {
             if let Some(frame) = self.last_screen_frames.remove(&previous_space) {
                 self.last_screen_frames.insert(space, frame);
@@ -3994,6 +4020,12 @@ impl Reactor {
                 previous_space,
                 space,
             );
+        }
+        if display_count == 1 {
+            self.layout_manager
+                .layout_engine
+                .workspaces_mut()
+                .update_display_count(display_count);
         }
         for screen in &self.space_state.screens {
             let (Some(space), Some(display_uuid)) = (screen.space, screen.display_uuid_opt())
@@ -4007,10 +4039,6 @@ impl Reactor {
         self.space_activation_policy
             .on_spaces_updated(activation_config, &self.space_state.screens);
         let previously_active = self.set_active_spaces_from_snapshot(&authoritative_spaces);
-        self.layout_manager
-            .layout_engine
-            .workspaces_mut()
-            .update_display_count(self.space_state.screens.len());
         let engine = &self.layout_manager.layout_engine;
         let mut refits = Vec::new();
         for screen in &self.space_state.screens {
@@ -4046,6 +4074,7 @@ impl Reactor {
                 invalidates_pending_targets,
                 None,
                 &invalidated_spaces,
+                &lost_local_desktops,
             ));
         }
         // Transfers already fitted their frames; refit only workspaces whose native
@@ -4120,6 +4149,7 @@ impl Reactor {
         preserve_membership: bool,
         pins_only: Option<&HashSet<crate::model::VirtualWorkspaceId>>,
         invalidated_spaces: &[SpaceId],
+        lost_local_desktops: &[SpaceId],
     ) -> EventOutcome {
         use crate::model::virtual_workspace::WorkspaceTransferReason;
         let mut outcome = EventOutcome::no_change();
@@ -4163,6 +4193,9 @@ impl Reactor {
                 .filter(|(_, id)| pins_only.is_none_or(|ids| ids.contains(id)))
                 .filter_map(|(index, id)| {
                     let workspace = &engine.workspaces()[id];
+                    if lost_local_desktops.contains(&workspace.space) {
+                        return None;
+                    }
                     let owner = engine.display_uuid_for_space(workspace.space);
                     let home = workspace
                         .home_space
@@ -4194,7 +4227,7 @@ impl Reactor {
                         .workspaces()
                         .matching_rules(index, &workspace.name)
                         .find_map(|rule| rule.display.as_deref())
-                        .filter(|_| !workspace.rule_overridden)
+                        .filter(|_| !workspace.rule_overridden && screens.len() > 1)
                         .and_then(|rule_display| {
                             *rule_targets.entry(rule_display).or_insert_with(|| {
                                 crate::sys::screen::resolve_display_preference(
@@ -4309,7 +4342,8 @@ impl Reactor {
                 .filter_map(|(window, assignment)| {
                     let record = self.state.windows.record(window)?;
                     let target = engine.workspaces().workspaces.get(assignment)?.space;
-                    if self.is_dragging_window(window) {
+                    // Native membership will reassign windows from a lost local desktop.
+                    if self.is_dragging_window(window) || lost_local_desktops.contains(&target) {
                         return None;
                     }
                     if record
@@ -5459,10 +5493,19 @@ impl Reactor {
     }
 
     fn transient_blocks_mouse_focus(&self) -> bool {
-        self.transient_focus.windows.values().any(|t| {
+        self.transient_focus.windows.iter().any(|(id, t)| {
             t.visible
                 && self.main_window_tracker.is_globally_frontmost(t.pid)
                 && self.active_spaces.contains(&t.space)
+                // A rule-admitted AXDialog window is managed content. Its guard
+                // entry comes from the heuristic the rule overrode, so it must
+                // not disable focus-follows-mouse. Native transients always block.
+                && (t.native
+                    || self
+                        .state
+                        .windows
+                        .tracked_window_id(*id)
+                        .is_none_or(|wid| !self.state.windows.is_admitted(wid)))
         })
     }
 
@@ -5656,6 +5699,16 @@ impl Reactor {
                 }));
             }
         }
+    }
+
+    fn sole_admitted_window(&self, pid: pid_t) -> Option<WindowId> {
+        let mut windows = self
+            .state
+            .windows
+            .window_ids_for_pid(pid)
+            .filter(|wid| self.state.windows.is_admitted(*wid));
+        let window = windows.next()?;
+        windows.next().is_none().then_some(window)
     }
 
     fn auto_switch_to_window_workspace(&mut self, window: Option<WindowId>) -> EventOutcome {

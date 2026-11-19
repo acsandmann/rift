@@ -4253,6 +4253,31 @@ fn late_activation_cannot_switch_after_another_app_became_frontmost() {
 }
 
 #[test]
+fn activation_follows_sole_admitted_window_without_ax_main_window() {
+    let (mut apps, mut reactor, space, main, _) = pending_activation_context();
+    reactor.handle_event(Event::ApplicationMainWindowChanged(main.pid, None, Quiet::No));
+    assert_eq!(
+        reactor
+            .state
+            .windows
+            .window_ids_for_pid(main.pid)
+            .filter(|wid| reactor.state.windows.is_admitted(*wid))
+            .count(),
+        1
+    );
+    assert!(!reactor.state.windows.has_pending_window_for_pid(main.pid));
+
+    reactor.handle_event(Event::ApplicationActivated(main.pid, Quiet::No));
+    assert_eq!(
+        reactor.layout_manager.layout_engine.workspaces().active_workspace_idx(space),
+        Some(0),
+        "a sole admitted window must drive activation when AXMainWindow is missing"
+    );
+    assert_eq!(reactor.layout_manager.layout_engine.focused_window(), Some(main));
+    apps.simulate_until_quiet(&mut reactor);
+}
+
+#[test]
 fn activation_follows_ax_restored_window_on_inactive_workspace() {
     for stale_metadata in [false, true] {
         let (mut apps, mut reactor, space, main, _) = pending_activation_context();
@@ -10054,6 +10079,94 @@ fn retrying_native_transfer_does_not_reveal_an_inactive_virtual_workspace() {
 }
 
 #[test]
+fn single_display_remap_replaces_an_already_initialized_catalog() {
+    let settings = crate::common::config::VirtualWorkspaceSettings {
+        mode: crate::common::config::WorkspaceMode::Global,
+        default_workspace_count: 4,
+        workspace_names: (1..=4).map(|index| index.to_string()).collect(),
+        ..Default::default()
+    };
+    let a = SpaceId::new(801);
+    let b = SpaceId::new(802);
+    let frame = CGRect::new(CGPoint::ZERO, CGSize::new(1000., 800.));
+
+    let mut reactor = test_reactor_with_workspace_settings(&settings);
+    let mut show = |space, inventory, replacement| {
+        reactor.handle_event(space_state_event_with(vec![frame], vec![Some(space)], |state| {
+            state.display_space_ids.insert("test-display-0".into(), inventory);
+            state.membership_complete = true;
+            if replacement {
+                state.space_remaps.push((a, b));
+            }
+        }));
+        reactor.query_workspaces(None)
+    };
+    let original = show(a, vec![a, b], false);
+    let independent = show(b, vec![a, b], false);
+    assert_ne!(original[0].workspace_id, independent[0].workspace_id);
+
+    for _ in 0..2 {
+        let queried = show(b, vec![b], true);
+        assert_eq!(queried.len(), 4);
+        for (actual, expected) in queried.iter().zip(&original) {
+            assert_eq!(actual.workspace_id, expected.workspace_id);
+            assert_eq!(actual.is_active, expected.is_active);
+        }
+    }
+}
+
+#[test]
+fn closing_an_unvisited_native_desktop_preserves_the_current_workspace_catalog() {
+    let settings = crate::common::config::VirtualWorkspaceSettings {
+        mode: crate::common::config::WorkspaceMode::Global,
+        default_workspace_count: 4,
+        workspace_names: (1..=4).map(|index| index.to_string()).collect(),
+        ..Default::default()
+    };
+    let mut reactor = test_reactor_with_workspace_settings(&settings);
+    let frame = CGRect::new(CGPoint::ZERO, CGSize::new(1000., 800.));
+    let (current, other) = (SpaceId::new(801), SpaceId::new(802));
+    let (window, wsid) = (WindowId::new(1, 1), WindowServerId::new(101));
+    let snapshot = |native_spaces, window_space, removed| {
+        space_state_event_with(vec![frame], vec![Some(current)], |state| {
+            state.display_space_ids.insert("test-display-0".into(), native_spaces);
+            state.membership_complete = true;
+            state.should_force_refresh_layout = removed;
+            if removed {
+                state.destroyed_spaces.insert(other);
+            }
+            if let Some(space) = window_space {
+                state.active_window_spaces.insert(wsid, space);
+            }
+        })
+    };
+    reactor.handle_event(snapshot(vec![current, other], Some(current), false));
+    reactor.add_test_app(window.pid);
+    reactor.add_test_window(window, wsid, Some(current), frame);
+    let original = reactor.query_workspaces(None);
+    assert_eq!(original.len(), 4);
+    assert!(reactor.assign_test_window_to_workspace(current, window, original[0].workspace_id));
+    reactor.mark_test_window_visible_in_space(wsid, current);
+
+    // Moving a window to the other desktop can initialize it without ever showing it.
+    window_server::set_window_spaces_override(wsid, Some(vec![other.get()]));
+    reactor.handle_event(snapshot(vec![current, other], None, false));
+    window_server::set_window_spaces_override(wsid, None);
+    assert_eq!(reactor.assigned_space_for_window_id(window), Some(other));
+
+    // macOS returns the window to the surviving desktop when the other one closes.
+    window_server::set_window_spaces_override(wsid, Some(vec![current.get()]));
+    reactor.handle_event(snapshot(vec![current], Some(current), true));
+    window_server::set_window_spaces_override(wsid, None);
+    let queried = reactor.query_workspaces(None);
+    assert_eq!(
+        queried.iter().map(|workspace| workspace.workspace_id).collect::<Vec<_>>(),
+        original.iter().map(|workspace| workspace.workspace_id).collect::<Vec<_>>(),
+    );
+    assert_eq!(reactor.assigned_space_for_window_id(window), Some(current));
+}
+
+#[test]
 fn shared_destroyed_desktop_evacuates_even_when_its_display_stays_connected() {
     let (a, b, replacement) = (SpaceId::new(1), SpaceId::new(2), SpaceId::new(3));
     let (mut apps, mut reactor, ids, wsids) = shared_two_display_fixture();
@@ -10778,6 +10891,7 @@ fn shared_move_workspace_to_display_moves_a_rule_bound_workspace_and_suspends_th
             &reactor.space_state.screens.clone(),
             false,
             None,
+            &[],
             &[],
         );
         reactor.apply_event_outcome(outcome);
@@ -12026,6 +12140,42 @@ fn native_admission_veto_survives_manage_rule() {
     reactor.handle_event(Event::WindowServerAppeared(id, space, SpaceEventKind::User));
     assert!(!reactor.state.windows.window(wid).unwrap().native_transient);
     apps.simulate_until_quiet(&mut reactor);
+}
+
+#[test]
+fn manage_rule_admits_a_window_ax_reports_as_a_dialog() {
+    let space = SpaceId::new(1);
+    let screen = CGRect::new(CGPoint::ZERO, CGSize::new(1000., 1000.));
+    for (manage, admitted) in [(Some(true), true), (None, false)] {
+        let cfg = crate::common::config::VirtualWorkspaceSettings {
+            app_rules: vec![crate::common::config::AppWorkspaceRule {
+                app_id: Some("com.testapp1".into()),
+                manage,
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let mut reactor = test_reactor_with_workspace_settings(&cfg);
+        let mut apps = Apps::new();
+        let mut info = make_window(1);
+        info.ax_role = Some("AXWindow".into());
+        info.ax_subrole = Some("AXDialog".into());
+        info.is_standard = false;
+        apps.make_app_and_settle_on_screen(&mut reactor, screen, space, 1, vec![info]);
+        let wid = WindowId::new(1, 1);
+        assert_eq!(
+            reactor.state.windows.is_admitted(wid),
+            admitted,
+            "manage = {manage:?} must decide admission for an AX dialog window"
+        );
+        // The focus guard only blocks while the app is globally frontmost.
+        reactor.handle_event(Event::ApplicationGloballyActivated(1));
+        assert_eq!(
+            reactor.transient_blocks_mouse_focus(),
+            !admitted,
+            "manage = {manage:?} must decide whether the AX dialog blocks mouse focus"
+        );
+    }
 }
 
 #[test]
