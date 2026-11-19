@@ -6783,6 +6783,62 @@ fn window_closed_removes_logical_window_without_inventory_refresh() {
 }
 
 #[test]
+fn scrolling_close_reveals_surviving_window() {
+    for invalidate_first in [false, true] {
+        let (mut apps, mut reactor) = test_context();
+        let screen = CGRect::new(CGPoint::ZERO, CGSize::new(1000., 800.));
+        let space = SpaceId::new(1);
+        let survivor = WindowId::new(1, 1);
+        let closing = WindowId::new(1, 2);
+        let mut config = reactor.config.clone();
+        let scrolling = &mut config.settings.layout.scrolling;
+        scrolling.column_width_ratio = 1.0;
+        scrolling.max_column_width_ratio = 1.0;
+        scrolling.preserve_window_sizes = false;
+        scrolling.animate = Some(false);
+        config.settings.layout.gaps.outer.left = 12.0;
+        reactor
+            .layout_manager
+            .layout_engine
+            .set_layout_settings(&config.settings.layout);
+        reactor.config = config;
+        reactor.handle_event(space_state_event(vec![screen], vec![Some(space)]));
+        reactor.handle_test_layout_command(LayoutCommand::SetWorkspaceLayout {
+            workspace: None,
+            mode: LayoutMode::Scrolling,
+        });
+        make_active_app(&mut apps, &mut reactor, 1, make_windows(2), Some(closing));
+        reactor.send_layout_event(LayoutEvent::WindowFocused(space, closing));
+        reactor.update_layout_or_warn(false, false, Some(space));
+        apps.simulate_until_quiet(&mut reactor);
+        let wsid = reactor.test_window_server_id(closing);
+        let expected = CGRect::new(CGPoint::new(12., 0.), CGSize::new(988., 800.));
+        assert_eq!(
+            reactor.state.windows.window(closing).unwrap().frame_monotonic,
+            expected
+        );
+        assert!(reactor.state.windows.window(survivor).unwrap().frame_monotonic.origin.x < 0.0);
+
+        if invalidate_first {
+            reactor.handle_event(Event::WindowInvalidated(
+                closing,
+                super::WindowInvalidationSource::AxDestroyedNotification,
+            ));
+            assert!(reactor.state.windows.is_temporarily_unavailable(closing));
+        }
+        reactor.handle_event(Event::WindowClosed(wsid));
+        apps.simulate_until_quiet(&mut reactor);
+
+        assert!(reactor.state.windows.record(closing).is_none());
+        assert_eq!(
+            reactor.state.windows.window(survivor).unwrap().frame_monotonic,
+            expected,
+            "AX invalidation before closing: {invalidate_first}"
+        );
+    }
+}
+
+#[test]
 fn app_termination_after_ax_invalidation_removes_logical_windows() {
     let (mut apps, mut reactor) = test_context_with_workspace_count(2);
     let screen = CGRect::new(CGPoint::new(0., 0.), CGSize::new(1000., 1000.));

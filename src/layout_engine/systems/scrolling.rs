@@ -1614,6 +1614,7 @@ impl LayoutSystem for ScrollingLayoutSystem {
             return false;
         }
         for state in self.layouts.values_mut().filter(|state| state.locate(window).is_some()) {
+            let previous_column = state.active_column;
             state.mutate(&self.settings, &self.inactive, |state| {
                 if state.selected(&self.inactive).is_none()
                     && let Some((col, row)) =
@@ -1629,6 +1630,9 @@ impl LayoutSystem for ScrollingLayoutSystem {
                     state.columns[col].active_window = row;
                 }
             });
+            if state.active_column != previous_column {
+                state.reveal(&self.settings);
+            }
         }
         true
     }
@@ -2354,6 +2358,41 @@ pub(crate) mod tests {
 
         fn drop(&mut self, source: u32, target: u32, action: WindowDropAction) {
             assert!(self.system.apply_window_drop(self.layout, wid(source), wid(target), action));
+        }
+    }
+
+    #[test]
+    fn closing_focused_full_width_column_reveals_survivor() {
+        for (closing, survivor) in [(2, 1), (1, 2)] {
+            for suspend_first in [false, true] {
+                let mut f = Fixture::new(2);
+                f.system.settings.column_width_ratio = 1.0;
+                f.system.settings.max_column_width_ratio = 1.0;
+                f.system.settings.alignment = ScrollingAlignment::Center;
+                f.system.settings.focus_navigation_style = ScrollingFocusNavigationStyle::Niri;
+                f.gaps.outer.left = 12.0;
+                f.gaps.outer.right = 20.0;
+                f.gaps.inner.horizontal = 8.0;
+                f.prepare();
+                f.select(closing);
+                f.system.layouts[f.layout].viewport.sample(Instant::now(), 1.0);
+                let tiling = compute_tiling_area(f.screen, &f.gaps);
+                assert_eq!(f.frame(closing), tiling);
+                let frame = f.frame(survivor);
+                assert!(frame.max().x <= tiling.origin.x || frame.origin.x >= tiling.max().x);
+
+                if suspend_first {
+                    assert!(f.system.set_window_participation(wid(closing), false));
+                }
+                f.system.remove_window(wid(closing));
+
+                assert_eq!(f.selected(), Some(wid(survivor)));
+                assert_eq!(
+                    f.frames(),
+                    vec![(wid(survivor), tiling)],
+                    "closing column {closing}, suspended first: {suspend_first}"
+                );
+            }
         }
     }
 
