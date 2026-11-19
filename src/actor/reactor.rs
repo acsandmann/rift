@@ -320,6 +320,7 @@ pub enum Event {
         Requested,
         Option<MouseState>,
     ),
+    WindowFrameWriteFailed(WindowId, TransactionId),
     WindowTitleChanged(WindowId, String),
     MenuOpened(pid_t),
     MenuClosed(pid_t),
@@ -1506,6 +1507,7 @@ impl Reactor {
         if !matches!(
             event,
             Event::WindowFrameChanged(_, _, _, Requested(true), _)
+                | Event::WindowFrameWriteFailed(..)
                 | Event::WindowTitleChanged(..)
                 | Event::MenuOpened(_)
                 | Event::MenuClosed(_)
@@ -1962,6 +1964,13 @@ impl Reactor {
                     outcome.wm_events.push(WmEvent::OverviewChanged);
                 }
                 return Ok(outcome);
+            }
+            Event::WindowFrameWriteFailed(wid, txid) => {
+                if let Some(server) = self.state.windows.window(wid).and_then(|w| w.info.sys_id) {
+                    self.transaction_manager.store.fail(server, txid);
+                }
+                // Retry on the next arrange pass. A busy app must not drive its own retry loop.
+                return Ok(EventOutcome::no_change());
             }
             Event::WindowFrameChanged(wid, new_frame, last_seen, requested, mouse_state) => {
                 if self.is_mission_control_active() {

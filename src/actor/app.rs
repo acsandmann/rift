@@ -1470,6 +1470,14 @@ impl State {
         pending_frames: &mut HashMap<WindowId, PendingFrame>,
         eui: &mut BatchEui,
     ) -> Result<bool, AxError> {
+        if let Request::SetWindowFrames(frames, txid, _, _, authority) = &request
+            && !authority.is_current()
+        {
+            for (wid, _) in frames {
+                self.send_event(Event::WindowFrameWriteFailed(*wid, *txid));
+            }
+            return Ok(false);
+        }
         let Some((request, authority)) = request.authorized() else {
             return Ok(false);
         };
@@ -1527,29 +1535,21 @@ impl State {
             Request::SetWindowFrames(frames, txid, mode, _, _) => {
                 for (wid, desired) in frames {
                     if !authority.is_current() {
-                        break;
+                        self.send_event(Event::WindowFrameWriteFailed(wid, txid));
+                        continue;
                     }
                     if let Ok(window) = self.window(wid)
                         && !self.frame_write_is_current(window.window_server_id, txid)
                     {
                         continue;
                     }
-                    let (elem, hint) = match self.window_mut(wid) {
-                        Ok(window) => {
-                            window.last_seen_txid = txid;
-                            window.frame_source = FrameSource::Ordinary;
-                            (window.elem.clone(), window.last_known_frame)
-                        }
-                        Err(err) => match err {
-                            AxError::Ax(code) => {
-                                if self.handle_ax_error(wid, &code) {
-                                    continue;
-                                }
-                                return Err(AxError::Ax(code));
-                            }
-                            AxError::NotFound => continue,
-                        },
+                    let Ok(window) = self.window_mut(wid) else {
+                        self.send_event(Event::WindowFrameWriteFailed(wid, txid));
+                        continue;
                     };
+                    window.last_seen_txid = txid;
+                    window.frame_source = FrameSource::Ordinary;
+                    let (elem, hint) = (window.elem.clone(), window.last_known_frame);
 
                     // The acknowledgment always carries geometry read back from AX.
                     let result = trace("set_frame", &elem, || {
@@ -1564,13 +1564,15 @@ impl State {
                             || self.hold_batch_eui(eui),
                         )
                     });
-                    let frame = match self.handle_ax_result(wid, result)? {
-                        Some(frame) => {
-                            self.window_mut(wid)?.last_known_frame = frame;
-                            frame
+                    let frame = match self.handle_frame_result(wid, txid, result) {
+                        Ok(Some(frame)) => frame,
+                        Ok(None) => continue,
+                        Err(error) => {
+                            warn!(?wid, ?error, "Failed to reconcile frame");
+                            continue;
                         }
-                        None => continue,
                     };
+                    self.window_mut(wid)?.last_known_frame = frame;
 
                     self.send_event(Event::WindowFrameChanged(
                         wid,
@@ -1674,11 +1676,11 @@ impl State {
                 if ended_animation {
                     self.restart_notifications_after_animation(&elem);
                 }
-                let mut frame =
-                    match self.handle_ax_result(wid, trace("frame", &elem, || elem.frame()))? {
-                        Some(frame) => frame,
-                        None => return Ok(false),
-                    };
+                let result = trace("frame", &elem, || elem.frame());
+                let mut frame = match self.handle_frame_result(wid, last_seen_txid, result)? {
+                    Some(frame) => frame,
+                    None => return Ok(false),
+                };
                 // Intermediate AX writes can be clamped while a growing column
                 // still overlaps the screen edge. The intended-frame cache is
                 // only a hint: repair against observed geometry once motion ends.
@@ -1705,7 +1707,7 @@ impl State {
                             },
                         )
                     });
-                    frame = match self.handle_ax_result(wid, result)? {
+                    frame = match self.handle_frame_result(wid, last_seen_txid, result)? {
                         Some(frame) => frame,
                         None => return Ok(false),
                     };
@@ -2592,6 +2594,18 @@ impl State {
         }
 
         false
+    }
+
+    fn handle_frame_result(
+        &mut self,
+        wid: WindowId,
+        txid: TransactionId,
+        result: Result<CGRect, AxError>,
+    ) -> Result<Option<CGRect>, AxError> {
+        if result.is_err() {
+            self.send_event(Event::WindowFrameWriteFailed(wid, txid));
+        }
+        self.handle_ax_result(wid, result)
     }
 
     fn handle_ax_result<T>(

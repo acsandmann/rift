@@ -674,13 +674,17 @@ impl Reactor {
                 }
                 let window = self.state.windows.window(wid)?;
                 if semantic
-                    && control.as_ref().is_none_or(|control| !control.frames.contains_key(&wid))
                     && let Some(wsid) = window.info.sys_id
                     && let Some(write) = self.transaction_manager.store.get(&wsid)
                 {
+                    if write.needs_full_retry() {
+                        return None;
+                    }
                     let target = presentation.target_frame(base_frame, fixed, scale);
                     let target = bound.map_or(target, |bounds| bounds.apply(target));
-                    if write.refused(target, window.frame_monotonic) {
+                    if control.as_ref().is_none_or(|control| !control.frames.contains_key(&wid))
+                        && write.refused(target, window.frame_monotonic)
+                    {
                         covered.insert(wid);
                         return None;
                     }
@@ -1078,11 +1082,9 @@ impl AnimationManager {
             let current_frame = window.frame_monotonic;
             let window_server_id = window.info.sys_id;
             let transactions = &reactor.transaction_manager;
-            if window_server_id
-                .and_then(|id| transactions.store.get(&id))
-                .unwrap_or_default()
-                .covers(target_frame, current_frame)
-            {
+            let write =
+                window_server_id.and_then(|id| transactions.store.get(&id)).unwrap_or_default();
+            if write.covers(target_frame, current_frame) {
                 continue;
             }
             let Some(app_state) = reactor.app_manager.apps.get(&wid.pid) else {
@@ -1095,12 +1097,11 @@ impl AnimationManager {
                 .unwrap_or_default();
             let is_active = reactor.state.windows.workspace_for_window(wid) == Some(active_ws);
 
-            if is_active {
+            let handle = app_state.handle.with_scrolling_bounds(bounds.filter(|_| {
+                is_active && !reactor.layout_manager.layout_engine.is_window_floating(wid)
+            }));
+            if is_active && !write.needs_full_retry() {
                 trace!(?wid, ?current_frame, ?target_frame, "Animating visible window");
-                let handle = app_state.handle.with_scrolling_bounds(
-                    bounds
-                        .filter(|_| !reactor.layout_manager.layout_engine.is_window_floating(wid)),
-                );
                 anim.add_window(&handle, wid, current_frame, target_frame, txid);
             } else {
                 anim.mark_handled(wid);
@@ -1108,12 +1109,12 @@ impl AnimationManager {
                     ?wid,
                     ?current_frame,
                     ?target_frame,
-                    "Direct positioning hidden window"
+                    "Reconciling window directly"
                 );
                 if let Err(e) =
-                    app_state.handle.send(Request::set_window_frame(wid, target_frame, txid, true))
+                    handle.send(Request::set_window_frame(wid, target_frame, txid, true))
                 {
-                    debug!(?wid, ?e, "Failed to send frame request for hidden window");
+                    debug!(?wid, ?e, "Failed to send frame request");
                     continue;
                 }
             }
@@ -1235,6 +1236,7 @@ impl AnimationManager {
             );
 
             let size_unchanged = !force_frames
+                && !write.needs_full_retry()
                 && write.target().is_none()
                 && current_frame.size.same_as(target_frame.size);
             window.frame_monotonic = target_frame;

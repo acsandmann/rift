@@ -1830,6 +1830,57 @@ fn geometry_cross_display_frame_change_waits_for_authoritative_membership() {
 }
 
 #[test]
+fn failed_frame_write_retries_full_geometry_on_next_arrange() {
+    use super::animation::AnimationManager;
+    use crate::actor::app::FrameMode;
+
+    for animate in [false, true] {
+        let (mut apps, mut reactor) = test_context();
+        let screen = CGRect::new(CGPoint::ZERO, CGSize::new(1000., 1000.));
+        let space = SpaceId::new(1);
+        let wid = WindowId::new(1, 1);
+        apps.make_app_and_settle_on_screen(&mut reactor, screen, space, wid.pid, make_windows(1));
+        let target = CGRect::new(CGPoint::new(20., 20.), CGSize::new(620., 500.));
+        let layout = [(wid, target)];
+        assert!(AnimationManager::instant_layout(
+            &mut reactor,
+            space,
+            &layout,
+            None
+        ));
+        let txid = reactor
+            .transaction_manager
+            .get_last_sent_txid(reactor.test_window_server_id(wid));
+        apps.requests();
+
+        reactor.handle_event(Event::WindowFrameWriteFailed(wid, txid));
+        assert!(
+            apps.requests().is_empty(),
+            "failure must not immediately schedule another AX write"
+        );
+
+        let arrange = |reactor: &mut Reactor| {
+            if animate {
+                AnimationManager::animate_layout(reactor, space, &layout, false, None, true)
+            } else {
+                AnimationManager::workspace_switch_layout(reactor, space, &layout, None)
+            }
+        };
+        assert!(arrange(&mut reactor));
+        assert!(apps.requests().iter().any(|request| matches!(
+            request,
+            Request::SetWindowFrames(frames, retry, FrameMode::Full, ..)
+                if frames == &layout && *retry != txid
+        )));
+        reactor.handle_event(Event::WindowFrameWriteFailed(wid, txid));
+        assert!(
+            !arrange(&mut reactor),
+            "a stale failure must not invalidate the replacement"
+        );
+    }
+}
+
+#[test]
 fn accepted_frame_settles_the_write_without_retrying_an_adjusted_size() {
     let (mut apps, mut reactor) = test_context();
     let screen = CGRect::new(CGPoint::ZERO, CGSize::new(1000., 1000.));

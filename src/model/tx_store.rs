@@ -13,6 +13,7 @@ enum FrameWrite {
     #[default]
     Idle,
     Pending(CGRect),
+    Failed,
     Settled {
         target: CGRect,
         observed: CGRect,
@@ -37,11 +38,14 @@ impl TxRecord {
         match self.write {
             FrameWrite::Idle => current.same_as(desired),
             FrameWrite::Pending(target) => target.same_as(desired),
+            FrameWrite::Failed => false,
             FrameWrite::Settled { target, observed } => {
                 target.same_as(desired) && observed.same_as(current)
             }
         }
     }
+
+    pub fn needs_full_retry(self) -> bool { matches!(self.write, FrameWrite::Failed) }
 
     pub fn refused(self, desired: CGRect, current: CGRect) -> bool {
         matches!(self.write, FrameWrite::Settled { target, observed }
@@ -96,7 +100,9 @@ impl WindowTxStore {
     pub fn remove(&self, id: &WindowServerId) { self.0.records.remove(id); }
 
     pub fn clear_target(&self, id: &WindowServerId) {
-        if let Some(mut record) = self.0.records.get_mut(id) {
+        if let Some(mut record) = self.0.records.get_mut(id)
+            && !record.needs_full_retry()
+        {
             record.write = FrameWrite::Idle;
         }
     }
@@ -104,8 +110,17 @@ impl WindowTxStore {
     pub fn clear_target_if_current(&self, id: &WindowServerId, txid: TransactionId) {
         if let Some(mut record) = self.0.records.get_mut(id)
             && record.txid == txid
+            && !record.needs_full_retry()
         {
             record.write = FrameWrite::Idle;
+        }
+    }
+
+    pub fn fail(&self, id: WindowServerId, txid: TransactionId) {
+        if let Some(mut record) = self.0.records.get_mut(&id)
+            && record.txid == txid
+        {
+            record.write = FrameWrite::Failed;
         }
     }
 
