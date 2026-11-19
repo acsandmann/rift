@@ -40,7 +40,7 @@ impl Reactor {
             && !source.tiled
             && source.last_frame != source.origin_frame
         {
-            self.write_window_frame(source.window, source.origin_frame, false);
+            self.write_window_frame(source.window, source.origin_frame, false, None);
         } else {
             changes.arrange(
                 self.assigned_space_for_window_id(source.window).or(source.origin_space),

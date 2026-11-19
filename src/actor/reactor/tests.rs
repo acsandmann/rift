@@ -2084,6 +2084,69 @@ fn genuine_external_frame_changes_invalidate_layout() {
 }
 
 #[test]
+fn native_transfer_precedes_ordinary_frames_in_either_display_order() {
+    for count in [2, 3] {
+        for reverse in [false, true] {
+            let (mut apps, mut reactor) = test_context();
+            let frames = [
+                shared_left(),
+                shared_right(),
+                CGRect::new(CGPoint::new(2600., 0.), CGSize::new(800., 900.)),
+            ];
+            let spaces = [1, 2, 3].map(SpaceId::new);
+            reactor.handle_event(space_state_event(
+                frames[..count].to_vec(),
+                spaces[..count].iter().copied().map(Some).collect(),
+            ));
+            let mut windows = make_windows(2);
+            if count == 3 {
+                let mut window = make_window(3);
+                window.frame.origin = frames[2].origin;
+                windows.push(window);
+            }
+            apps.make_app_and_settle(&mut reactor, 1, windows);
+            if reverse {
+                reactor.space_state.screens.reverse();
+            }
+            let before = reactor.layout_calculations.len();
+            reactor.commit_test(|reactor, changes| {
+                reactor
+                    .dispatch(
+                        Event::Command(Command::Reactor(ReactorCommand::MoveWindowToDisplay {
+                            selector: DisplaySelector::Index(1),
+                            window_id: Some(1),
+                        })),
+                        changes,
+                    )
+                    .unwrap();
+                for &space in &spaces[1..count] {
+                    changes.arrange(Some(space), Presentation::Force);
+                }
+            });
+
+            let mut calculated = reactor.layout_calculations[before..].to_vec();
+            calculated.sort_unstable();
+            assert_eq!(calculated, spaces[..count]);
+            let submitted: Vec<_> = apps
+                .requests()
+                .into_iter()
+                .filter_map(|request| match request {
+                    Request::SetWindowFrames(frames, _, _, _, _) => Some(frames),
+                    _ => None,
+                })
+                .flatten()
+                .collect();
+            assert_eq!(submitted.first(), Some(&(WindowId::new(1, 1), frames[1])));
+            assert_eq!(submitted.len(), count);
+            assert!(submitted.contains(&(WindowId::new(1, 2), frames[0])));
+            if count == 3 {
+                assert!(submitted.contains(&(WindowId::new(1, 3), frames[2])));
+            }
+        }
+    }
+}
+
+#[test]
 fn scrolling_display_transfer_ignores_intermediate_native_width() {
     let (mut apps, mut reactor, a, b) = two_displays(Default::default());
     let window = WindowId::new(1, 1);
@@ -2444,6 +2507,93 @@ fn layout_events_defer_arrangement_during_drag_except_removal() {
         reactor.handle_test_layout_event(observe());
         assert_eq!(reactor.layout_calculations.len(), before + 1);
     }
+}
+
+#[test]
+fn unrelated_removal_does_not_flush_layouts_deferred_by_drag() {
+    let (mut apps, mut reactor) = test_context();
+    let spaces = [1, 2, 3].map(SpaceId::new);
+    let frames =
+        [0., 1000., 2000.].map(|x| CGRect::new(CGPoint::new(x, 0.), CGSize::new(1000., 800.)));
+    reactor.handle_event(space_state_event(frames.to_vec(), spaces.map(Some).to_vec()));
+    let windows = frames
+        .into_iter()
+        .enumerate()
+        .map(|(i, frame)| {
+            let mut window = make_window(i + 1);
+            window.frame.origin = frame.origin;
+            window
+        })
+        .collect();
+    apps.make_app_and_settle(&mut reactor, 1, windows);
+    let window = WindowId::new(1, 1);
+    reactor.drag_manager.actor.begin_native(
+        crate::actor::drag::DragSource {
+            window,
+            origin_frame: frames[0],
+            last_frame: frames[0],
+            origin_space: Some(spaces[0]),
+            current_space: Some(spaces[0]),
+            tiled: true,
+        },
+        Default::default(),
+    );
+
+    let before = reactor.layout_calculations.len();
+    let mut window = make_window(4);
+    window.frame.origin = frames[1].origin;
+    reactor.handle_event(Event::WindowCreated(WindowId::new(1, 4), window, None, None));
+    assert_eq!(reactor.layout_calculations.len(), before);
+    reactor.handle_event(Event::WindowDestroyed(WindowId::new(1, 3)));
+    assert!(reactor.is_in_drag());
+    assert_eq!(&reactor.layout_calculations[before..], &spaces[2..]);
+
+    reactor.handle_event(Event::DragCancel);
+    assert_eq!(&reactor.layout_calculations[before + 1..], &spaces[..2]);
+    assert!(!reactor.is_in_drag());
+}
+
+#[test]
+fn scrolling_boundary_discards_the_original_focus_decision_after_switching() {
+    let (mut apps, mut reactor) = test_context_with_workspace_count(2);
+    let screen = CGRect::new(CGPoint::ZERO, CGSize::new(1000., 800.));
+    let space = SpaceId::new(1);
+    apps.make_app_and_settle_on_screen(&mut reactor, screen, space, 1, make_windows(2));
+    let incoming = WindowId::new(1, 2);
+    reactor.handle_test_layout_command(LayoutCommand::MoveWindowToWorkspace {
+        window_id: Some(2),
+        workspace: WorkspaceSelector::Index(1),
+        follow: false,
+    });
+    apps.simulate_until_quiet(&mut reactor);
+    reactor.config.settings.layout.scrolling.gestures.propagate_to_workspace_swipe = true;
+    reactor.config.settings.gestures.skip_empty = false;
+    reactor.config.settings.gestures.haptics_enabled = false;
+    let (tx, mut raises) = actor::channel();
+    reactor.communication_manager.raise_manager_tx = tx;
+
+    reactor.commit_test(|reactor, changes| {
+        reactor.reconcile_layout_response(
+            changes,
+            layout::EventResponse {
+                boundary_hit: Some(Direction::Right),
+                focus_window: Some(incoming),
+                ..Default::default()
+            },
+            None,
+        );
+    });
+
+    assert_eq!(
+        reactor.layout_manager.layout_engine.workspaces().active_workspace_idx(space),
+        Some(1)
+    );
+    let (_, raise_manager::Event::RaiseRequest(request)) = raises.try_recv().unwrap() else {
+        panic!("expected workspace focus");
+    };
+    assert_eq!(request.focus_window.map(|(window, _)| window), Some(incoming));
+    assert_eq!(request.focus_quiet, Quiet::Yes);
+    assert!(raises.try_recv().is_err());
 }
 
 #[test]
@@ -5244,6 +5394,16 @@ fn moving_workspace_direction_wrap_is_opt_in() {
             },
         )));
         assert_eq!(reactor.assigned_space_for_window_id(moved), Some(spaces[1]));
+        let submitted: Vec<_> = apps
+            .requests()
+            .into_iter()
+            .filter_map(|request| match request {
+                Request::SetWindowFrames(frames, _, _, _, _) => Some(frames),
+                _ => None,
+            })
+            .flatten()
+            .collect();
+        assert_eq!(submitted, [(moved, frames[1])]);
     }
 }
 

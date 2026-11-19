@@ -1,6 +1,7 @@
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
+use objc2_core_foundation::CGRect;
 use rift_protocol::StackInfo;
 use tracing::trace;
 
@@ -15,7 +16,9 @@ use crate::actor::{input, menu_bar, raise_manager, stack_line, window_notify, wm
 use crate::common::collections::{HashMap, HashSet};
 use crate::common::config::{DragDropSettings, LayoutMode};
 use crate::layout_engine::LayoutEngine;
+use crate::layout_engine::engine::GroupContainerInfo;
 use crate::model::broadcast::{BroadcastEvent, BroadcastSender, protocol_workspace_id};
+use crate::sys::geometry::Round;
 use crate::sys::screen::SpaceId;
 
 /// Manages application state and rules
@@ -46,15 +49,23 @@ pub struct DragManager {
     pub(super) preview_enabled: bool,
     pub(super) haptics_enabled: bool,
     // Layouts suppressed across native drag events resume when the drag ends.
-    pub(super) deferred_layouts: Vec<(Option<SpaceId>, Presentation)>,
+    pub(super) deferred_layouts: Vec<(Option<SpaceId>, Presentation, bool)>,
 }
 
 impl DragManager {
-    pub(super) fn defer_layout(&mut self, space: Option<SpaceId>, policy: Presentation) {
-        if let Some((_, current)) = self.deferred_layouts.iter_mut().find(|(id, _)| *id == space) {
+    pub(super) fn defer_layout(
+        &mut self,
+        space: Option<SpaceId>,
+        policy: Presentation,
+        changed: bool,
+    ) {
+        if let Some((_, current, layout_changed)) =
+            self.deferred_layouts.iter_mut().find(|(id, ..)| *id == space)
+        {
             *current = (*current).max(policy);
+            *layout_changed |= changed;
         } else {
-            self.deferred_layouts.push((space, policy));
+            self.deferred_layouts.push((space, policy, changed));
         }
     }
 
@@ -197,6 +208,16 @@ pub struct LayoutManager {
 
 pub(super) use crate::model::hidden_window_placement::ScrollingDisplayBounds;
 
+struct CalculatedLayout {
+    space: SpaceId,
+    presentation: Presentation,
+    bounds: Option<ScrollingDisplayBounds>,
+    frames: Vec<(WindowId, CGRect)>,
+    groups: Vec<GroupContainerInfo>,
+    layout_changed: bool,
+    placed: usize,
+}
+
 impl LayoutManager {
     fn publish_stack_tabs(
         reactor: &Reactor,
@@ -284,6 +305,9 @@ impl LayoutManager {
         if reactor.refreshes_blocked() || reactor.is_mission_control_active() {
             return false;
         }
+        let publish_stacks = !reactor.communication_manager.event_broadcaster.is_closed();
+        let publish_tabs = reactor.config.settings.ui.stack_line.enabled
+            && reactor.communication_manager.stack_line_tx.is_some();
         let screens = &reactor.space_state.screens;
         let single;
         let multi;
@@ -303,8 +327,7 @@ impl LayoutManager {
         let mut inline = [None, None];
         let mut rest = Vec::new();
 
-        for index in 0..reactor.space_state.screens.len() {
-            let screen = &reactor.space_state.screens[index];
+        for screen in screens {
             let (Some(space), frame) = (screen.space, screen.frame) else {
                 continue;
             };
@@ -325,100 +348,139 @@ impl LayoutManager {
             }) {
                 presentation = presentation.max(Presentation::Instant);
             }
-            let slot = inline.iter_mut().find(|slot| slot.is_none());
-            if !has_windows {
-                let update = (space, Vec::new(), Vec::new(), change.layout_changed);
-                if let Some(slot) = slot {
-                    *slot = Some(update);
-                } else {
-                    rest.push(update);
-                }
-                continue;
-            }
-            let display_uuid = screen.display_uuid_opt();
-            let gaps = reactor.config.settings.layout.gaps.effective_for_display(display_uuid);
-            // Accepted topology owns display information. Geometry uses it without
-            // refreshing the engine's display mapping on every frame commit.
-            #[cfg(test)]
-            reactor.layout_calculations.push(space);
-            trace!(?space, ?presentation, "Calculating reactor layout");
-            let mut groups = Vec::new();
-            let mut layout = reactor.layout_manager.layout_engine.calculate_layout_with_groups(
-                &reactor.state.windows,
+            let mut update = CalculatedLayout {
                 space,
-                frame,
-                &gaps,
-                reactor.config.settings.ui.stack_line.reserve(),
-                |wid| reactor.state.windows.window(wid).map(|w| w.frame_monotonic),
-                all_screen_frames,
-                // Stack metadata also feeds IPC when the overlay is disabled.
-                Some(&mut groups),
-                matches!(presentation, Presentation::Instant | Presentation::Force),
-            );
-            let engine = &reactor.layout_manager.layout_engine;
-            let bounds = (engine.active_layout_mode_at(space) == LayoutMode::Scrolling)
-                .then(|| {
-                    ScrollingDisplayBounds::for_screen(frame, all_screen_frames.iter().copied())
-                })
-                .flatten();
-            let active_workspace = engine.workspaces().active_workspace(space);
-            if let (Some(bounds), Some(workspace)) = (bounds, active_workspace) {
-                for (window, frame) in &mut layout {
-                    if reactor.state.windows.workspace_for_window(*window) == Some(workspace)
-                        && !engine.is_window_floating(*window)
-                    {
-                        *frame = bounds.apply(*frame);
+                presentation,
+                bounds: None,
+                frames: Vec::new(),
+                groups: Vec::new(),
+                layout_changed: change.layout_changed,
+                placed: 0,
+            };
+            if has_windows {
+                let display_uuid = screen.display_uuid_opt();
+                let gaps = reactor.config.settings.layout.gaps.effective_for_display(display_uuid);
+                // Accepted topology owns display information. Geometry uses it without
+                // refreshing the engine's display mapping on every frame commit.
+                #[cfg(test)]
+                reactor.layout_calculations.push(space);
+                trace!(?space, ?presentation, "Calculating reactor layout");
+                let mut layout = reactor.layout_manager.layout_engine.calculate_layout_with_groups(
+                    &reactor.state.windows,
+                    space,
+                    frame,
+                    &gaps,
+                    reactor.config.settings.ui.stack_line.reserve(),
+                    |wid| reactor.state.windows.window(wid).map(|w| w.frame_monotonic),
+                    all_screen_frames,
+                    (publish_stacks || publish_tabs).then_some(&mut update.groups),
+                    matches!(presentation, Presentation::Instant | Presentation::Force),
+                );
+                let engine = &reactor.layout_manager.layout_engine;
+                let bounds = (engine.active_layout_mode_at(space) == LayoutMode::Scrolling)
+                    .then(|| {
+                        ScrollingDisplayBounds::for_screen(frame, all_screen_frames.iter().copied())
+                    })
+                    .flatten();
+                let active_workspace = engine.workspaces().active_workspace(space);
+                if let (Some(bounds), Some(workspace)) = (bounds, active_workspace) {
+                    for (window, frame) in &mut layout {
+                        if reactor.state.windows.workspace_for_window(*window) == Some(workspace)
+                            && !engine.is_window_floating(*window)
+                        {
+                            *frame = bounds.apply(*frame);
+                        }
                     }
                 }
+                update.frames = layout;
+                update.bounds = bounds;
             }
-            for (window, target, fallback) in changes.tiled_transfers() {
-                if target == space
-                    && reactor
-                        .state
-                        .windows
-                        .record(window)
-                        .and_then(|record| record.pending_transfer())
-                        .is_some_and(|operation| operation.requested_space == target)
-                {
-                    let frame =
-                        layout.iter().find_map(|(wid, frame)| (*wid == window).then_some(*frame));
-                    reactor.send_transfer_frame(window, target, frame.or(fallback), true);
-                }
-            }
-            // Start AX work before publishing tab overlays and IPC.
-            let changed = AnimationManager::apply_layout(
-                reactor,
-                space,
-                &layout,
-                presentation,
-                skip_wid,
-                bounds,
-            );
-            any_frame_changed |= changed;
-            let layout_changed =
-                change.layout_changed || changed && presentation != Presentation::Force;
-            let update = (space, layout, groups, layout_changed);
-            if let Some(slot) = slot {
+            if let Some(slot) = inline.iter_mut().find(|slot| slot.is_none()) {
                 *slot = Some(update);
             } else {
                 rest.push(update);
             }
         }
 
+        // All spaces have sampled the same reconciled frames. Install native
+        // placements before delivering any ordinary layout, including on the source.
+        for (window, target, fallback) in changes.tiled_transfers() {
+            let Some(update) = inline
+                .iter_mut()
+                .flatten()
+                .chain(&mut rest)
+                .find(|layout| layout.space == target)
+            else {
+                continue;
+            };
+            if !reactor
+                .state
+                .windows
+                .record(window)
+                .and_then(|record| record.pending_transfer())
+                .is_some_and(|operation| operation.requested_space == target)
+                || reactor.assigned_space_for_window_id(window) != Some(target)
+            {
+                continue;
+            }
+            // An intervening switch may have parked this window. Place it on
+            // its physical display first, then apply its separate parking frame.
+            let active = reactor
+                .layout_manager
+                .layout_engine
+                .workspaces()
+                .is_window_in_active_workspace(&reactor.state.windows, target, window);
+            let tile = active
+                .then(|| update.frames.iter().position(|(wid, _)| *wid == window))
+                .flatten();
+            let frame = tile.map(|idx| update.frames[idx].1.round()).or(fallback);
+            let bounds = tile.and(update.bounds);
+            if reactor.send_transfer_frame(window, target, frame, true, bounds) {
+                any_frame_changed = true;
+                if let Some(idx) = tile {
+                    // Keep the complete projection for IPC while excluding the
+                    // already submitted tile even from a forced frame pass.
+                    update.frames.swap(update.placed, idx);
+                    update.placed += 1;
+                }
+            }
+        }
+        for update in inline.iter_mut().flatten().chain(&mut rest) {
+            if update.frames.is_empty() {
+                continue;
+            }
+            let changed = AnimationManager::apply_layout(
+                reactor,
+                update.space,
+                &update.frames[update.placed..],
+                update.presentation,
+                skip_wid,
+                update.bounds,
+            );
+            any_frame_changed |= changed;
+            update.layout_changed |= changed && update.presentation != Presentation::Force;
+        }
+
         let active_space = reactor.workspace_command_space();
-        let active_space_ids: Vec<_> = if reactor.config.settings.ui.stack_line.enabled
-            && reactor.communication_manager.stack_line_tx.is_some()
-        {
+        let active_space_ids: Vec<_> = if publish_tabs {
             reactor.iter_active_spaces().collect()
         } else {
             Vec::new()
         };
-        for (space, layout, groups, layout_changed) in inline.into_iter().flatten().chain(rest) {
+        for CalculatedLayout {
+            space,
+            frames: layout,
+            groups,
+            layout_changed,
+            ..
+        } in inline.into_iter().flatten().chain(rest)
+        {
             reactor.publish_space_changes(space, changes.for_space(space));
-            let stack_has_fullscreen = reactor
-                .layout_manager
-                .layout_engine
-                .active_workspace_for_space_has_fullscreen(space);
+            let stack_has_fullscreen = (publish_tabs || !groups.is_empty())
+                && reactor
+                    .layout_manager
+                    .layout_engine
+                    .active_workspace_for_space_has_fullscreen(space);
             let active_workspace_for_space_has_fullscreen =
                 active_space == Some(space) && stack_has_fullscreen;
             Self::publish_stack_tabs(

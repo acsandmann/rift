@@ -2104,7 +2104,7 @@ impl Reactor {
                 let Some((window, new_frame)) = self.drag_manager.actor.interactive_update() else {
                     return Ok(());
                 };
-                self.write_window_frame(window, new_frame, true);
+                self.write_window_frame(window, new_frame, true, None);
                 return Ok(());
             }
             Event::DragCancel => {
@@ -2291,7 +2291,7 @@ impl Reactor {
                         frame.origin.y += destination.origin.y - source.origin.y;
                         frame
                     });
-                    self.send_transfer_frame(intent.window, destination, Some(frame), true);
+                    self.send_transfer_frame(intent.window, destination, Some(frame), true, None);
                 }
                 return Ok(());
             }
@@ -2764,15 +2764,7 @@ impl Reactor {
                     return Ok(());
                 }
 
-                let windows = self
-                    .layout_manager
-                    .layout_engine
-                    .workspaces()
-                    .windows_in_active_workspace(&self.state.windows, source_space);
-                if !windows.is_empty() {
-                    self.store_current_floating_positions(source_space);
-                }
-
+                self.store_current_floating_positions(source_space);
                 let response = self.layout_manager.layout_engine.move_active_workspace_to_space(
                     &mut self.state.windows,
                     source_space,
@@ -2787,10 +2779,8 @@ impl Reactor {
                     changes.workspace_changed(target_space);
                     let source =
                         self.space_state.screen_by_space(source_space).map(|screen| screen.frame);
-                    for window in windows {
-                        if self.assigned_space_for_window_id(window) == Some(target_space) {
-                            self.request_window_transfer(changes, window, target_space, source);
-                        }
+                    for &window in &response.transferred_windows {
+                        self.request_window_transfer(changes, window, target_space, source);
                     }
                 }
                 self.reconcile_layout_response(changes, response, Some(target_space));
@@ -2932,21 +2922,26 @@ impl Reactor {
         }
     }
 
-    fn write_window_frame(&mut self, window: WindowId, frame: CGRect, interactive: bool) {
-        if self.refreshes_blocked() {
-            return;
-        }
-        if interactive && !self.drag_manager.actor.is_active() {
-            return;
-        }
-        if !self.state.windows.can_place_window(window)
+    fn write_window_frame(
+        &mut self,
+        window: WindowId,
+        frame: CGRect,
+        interactive: bool,
+        bounds: Option<managers::ScrollingDisplayBounds>,
+    ) -> bool {
+        if self.refreshes_blocked()
+            || (interactive && !self.is_in_drag())
             || (self.is_dragging_window(window) && !interactive)
+            || !self.state.windows.can_place_window(window)
         {
-            return;
+            return false;
         }
         let Some(app) = self.app_manager.apps.get(&window.pid) else {
-            return;
+            return false;
         };
+        if !app.handle.can_write_frames() {
+            return false;
+        }
         let window_server_id =
             self.state.windows.window(window).and_then(|window| window.info.sys_id);
         let transaction = if let Some(window_server_id) = window_server_id {
@@ -2962,11 +2957,22 @@ impl Reactor {
                 transaction,
                 crate::actor::app::FrameSource::Drag,
             );
-        } else if let Err(error) =
-            app.handle.send(Request::set_window_frame(window, frame, transaction, true))
-        {
-            warn!(window = ?window, %error, "failed to write requested window frame");
+        } else {
+            let bounded;
+            let handle = if bounds.is_some() {
+                bounded = app.handle.with_scrolling_bounds(bounds);
+                &bounded
+            } else {
+                &app.handle
+            };
+            if let Err(error) =
+                handle.send(Request::set_window_frame(window, frame, transaction, true))
+            {
+                warn!(window = ?window, %error, "failed to write requested window frame");
+                return false;
+            }
         }
+        true
     }
 
     fn submit_raise(&self, request: raise_manager::Event) {
@@ -3024,19 +3030,19 @@ impl Reactor {
             self.focus_desktop_if_active_workspace_empty(space);
         }
         let dragging = self.is_in_drag();
-        if dragging && !changes.during_drag {
-            for (space, policy) in changes.arrangements() {
-                self.drag_manager.defer_layout(space, policy);
-            }
-        } else {
-            for (space, policy) in self.drag_manager.deferred_layouts.drain(..) {
+        let layout_modes_may_have_changed = changes.has_layouts();
+        let blocked = self.refreshes_blocked() || self.is_mission_control_active();
+        if dragging {
+            changes.defer_drag_layouts(|space, policy, changed| {
+                self.drag_manager.defer_layout(space, policy, changed)
+            });
+        } else if !blocked {
+            for (space, policy, changed) in self.drag_manager.deferred_layouts.drain(..) {
                 changes.arrange(space, policy);
+                changes.scope(space).layout_changed |= changed;
             }
         }
-        let arrange = changes.has_layouts()
-            && (!dragging || changes.during_drag)
-            && !self.refreshes_blocked()
-            && !self.is_mission_control_active();
+        let arrange = !blocked && changes.has_layouts();
         let layout_changed = arrange && LayoutManager::commit(self, &mut changes);
         if arrange && dragging {
             self.refresh_active_drag_scene();
@@ -3068,7 +3074,9 @@ impl Reactor {
             self.warp_mouse(point);
         }
 
-        if let Some((workspace, window, stamp)) = changes.overview_activation {
+        if let Some((workspace, window, stamp)) = changes.overview_activation
+            && let Some(wm) = &self.communication_manager.wm_sender
+        {
             let frames = self
                 .state
                 .windows
@@ -3080,14 +3088,12 @@ impl Reactor {
                         .then_some((id, state.frame_monotonic))
                 })
                 .collect();
-            if let Some(wm) = &self.communication_manager.wm_sender {
-                wm.send(WmEvent::OverviewActivationTarget(OverviewTarget {
-                    workspace,
-                    window,
-                    stamp,
-                    frames,
-                }));
-            }
+            wm.send(WmEvent::OverviewActivationTarget(OverviewTarget {
+                workspace,
+                window,
+                stamp,
+                frames,
+            }));
         }
         if (changes.overview_changed
             || changes.refresh_notifications
@@ -3148,7 +3154,7 @@ impl Reactor {
         if changes.refresh_ffm {
             self.update_focus_follows_mouse_state();
         }
-        if changes.has_layouts() {
+        if layout_modes_may_have_changed || arrange {
             self.update_event_tap_layout_mode();
         }
         if changes.has_publications() && !self.communication_manager.event_broadcaster.is_closed() {
@@ -4212,7 +4218,9 @@ impl Reactor {
                     self.frame_on_display(window, frame, source_frame, screen)
                 })
             });
-        if screen.is_some()
+        let available =
+            screen.is_some() && !self.refreshes_blocked() && !self.is_mission_control_active();
+        if available
             && !self.is_in_drag()
             && self.layout_manager.layout_engine.workspaces().is_window_in_active_workspace(
                 &self.state.windows,
@@ -4228,7 +4236,7 @@ impl Reactor {
             changes.arrange(Some(target), Presentation::Animated);
             changes.transfer_tile(window, target, frame);
         } else {
-            self.send_transfer_frame(window, target, frame, screen.is_some());
+            self.send_transfer_frame(window, target, frame, available, None);
         }
     }
 
@@ -4238,7 +4246,8 @@ impl Reactor {
         target: SpaceId,
         frame: Option<CGRect>,
         available: bool,
-    ) {
+        bounds: Option<managers::ScrollingDisplayBounds>,
+    ) -> bool {
         if self.state.windows.request_transfer(window, frame, target, available)
             && let Some(frame) = frame
         {
@@ -4248,8 +4257,9 @@ impl Reactor {
                 window,
                 frame,
             );
-            self.write_window_frame(window, frame, false);
+            return self.write_window_frame(window, frame, false, bounds);
         }
+        false
     }
 
     fn advance_workspace_transfers(&mut self, changes: &mut Changes) {
@@ -4285,11 +4295,15 @@ impl Reactor {
                         self.space_state.revision,
                         observed,
                     );
-                } else if let Some(operation) = self.state.windows.advance_transfer(
-                    window,
-                    self.space_state.revision,
-                    available,
-                ) && let Some(frame) = operation.requested_frame
+                } else if !changes
+                    .tiled_transfers()
+                    .any(|(planned, space, _)| planned == window && space == target)
+                    && let Some(operation) = self.state.windows.advance_transfer(
+                        window,
+                        self.space_state.revision,
+                        available,
+                    )
+                    && let Some(frame) = operation.requested_frame
                 {
                     if let Some(screen) = self.space_state.screen_by_space(target) {
                         // Intent recorded while unavailable may describe another display.
@@ -4306,7 +4320,7 @@ impl Reactor {
                             frame,
                         );
                         changes.arrange(Some(target), Presentation::Animated);
-                        self.write_window_frame(window, frame, false);
+                        self.write_window_frame(window, frame, false, None);
                     }
                 }
             }
@@ -5008,7 +5022,7 @@ impl Reactor {
         wid: WindowId,
     ) {
         if let Some(app) = self.app_manager.apps.get(&wid.pid) {
-            app_handles.insert(wid.pid, app.handle.clone());
+            app_handles.entry(wid.pid).or_insert_with(|| app.handle.clone());
         }
     }
 
@@ -5159,7 +5173,7 @@ impl Reactor {
                     changes.membership_for(Some(space));
                 }
             }
-            changes.during_drag |= removal;
+            changes.space(space).during_drag |= removal;
         } else if let Some(space) = event_space {
             changes.space(space).tabs_changed = true;
         }
@@ -5223,7 +5237,7 @@ impl Reactor {
                 frame,
             );
         }
-        self.write_window_frame(placement.window, frame, false);
+        self.write_window_frame(placement.window, frame, false, None);
     }
 
     fn apply_app_rule_resize(&mut self, resize: AppRuleResize) {
@@ -5591,6 +5605,34 @@ impl Reactor {
         fallback_space: Option<SpaceId>,
     ) {
         let workspace_switch_space = response.workspace_space.or(fallback_space);
+        if let Some(dir) = response.boundary_hit
+            && !self.is_in_drag()
+            && self.config.settings.layout.scrolling.gestures.propagate_to_workspace_swipe
+        {
+            let invert = self.config.settings.layout.scrolling.gestures.invert_horizontal;
+            let next = match dir {
+                Direction::Left => Some(invert),
+                Direction::Right => Some(!invert),
+                _ => None,
+            };
+            if let (Some(next), Some(space)) = (
+                next,
+                workspace_switch_space.or_else(|| self.command_context_space()),
+            ) && self.swipe_workspace(
+                changes,
+                space,
+                Some(self.config.settings.gestures.skip_empty),
+                next,
+                self.config
+                    .settings
+                    .gestures
+                    .haptics_enabled
+                    .then_some(self.config.settings.gestures.haptic_pattern),
+            ) {
+                return;
+            }
+        }
+
         if let Some(space) = response.workspace_space {
             self.space_state.command_space = Some(space);
             if let Some(screen) = self.space_state.screen_by_space(space)
@@ -5618,36 +5660,8 @@ impl Reactor {
             changed: _,
             raise_windows,
             focus_window,
-            boundary_hit,
             ..
         } = response;
-
-        if let Some(dir) = boundary_hit
-            && self.config.settings.layout.scrolling.gestures.propagate_to_workspace_swipe
-        {
-            let invert = self.config.settings.layout.scrolling.gestures.invert_horizontal;
-            let next = match dir {
-                Direction::Left => Some(invert),
-                Direction::Right => Some(!invert),
-                _ => None,
-            };
-            if let (Some(next), Some(space)) = (
-                next,
-                workspace_switch_space.or_else(|| self.command_context_space()),
-            ) {
-                self.swipe_workspace(
-                    changes,
-                    space,
-                    Some(self.config.settings.gestures.skip_empty),
-                    next,
-                    self.config
-                        .settings
-                        .gestures
-                        .haptics_enabled
-                        .then_some(self.config.settings.gestures.haptic_pattern),
-                );
-            }
-        }
 
         if let Some(space) = fallback_space {
             if focus_window.is_some() || response.changed {
@@ -5711,6 +5725,7 @@ impl Reactor {
         }
         let (space, preferred, workspace_switch) =
             if let Some((space, window)) = changes.fallback_focus {
+                self.refocus_manager.refocus_state = RefocusState::None;
                 (space, window, true)
             } else if let RefocusState::Pending(space) = self.refocus_manager.refocus_state {
                 self.refocus_manager.refocus_state = RefocusState::None;
@@ -5726,7 +5741,13 @@ impl Reactor {
             return;
         }
         let mut window = self.visible_focus_candidate_in_active_workspace(space, preferred);
-        if window.is_none() && !self.focus_desktop_if_active_workspace_empty(space) {
+        if window.is_none() {
+            if self.focus_desktop_if_active_workspace_empty(space) {
+                if changes.desktop_focus == Some(space) {
+                    changes.desktop_focus = None;
+                }
+                return;
+            }
             self.try_focus_or_warp_without_raise(Some(space), &mut window);
         }
         if let Some(window) =
@@ -5752,6 +5773,7 @@ impl Reactor {
         window: WindowId,
         quiet: Quiet,
     ) {
+        changes.focus_warp = None;
         let warp = {
             if changes.display_warp.is_some()
                 || (self.config.settings.mouse_follows_focus
@@ -5773,6 +5795,7 @@ impl Reactor {
     }
 
     fn stage_focus(&mut self, changes: &mut Changes, window: WindowId) {
+        changes.focus_warp = None;
         self.stage_raise(changes, Vec::new(), Some((window, None)), Quiet::Yes);
     }
 
@@ -5930,7 +5953,8 @@ impl Reactor {
                 return false;
             };
             window.info.sys_id.is_some()
-                && !self.state.windows.is_temporarily_unavailable(wid)
+                && self.state.windows.can_place_window(wid)
+                && self.can_select_window(space, wid)
                 && self.best_space_for_window_id(wid) == Some(space)
                 && self.layout_manager.layout_engine.workspaces().is_window_in_active_workspace(
                     &self.state.windows,

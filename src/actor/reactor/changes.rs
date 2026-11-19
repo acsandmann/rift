@@ -23,6 +23,7 @@ pub(super) struct SpaceChange {
     pub(super) windows_changed: bool,
     pub(super) workspace_changed: bool,
     pub(super) tabs_changed: bool,
+    pub(super) during_drag: bool,
 }
 
 /// Work that depends on the final reconciled model for one Reactor operation.
@@ -31,7 +32,6 @@ pub(super) struct Changes {
     all: SpaceChange,
     inline: [Option<(SpaceId, SpaceChange)>; 2],
     extra: Vec<(SpaceId, SpaceChange)>,
-    pub(super) during_drag: bool,
     pub(super) refresh_notifications: bool,
     pub(super) refresh_ffm: bool,
     pub(super) refresh_menu: bool,
@@ -74,13 +74,20 @@ impl Changes {
         }
     }
 
-    pub(super) fn arrangements(
-        &self,
-    ) -> impl Iterator<Item = (Option<SpaceId>, Presentation)> + '_ {
-        self.all.presentation.map(|policy| (None, policy)).into_iter().chain(
-            self.spaces()
-                .filter_map(|(space, change)| Some((Some(*space), change.presentation?))),
-        )
+    pub(super) fn defer_drag_layouts(
+        &mut self,
+        mut defer: impl FnMut(Option<SpaceId>, Presentation, bool),
+    ) {
+        if let Some(policy) = self.all.presentation.take() {
+            defer(None, policy, self.all.layout_changed);
+        }
+        for (space, change) in self.inline.iter_mut().flatten().chain(&mut self.extra) {
+            if !change.during_drag
+                && let Some(policy) = change.presentation.take()
+            {
+                defer(Some(*space), policy, change.layout_changed);
+            }
+        }
     }
 
     pub(super) fn has_publications(&self) -> bool {
@@ -109,18 +116,19 @@ impl Changes {
     }
 
     pub(super) fn arrange(&mut self, space: Option<SpaceId>, presentation: Presentation) {
-        let change = match space {
-            Some(space) => self.space(space),
-            None => &mut self.all,
-        };
+        let change = self.scope(space);
         change.presentation = change.presentation.max(Some(presentation));
     }
 
-    pub(super) fn membership_for(&mut self, space: Option<SpaceId>) {
-        let change = match space {
+    pub(super) fn scope(&mut self, space: Option<SpaceId>) -> &mut SpaceChange {
+        match space {
             Some(space) => self.space(space),
             None => &mut self.all,
-        };
+        }
+    }
+
+    pub(super) fn membership_for(&mut self, space: Option<SpaceId>) {
+        let change = self.scope(space);
         change.windows_changed = true;
         change.layout_changed = true;
         self.overview_changed = true;
