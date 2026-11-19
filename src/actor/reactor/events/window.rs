@@ -24,7 +24,6 @@ pub struct WindowCreatedPayload {
 pub fn handle_window_created(
     state: &mut crate::model::RiftState,
     layout: &mut crate::actor::reactor::managers::LayoutManager,
-    transactions: &TransactionManager,
     payload: WindowCreatedPayload,
 ) -> anyhow::Result<EventOutcome> {
     let WindowCreatedPayload {
@@ -43,14 +42,6 @@ pub fn handle_window_created(
     let rule_override = state.windows.window(wid).and_then(|window| window.manage_override);
     let mut window_state: WindowState = window.into();
     window_state.manage_override = rule_override;
-    if let Some(wsid) = window_state.info.sys_id {
-        transactions.store_txid(
-            wsid,
-            transactions.get_last_sent_txid(wsid),
-            window_state.frame_monotonic,
-        );
-    }
-
     state.windows.insert_window(wid, window_state);
     let _ = utils::refresh_heuristic(state, wid);
 
@@ -160,7 +151,6 @@ pub fn handle_window_visibility_changed(
 pub struct WindowFrameChangedPayload {
     pub window: WindowId,
     pub new_frame: CGRect,
-    pub mouse_state: Option<MouseState>,
     pub old_space: Option<SpaceId>,
     pub new_space: Option<SpaceId>,
     pub old_space_active: bool,
@@ -172,82 +162,64 @@ pub struct WindowFrameChangedPayload {
     pub screens: Vec<(SpaceId, CGRect, Option<String>)>,
 }
 
-pub enum FrameChangeDisposition {
-    Handled,
-    NeedsGeometryAnalysis,
-}
-
-pub fn classify_window_frame_change(
+pub fn frame_change_needs_layout(
     state: &mut crate::model::RiftState,
     transactions: &TransactionManager,
-    drag: &mut DragManager,
     wid: WindowId,
     new_frame: CGRect,
     last_seen: Option<TransactionId>,
     requested: bool,
     mouse_state: &mut Option<MouseState>,
-    mission_control_active: bool,
-) -> FrameChangeDisposition {
-    let Some(window) = state.windows.window(wid) else {
-        query_mouse_for_active_drag(drag, mouse_state);
-        return FrameChangeDisposition::Handled;
+) -> bool {
+    let Some(window) = state.windows.window_mut(wid) else {
+        return false;
     };
-    let server_id = window.info.sys_id;
-    let old_frame = window.frame_monotonic;
+    let server = window.info.sys_id;
+    let record = server.and_then(|server| transactions.store.get(&server));
 
-    if mission_control_active {
-        drag.reset();
-        return FrameChangeDisposition::Handled;
-    }
-
-    if let Some(server) = server_id
-        && let Some(target) = transactions.get_target_frame(server)
-        && let Some(seen) = last_seen
-    {
-        if seen != transactions.get_last_sent_txid(server) {
-            query_mouse_for_active_drag(drag, mouse_state);
-            return FrameChangeDisposition::Handled;
+    if requested {
+        if let (Some(seen), Some(record)) = (last_seen, record)
+            && seen != record.txid
+        {
+            return false;
         }
-        if mouse_state.is_none() {
-            *mouse_state = crate::sys::event::get_mouse_state();
-        }
-        if *mouse_state == Some(MouseState::Down) {
-            transactions.clear_target_for_window(server);
-        } else {
-            if new_frame.same_as(target) {
+        if let Some(server) = server {
+            if let Some(seen) = last_seen {
+                transactions.store.acknowledge(server, seen, new_frame);
+            } else {
                 transactions.clear_target_for_window(server);
             }
-            if let Some(window) = state.windows.window_mut(wid) {
-                window.frame_monotonic = new_frame;
-            }
-            return FrameChangeDisposition::Handled;
         }
-    }
-    if requested {
-        query_mouse_for_active_drag(drag, mouse_state);
-        if let Some(window) = state.windows.window_mut(wid) {
-            window.frame_monotonic = new_frame;
-        }
-        if let Some(server) = server_id {
-            transactions.clear_target_for_window(server);
-        }
-        return FrameChangeDisposition::Handled;
+        window.frame_monotonic = new_frame;
+        return false;
     }
 
-    if old_frame.same_as(new_frame) {
-        query_mouse_for_active_drag(drag, mouse_state);
-        return FrameChangeDisposition::Handled;
+    if window.frame_monotonic.same_as(new_frame) {
+        return false;
     }
     if mouse_state.is_none() {
         *mouse_state = crate::sys::event::get_mouse_state();
     }
-    FrameChangeDisposition::NeedsGeometryAnalysis
-}
-
-fn query_mouse_for_active_drag(drag: &DragManager, mouse_state: &mut Option<MouseState>) {
-    if mouse_state.is_none() && drag.actor.is_active() {
-        *mouse_state = crate::sys::event::get_mouse_state();
+    if let Some(record) = record
+        && let Some(target) = record.target()
+    {
+        if new_frame.same_as(target) {
+            window.frame_monotonic = new_frame;
+            return false;
+        }
+        if *mouse_state != Some(MouseState::Down) && last_seen.is_some() {
+            // Native notifications can describe an intermediate AX frame. Only
+            // the app's readback completes a write.
+            if last_seen == Some(record.txid) {
+                window.frame_monotonic = new_frame;
+            }
+            return false;
+        }
     }
+    if let Some(server) = server {
+        transactions.clear_target_for_window(server);
+    }
+    true
 }
 
 pub fn handle_window_frame_changed(
@@ -259,7 +231,6 @@ pub fn handle_window_frame_changed(
     let WindowFrameChangedPayload {
         window: wid,
         new_frame,
-        mouse_state,
         old_space,
         new_space,
         old_space_active,
@@ -323,40 +294,9 @@ pub fn handle_window_frame_changed(
         layout.layout_engine.store_floating_position(workspace, wid, new_frame);
     }
 
-    let dragging = state.windows.is_admitted(wid)
-        && (mouse_state == Some(MouseState::Down) || drag.actor.is_active());
-    if dragging {
-        let tiled = !layout.layout_engine.is_window_floating(wid);
-        let native_resize = !old_frame.size.same_as(new_frame.size);
-        if !drag.actor.update_native(wid, new_frame, new_space) {
-            // The start of a user drag is intent, even when no workspace changes.
-            layout.layout_engine.forget_native_layout_for_window(&state.windows, wid);
-            let session_id = drag.actor.await_native(wid);
-            let scene = if tiled && !native_resize {
-                new_space.map_or_else(crate::actor::drag::DragScene::default, |space| {
-                    crate::actor::reactor::events::drag::build_drag_scene(state, layout, wid, space)
-                })
-            } else {
-                Default::default()
-            };
-            let _ = drag.actor.resolve_start(
-                session_id,
-                Some(crate::actor::drag::DragSource {
-                    window: wid,
-                    origin_frame: old_frame,
-                    last_frame: new_frame,
-                    origin_space: old_space,
-                    current_space: new_space,
-                    tiled,
-                }),
-                scene,
-            );
-        }
+    if drag.actor.update_native(wid, new_frame, new_space) {
         drag.sync_preview();
-        if tiled {
-            drag.externally_controlled_window = Some(wid);
-        }
-        if native_resize && active_resize_space.is_some() {
+        if !old_frame.size.same_as(new_frame.size) && active_resize_space.is_some() {
             outcome = outcome.with_layout_event(LayoutEvent::WindowResized {
                 wid,
                 old_frame,
@@ -401,9 +341,6 @@ pub fn handle_window_frame_changed(
         }
     }
 
-    if handle_mouse_up_if_needed(drag, false, mouse_state) {
-        outcome.dispatch_mouse_up = true;
-    }
     Ok(outcome)
 }
 
@@ -474,19 +411,4 @@ pub fn handle_mouse_moved_over_window(
         outcome = outcome.with_layout_event(LayoutEvent::WindowFocused(space, window));
     }
     Ok(outcome)
-}
-fn handle_mouse_up_if_needed(
-    drag: &mut DragManager,
-    mission_control_active: bool,
-    mouse_state: Option<MouseState>,
-) -> bool {
-    if mission_control_active {
-        drag.reset();
-        return false;
-    }
-
-    if mouse_state == Some(MouseState::Up) && drag.actor.is_active() {
-        return true;
-    }
-    false
 }

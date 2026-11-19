@@ -210,12 +210,12 @@ impl Input {
                         && state.focus_follows_mouse_enabled)))
                 || self.mission_control_active.get(),
             state.event_processing_enabled && state.mouse_hides_on_focus,
-            // Mouse-up delivery is part of the stable configured mask. Drag
-            // start/stop is frequent enough that rebuilding the WindowServer
-            // tap costs more than filtering these releases in the callback.
-            state.event_processing_enabled,
             keyed_disable || (self.activate_on_hotkey_release.get() && hotkeys_enabled),
         );
+        // AX can acquire a drag before optional input processing is enabled.
+        if state.mouse_features_enabled {
+            mask |= 1u64 << CGEventType::LeftMouseDragged.0;
+        }
         if self.mission_control_active.get() {
             mask |= (1u64 << CGEventType::LeftMouseDown.0)
                 | (1u64 << CGEventType::LeftMouseUp.0)
@@ -227,8 +227,7 @@ impl Input {
         }
         if state.event_processing_enabled && state.mouse_features_enabled {
             if state.mouse_settings.action1 != MouseAction::None {
-                mask |= (1u64 << CGEventType::LeftMouseDown.0)
-                    | (1u64 << CGEventType::LeftMouseDragged.0);
+                mask |= 1u64 << CGEventType::LeftMouseDown.0;
             }
             if state.mouse_settings.action2 != MouseAction::None {
                 mask |= (1u64 << CGEventType::RightMouseDown.0)
@@ -710,9 +709,8 @@ impl Input {
         self.overview_hotkey.set(None);
         let mut state = self.state.borrow_mut();
         self.reset_gestures();
-        if state.captured_button.take().is_some() {
-            self.events_tx.send(Event::DragCancel);
-        }
+        state.captured_button = None;
+        self.events_tx.send(Event::DragCancel);
         let flags = CGEventSource::flags_state(CGEventSourceStateID::HIDSystemState);
         debug!(?flags, "Event tap was re-enabled; reconciling pressed keys");
         state.reconcile_after_event_tap_reenabled(flags);
@@ -924,7 +922,10 @@ impl Input {
                     .maybe_horizontal_mouse_warp(event)
                     .unwrap_or_else(|| CGEvent::location(Some(event)));
                 let captured = self.state.borrow().captured_button == Some(button);
-                if captured || self.native_motion_active.load(Ordering::Acquire) {
+                if captured
+                    || (button == crate::actor::drag::MouseButton::Left
+                        && self.native_motion_active.load(Ordering::Acquire))
+                {
                     let publisher = &self.drag_motion_publisher;
                     if publisher.publish(crate::actor::drag::DragMotion { point }) {
                         self.events_tx.send(Event::DragMotionPending(publisher.clone()));
@@ -959,7 +960,8 @@ impl Input {
                 } else {
                     state.mouse_settings.action2
                 };
-                if state.mouse_features_enabled
+                if state.event_processing_enabled
+                    && state.mouse_features_enabled
                     && action != MouseAction::None
                     && mouse_modifier_held(
                         state.mouse_settings.modifier,
@@ -1576,24 +1578,18 @@ fn interval_in_ticks(nanoseconds: u64, numer: u32, denom: u32) -> u64 {
     (nanoseconds * u64::from(denom)).div_ceil(u64::from(numer)).max(1)
 }
 
-// AX drag acquisition reads live HID button state. Only an active drag needs release
-// events; dragged events add no information. KeyUp releases keyed disable shortcuts.
 fn build_event_mask(
     key_down_enabled: bool,
     flags_enabled: bool,
     mouse_move_enabled: bool,
     buttons_enabled: bool,
-    release_enabled: bool,
     key_up_enabled: bool,
 ) -> CGEventMask {
-    let mut mask = 0;
+    let mut mask = (1u64 << CGEventType::LeftMouseUp.0) | (1u64 << CGEventType::RightMouseUp.0);
     if buttons_enabled {
         for ty in [CGEventType::LeftMouseDown, CGEventType::RightMouseDown] {
             mask |= 1u64 << ty.0;
         }
-    }
-    if release_enabled {
-        mask |= (1u64 << CGEventType::LeftMouseUp.0) | (1u64 << CGEventType::RightMouseUp.0);
     }
     if key_up_enabled {
         mask |= 1u64 << CGEventType::KeyUp.0;
@@ -2075,11 +2071,15 @@ mod tests {
         let (input, _, _) = input();
         assert!(input.hotkeys.borrow().is_empty());
         let keyboard_mask = 1u64 << CGEventType::KeyDown.0;
-        assert_eq!(input.desired_event_mask(), keyboard_mask);
-        input.state.borrow_mut().mouse_features_enabled = false;
-        input.state.borrow_mut().event_processing_enabled = true;
         let stable_release_mask =
             (1u64 << CGEventType::LeftMouseUp.0) | (1u64 << CGEventType::RightMouseUp.0);
+        let native_drag_mask = 1u64 << CGEventType::LeftMouseDragged.0;
+        assert_eq!(
+            input.desired_event_mask(),
+            keyboard_mask | stable_release_mask | native_drag_mask
+        );
+        input.state.borrow_mut().mouse_features_enabled = false;
+        input.state.borrow_mut().event_processing_enabled = true;
         assert_eq!(input.desired_event_mask(), stable_release_mask | keyboard_mask);
         input.state.borrow_mut().focus_follows_mouse_config_enabled = true;
         assert_eq!(
@@ -2553,8 +2553,8 @@ mod tests {
             ] {
                 let (input, _, mut events_rx) = input();
                 input.state.borrow_mut().mouse_features_enabled = enabled;
-                input.state.borrow_mut().event_processing_enabled = true;
-                // Native AX moves/resizes can acquire a drag regardless of drag_drop.enabled.
+                // Native AX moves/resizes can acquire a drag during startup and
+                // regardless of drag_drop.enabled.
                 input.native_motion_active.store(true, Ordering::Release);
                 assert_ne!(input.desired_event_mask() & (1u64 << event_type.0), 0);
                 let event =

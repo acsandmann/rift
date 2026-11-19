@@ -219,7 +219,6 @@ pub fn handle_window_server_appeared(
 
             state.windows.observe_native_space(wsid, resolved_space, true);
             state.windows.note_window_server_fullscreen_exit(wsid, resolved_space);
-            outcome.confirmed_window_spaces.push((wsid, resolved_space));
         }
     }
 
@@ -329,7 +328,6 @@ pub fn handle_mission_control_native_entered(
     mission_control: &mut MissionControlManager,
     drag: &mut DragManager,
 ) -> anyhow::Result<EventOutcome> {
-    drag.suppress_preview(true);
     drag.reset();
     let changed = !matches!(
         mission_control.mission_control_state,
@@ -346,9 +344,7 @@ pub fn handle_mission_control_native_entered(
 
 pub fn handle_mission_control_native_exited(
     mission_control: &mut MissionControlManager,
-    drag: &mut DragManager,
 ) -> anyhow::Result<EventOutcome> {
-    drag.suppress_preview(false);
     let changed = matches!(
         mission_control.mission_control_state,
         MissionControlState::Active

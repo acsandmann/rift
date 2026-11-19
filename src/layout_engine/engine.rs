@@ -1487,6 +1487,16 @@ impl LayoutEngine {
         false
     }
 
+    pub(crate) fn detach_window_from_workspace(
+        &mut self,
+        windows: &mut WindowStore,
+        window: WindowId,
+    ) {
+        self.remove_window_internal(windows, window, true);
+        self.workspaces.remove_window(windows, window);
+        self.floating_positions.remove_window(window);
+    }
+
     fn remove_window_internal(
         &mut self,
         window_store: &mut WindowStore,

@@ -10,6 +10,9 @@ use crate::sys::window_server::WindowServerId;
 pub struct TransactionId(u32);
 
 impl TransactionId {
+    pub(crate) fn new(id: u32) -> Self { Self(id) }
+
+    #[cfg(test)]
     pub fn next(self) -> Self { Self(self.0.wrapping_add(1)) }
 }
 
@@ -27,37 +30,36 @@ impl TransactionManager {
         self.store.insert(wsid, txid, target);
     }
 
-    /// Updates multiple transaction ID entries.
-    pub fn update_txid_entries<I>(&self, entries: I)
-    where I: IntoIterator<Item = (WindowServerId, TransactionId, CGRect)> {
-        for (wsid, txid, target) in entries {
-            self.store.insert(wsid, txid, target);
-        }
-    }
-
     /// Removes the transaction ID entry for a window.
     pub fn remove_for_window(&self, wsid: WindowServerId) { self.store.remove(&wsid); }
 
     /// Clears the pending target for a window while preserving its last txid.
     pub fn clear_target_for_window(&self, wsid: WindowServerId) { self.store.clear_target(&wsid); }
 
-    /// Generates the next transaction ID for a window.
-    pub fn generate_next_txid(&self, wsid: WindowServerId) -> TransactionId {
-        self.store.next_txid(wsid)
+    pub fn begin(&self, wsid: WindowServerId, target: CGRect) -> TransactionId {
+        self.store.begin(wsid, Some(target))
     }
 
-    /// Sets the last sent transaction ID for a window.
+    pub fn invalidate_for_window(&self, wsid: WindowServerId) { self.store.begin(wsid, None); }
+
+    #[cfg(test)]
+    pub fn generate_next_txid(&self, wsid: WindowServerId) -> TransactionId {
+        self.store.begin(wsid, None)
+    }
+
+    #[cfg(test)]
     pub fn set_last_sent_txid(&self, wsid: WindowServerId, txid: TransactionId) {
         self.store.set_last_txid(wsid, txid);
     }
 
     /// Gets the last sent transaction ID for a window.
+    #[cfg(test)]
     pub fn get_last_sent_txid(&self, wsid: WindowServerId) -> TransactionId {
         self.store.last_txid(&wsid)
     }
 
     /// Gets the target frame for a window's transaction, if it exists.
     pub fn get_target_frame(&self, wsid: WindowServerId) -> Option<CGRect> {
-        self.store.get(&wsid)?.target
+        self.store.get(&wsid)?.target()
     }
 }

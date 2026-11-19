@@ -243,11 +243,11 @@ fn claim_cancels_drag_animation_and_pending_geometry() {
             current_space: Some(space),
             tiled: true,
         },
+        crate::actor::drag::MouseButton::Left,
         frame.mid(),
         crate::common::config::MouseAction::Move,
         crate::actor::drag::DragScene::default(),
     );
-    reactor.drag_manager.externally_controlled_window = Some(wid);
     let txid = reactor.transaction_manager.generate_next_txid(wsid);
     reactor.transaction_manager.store_txid(wsid, txid, frame);
     let (animation_tx, animation_rx) = animation::AnimationSender::channel();
@@ -255,7 +255,6 @@ fn claim_cancels_drag_animation_and_pending_geometry() {
 
     reactor.claim_window(wid, OWNER, NONE).unwrap();
     assert!(!reactor.drag_manager.actor.is_active());
-    assert_eq!(reactor.drag_manager.externally_controlled_window, None);
     assert_eq!(reactor.transaction_manager.get_target_frame(wsid), None);
     assert!(
         std::iter::from_fn(|| animation_rx.commands.try_recv().ok())
