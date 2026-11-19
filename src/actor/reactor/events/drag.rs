@@ -1,6 +1,5 @@
-use tracing::{trace, warn};
+use tracing::trace;
 
-use crate::actor::reactor::LayoutEvent;
 use crate::actor::reactor::events::EventOutcome;
 use crate::actor::reactor::managers::{DragManager, LayoutManager};
 use crate::model::RiftState;
@@ -40,13 +39,11 @@ pub struct MouseUpPayload {
 pub fn handle_cancel(drag: &mut DragManager) -> EventOutcome {
     let cancelled = drag.actor.cancel();
     drag.release_preview();
-    drag.externally_controlled_window = None;
     let Some(cancelled) = cancelled else {
         return EventOutcome::no_change();
     };
     let source = cancelled.source;
     match (cancelled.kind, source.tiled) {
-        (crate::actor::drag::DragKind::ModifierMove, true) => EventOutcome::layout_changed(false),
         (crate::actor::drag::DragKind::ModifierMove, false)
             if source.last_frame != source.origin_frame =>
         {
@@ -56,7 +53,7 @@ pub fn handle_cancel(drag: &mut DragManager) -> EventOutcome {
                 true,
             )
         }
-        _ => EventOutcome::no_change(),
+        _ => EventOutcome::layout_changed(false),
     }
 }
 
@@ -66,17 +63,15 @@ pub fn handle_mouse_up(
     drag: &mut DragManager,
     payload: MouseUpPayload,
 ) -> anyhow::Result<EventOutcome> {
-    let mut outcome = EventOutcome::layout_changed(false);
     let Some(commit) = drag.actor.finish(payload.button) else {
-        return Ok(outcome);
+        return Ok(EventOutcome::no_change());
     };
+    let mut outcome = EventOutcome::layout_changed(false);
     drag.release_preview();
     let window = commit.source.window;
-    drag.externally_controlled_window = None;
-    let mut needs_layout = commit.source.tiled;
 
     if let Some(target) = commit.target
-        && commit.source.current_space == Some(target.intent.space)
+        && payload.final_space == Some(target.intent.space)
         && state.windows.contains_window(window)
         && state.windows.contains_window(target.intent.window)
     {
@@ -87,58 +82,44 @@ pub fn handle_mouse_up(
             space: target.intent.space,
             action: target.intent.action,
         }) {
-            needs_layout = true;
             outcome.drop_haptic = drag.haptics_enabled;
         }
     }
 
-    if commit.source.origin_space != payload.final_space {
-        if commit.source.origin_space.is_some() {
-            outcome = outcome.with_layout_event(LayoutEvent::WindowRemoved(window));
-        }
-        if let Some(space) = payload.final_space
-            && state.windows.is_admitted(window)
-        {
-            if let Some(server_id) =
-                state.windows.window(window).and_then(|window| window.info.sys_id)
-            {
-                state.windows.observe_native_space(server_id, space, true);
-            }
-            if let Some(workspace) = layout.layout_engine.workspaces().active_workspace(space)
-                && !layout.layout_engine.workspaces_mut().assign_window_to_workspace(
-                    &mut state.windows,
-                    space,
+    if let Some(space) = payload.final_space {
+        let engine = &mut layout.layout_engine;
+        let floating = engine.is_window_floating(window);
+        let source = state.windows.workspace_for_window(window);
+        let same_space = source
+            .and_then(|workspace| engine.workspaces().workspace_space(workspace))
+            == Some(space);
+        let destination = if same_space {
+            source.filter(|_| floating)
+        } else {
+            engine.workspaces().active_workspace(space)
+        };
+        let moved = if let Some(workspace) = destination {
+            engine.relocate_window_with_drop(
+                &mut state.windows,
+                &crate::layout_engine::WorkspaceDropRequest {
                     window,
                     workspace,
-                )
-            {
-                warn!(?window, ?workspace, "failed to assign dragged window");
-            }
-            outcome = outcome.with_layout_event(LayoutEvent::WindowAdded(space, window));
-        }
-        needs_layout = true;
-    }
-
-    if let Some(space) = payload.final_space
-        && layout.layout_engine.is_window_floating(window)
-    {
-        state.windows.clear_floating_display_geometry(window);
-        if commit.source.origin_space != payload.final_space {
-            layout.layout_engine.remove_floating_position(window);
-        }
-        if let Some(workspace) = layout
-            .layout_engine
-            .workspaces()
-            .workspace_for_window(&state.windows, space, window)
-            .or_else(|| layout.layout_engine.workspaces().active_workspace(space))
+                    target: None,
+                    frame: floating.then_some(commit.source.last_frame),
+                },
+            )
+        } else if !same_space && source.is_some() {
+            engine.detach_window_from_workspace(&mut state.windows, window);
+            true
+        } else {
+            false
+        };
+        if moved
+            && let Some(server_id) = state.windows.window(window).and_then(|win| win.info.sys_id)
         {
-            layout.layout_engine.store_floating_position(
-                workspace,
-                window,
-                commit.source.last_frame,
-            );
+            state.windows.observe_native_space(server_id, space, true);
         }
     }
 
-    Ok(outcome.with_arrange_passes(u8::from(needs_layout)))
+    Ok(outcome)
 }

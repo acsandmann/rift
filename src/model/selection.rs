@@ -1,28 +1,14 @@
 use serde::{Deserialize, Serialize};
 
-use crate::layout_engine::LayoutId;
 use crate::model::tree::{NodeId, NodeMap};
-
-#[derive(Debug, Copy, Clone)]
-pub enum TreeEvent {
-    AddedToForest(NodeId),
-    AddedToParent(NodeId),
-    Copied {
-        src: NodeId,
-        dest: NodeId,
-        dest_layout: LayoutId,
-    },
-    RemovingFromParent(NodeId),
-    RemovedFromForest(NodeId),
-}
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct Selection {
-    nodes: slotmap::SecondaryMap<NodeId, SelectionInfo>,
+    pub(crate) nodes: slotmap::SecondaryMap<NodeId, SelectionInfo>,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
-struct SelectionInfo {
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+pub(crate) struct SelectionInfo {
     selected_child: NodeId,
     stop_here: bool,
 }
@@ -39,39 +25,54 @@ impl Selection {
         node
     }
 
-    pub fn last_selection(&self, _map: &NodeMap, node: NodeId) -> Option<NodeId> {
+    pub(crate) fn selected_child(&self, node: NodeId) -> Option<NodeId> {
+        self.nodes
+            .get(node)
+            .filter(|info| !info.stop_here)
+            .map(|info| info.selected_child)
+    }
+
+    pub fn last_selection(&self, node: NodeId) -> Option<NodeId> {
         self.nodes.get(node).map(|info| info.selected_child)
     }
+}
 
-    pub fn local_selection(&self, map: &NodeMap, node: NodeId) -> Option<NodeId> {
-        let result = self.nodes.get(node);
-        if let Some(result) = result {
-            debug_assert_eq!(result.selected_child.parent(map), Some(node));
+impl NodeMap {
+    pub(crate) fn current_selection(&self, mut node: NodeId) -> NodeId {
+        while let Some(info) = self.selection_info(node).filter(|info| !info.stop_here) {
+            node = info.selected_child;
         }
-        result.filter(|info| !info.stop_here).map(|info| info.selected_child)
+        node
     }
 
-    pub fn select_locally(&mut self, map: &NodeMap, node: NodeId) -> bool {
-        if let Some(parent) = node.parent(map) {
-            self.nodes
-                .insert(parent, SelectionInfo {
-                    selected_child: node,
-                    stop_here: false,
-                })
-                .map(|info| info.selected_child != node)
-                .unwrap_or(true)
-        } else {
-            false
-        }
+    pub(crate) fn last_selection(&self, node: NodeId) -> Option<NodeId> {
+        self.selection_info(node).map(|info| info.selected_child)
     }
 
-    pub fn select(&mut self, map: &NodeMap, selection: NodeId) {
-        if let Some(info) = self.nodes.get_mut(selection) {
-            info.stop_here = true;
+    pub(crate) fn local_selection(&self, node: NodeId) -> Option<NodeId> {
+        self.selection_info(node)
+            .filter(|info| !info.stop_here)
+            .map(|info| info.selected_child)
+    }
+
+    pub(crate) fn select_locally(&mut self, node: NodeId) -> bool {
+        let Some(parent) = node.parent(self) else { return false };
+        self[parent]
+            .selection_mut()
+            .replace(SelectionInfo {
+                selected_child: node,
+                stop_here: false,
+            })
+            .is_none_or(|info| info.selected_child != node)
+    }
+
+    pub(crate) fn select(&mut self, selection: NodeId) {
+        if self.selection_info(selection).is_some() {
+            self[selection].selection_mut().as_mut().unwrap().stop_here = true;
         }
         let mut node = selection;
-        while let Some(parent) = node.parent(map) {
-            self.nodes.insert(parent, SelectionInfo {
+        while let Some(parent) = node.parent(self) {
+            *self[parent].selection_mut() = Some(SelectionInfo {
                 selected_child: node,
                 stop_here: false,
             });
@@ -79,38 +80,29 @@ impl Selection {
         }
     }
 
-    pub fn handle_event(&mut self, map: &NodeMap, event: TreeEvent) {
-        use TreeEvent::*;
-        match event {
-            AddedToForest(_node) => {}
-            AddedToParent(_node) => {}
-            Copied { src, dest, .. } => {
-                let Some(info) = self.nodes.get(src) else {
-                    return;
-                };
-                let selected_child = std::iter::zip(src.children(map), dest.children(map))
-                    .filter(|(src_child, _)| *src_child == info.selected_child)
-                    .map(|(_, dest_child)| dest_child)
-                    .next()
-                    .unwrap_or_else(|| panic!("Dest tree had different structure, or source node had nonexistent selection: {src:?}, {dest:?}"));
-                self.nodes.insert(dest, SelectionInfo {
-                    selected_child,
-                    stop_here: self.nodes[src].stop_here,
-                });
-            }
-            RemovingFromParent(node) => {
-                let parent = node.parent(map).unwrap();
-                if self.nodes.get(parent).map(|n| n.selected_child) == Some(node) {
-                    if let Some(new_selection) = node.next_sibling(map).or(node.prev_sibling(map)) {
-                        self.nodes[parent].selected_child = new_selection;
-                    } else {
-                        self.nodes.remove(parent);
-                    }
-                }
-            }
-            RemovedFromForest(node) => {
-                self.nodes.remove(node);
-            }
+    pub(crate) fn remap_child_selection(
+        &mut self,
+        source: NodeId,
+        destination: NodeId,
+        old_child: NodeId,
+        new_child: NodeId,
+    ) {
+        if let Some(info) =
+            self.selection_info(source).filter(|info| info.selected_child == old_child)
+        {
+            *self[destination].selection_mut() = Some(SelectionInfo {
+                selected_child: new_child,
+                ..info
+            });
+        }
+    }
+
+    pub(crate) fn detach_selection(&mut self, node: NodeId) {
+        let parent = node.parent(self).unwrap();
+        if let Some(info) = self.selection_info(parent).filter(|info| info.selected_child == node) {
+            let replacement = node.next_sibling(self).or_else(|| node.prev_sibling(self));
+            *self[parent].selection_mut() =
+                replacement.map(|selected_child| SelectionInfo { selected_child, ..info });
         }
     }
 }

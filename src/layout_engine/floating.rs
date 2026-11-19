@@ -141,11 +141,18 @@ impl FloatingManager {
         }
     }
 
-    pub(crate) fn active_flat(&self, space: SpaceId) -> Vec<WindowId> {
+    pub(crate) fn active_windows(&self, space: SpaceId) -> impl Iterator<Item = WindowId> + '_ {
         self.active_floating_windows
             .get(&space)
-            .map(|space_floating| space_floating.values().flatten().copied().collect())
-            .unwrap_or_default()
+            .into_iter()
+            .flat_map(|apps| apps.values().flatten().copied())
+    }
+
+    pub(crate) fn is_active(&self, space: SpaceId, window: WindowId) -> bool {
+        self.active_floating_windows
+            .get(&space)
+            .and_then(|apps| apps.get(&window.pid))
+            .is_some_and(|windows| windows.contains(&window))
     }
 
     pub(crate) fn set_last_focus(&mut self, wid: Option<WindowId>) {
@@ -232,6 +239,6 @@ mod tests {
 
         assert!(!floating.is_floating(provisional_live));
         assert_eq!(floating.fullscreen_kind(provisional_live), None);
-        assert!(!floating.active_flat(space).contains(&provisional_live));
+        assert!(!floating.is_active(space, provisional_live));
     }
 }

@@ -1162,16 +1162,10 @@ impl State {
         Ok(())
     }
 
-    fn txid_from_store(&self, wsid: Option<WindowServerId>) -> Option<TransactionId> {
-        let store = self.tx_store.as_ref()?;
-        let wsid = wsid?;
-        let record = store.get(&wsid)?;
-        record.target.map(|_| record.txid)
-    }
-
-    fn txid_for_window_state(&self, window: &AppWindowState) -> Option<TransactionId> {
-        self.txid_from_store(window.window_server_id)
-            .or_else(|| Self::some_txid(window.last_seen_txid))
+    fn frame_write_is_current(&self, server: Option<WindowServerId>, txid: TransactionId) -> bool {
+        server
+            .and_then(|id| self.tx_store.as_ref()?.get(&id))
+            .is_none_or(|record| record.txid == txid)
     }
 
     fn some_txid(txid: TransactionId) -> Option<TransactionId> {
@@ -1304,7 +1298,9 @@ impl State {
         pending: PendingFrame,
         eui: &mut BatchEui,
     ) -> Result<(), AxError> {
-        if !pending.authority.is_current() {
+        if !pending.authority.is_current()
+            || !self.frame_write_is_current(self.window(wid)?.window_server_id, pending.txid)
+        {
             return Ok(());
         }
         let PendingFrame {
@@ -1477,6 +1473,14 @@ impl State {
         pending_frames: &mut HashMap<WindowId, PendingFrame>,
         eui: &mut BatchEui,
     ) -> Result<bool, AxError> {
+        if let Request::SetWindowFrames(frames, txid, _, _, authority) = &request
+            && !authority.is_current()
+        {
+            for (wid, _) in frames {
+                self.send_event(Event::WindowFrameWriteFailed(*wid, *txid));
+            }
+            return Ok(false);
+        }
         let Some((request, authority)) = request.authorized() else {
             return Ok(false);
         };
@@ -1534,24 +1538,21 @@ impl State {
             Request::SetWindowFrames(frames, txid, mode, _, _) => {
                 for (wid, desired) in frames {
                     if !authority.is_current() {
-                        break;
+                        self.send_event(Event::WindowFrameWriteFailed(wid, txid));
+                        continue;
                     }
-                    let (elem, hint) = match self.window_mut(wid) {
-                        Ok(window) => {
-                            window.last_seen_txid = txid;
-                            window.frame_source = FrameSource::Ordinary;
-                            (window.elem.clone(), window.last_known_frame)
-                        }
-                        Err(err) => match err {
-                            AxError::Ax(code) => {
-                                if self.handle_ax_error(wid, &code) {
-                                    continue;
-                                }
-                                return Err(AxError::Ax(code));
-                            }
-                            AxError::NotFound => continue,
-                        },
+                    if let Ok(window) = self.window(wid)
+                        && !self.frame_write_is_current(window.window_server_id, txid)
+                    {
+                        continue;
+                    }
+                    let Ok(window) = self.window_mut(wid) else {
+                        self.send_event(Event::WindowFrameWriteFailed(wid, txid));
+                        continue;
                     };
+                    window.last_seen_txid = txid;
+                    window.frame_source = FrameSource::Ordinary;
+                    let (elem, hint) = (window.elem.clone(), window.last_known_frame);
 
                     // The acknowledgment always carries geometry read back from AX.
                     let result = trace("set_frame", &elem, || {
@@ -1566,13 +1567,15 @@ impl State {
                             || self.hold_batch_eui(eui),
                         )
                     });
-                    let frame = match self.handle_ax_result(wid, result)? {
-                        Some(frame) => {
-                            self.window_mut(wid)?.last_known_frame = frame;
-                            frame
+                    let frame = match self.handle_frame_result(wid, txid, result) {
+                        Ok(Some(frame)) => frame,
+                        Ok(None) => continue,
+                        Err(error) => {
+                            warn!(?wid, ?error, "Failed to reconcile frame");
+                            continue;
                         }
-                        None => continue,
                     };
+                    self.window_mut(wid)?.last_known_frame = frame;
 
                     self.send_event(Event::WindowFrameChanged(
                         wid,
@@ -1676,16 +1679,18 @@ impl State {
                 if ended_animation {
                     self.restart_notifications_after_animation(&elem);
                 }
-                let mut frame =
-                    match self.handle_ax_result(wid, trace("frame", &elem, || elem.frame()))? {
-                        Some(frame) => frame,
-                        None => return Ok(false),
-                    };
+                let result = trace("frame", &elem, || elem.frame());
+                let mut frame = match self.handle_frame_result(wid, last_seen_txid, result)? {
+                    Some(frame) => frame,
+                    None => return Ok(false),
+                };
                 // Intermediate AX writes can be clamped while a growing column
                 // still overlaps the screen edge. The intended-frame cache is
                 // only a hint: repair against observed geometry once motion ends.
                 if let Some((target, authority)) = last_animation_frame
                     && authority.is_current()
+                    && self
+                        .frame_write_is_current(self.window(wid)?.window_server_id, last_seen_txid)
                     && !frame.same_as(target)
                 {
                     let result = trace("set_frame", &elem, || {
@@ -1700,7 +1705,7 @@ impl State {
                             || self.require_batch_eui(eui),
                         )
                     });
-                    frame = match self.handle_ax_result(wid, result)? {
+                    frame = match self.handle_frame_result(wid, last_seen_txid, result)? {
                         Some(frame) => frame,
                         None => return Ok(false),
                     };
@@ -1807,7 +1812,7 @@ impl State {
                             trace!(?wid, ?notif, "Ignoring notification during owned frame writes");
                             return;
                         }
-                        (self.txid_for_window_state(window), window.frame_source)
+                        (Self::some_txid(window.last_seen_txid), window.frame_source)
                     }
                     Err(err) => {
                         match err {
@@ -2364,12 +2369,11 @@ impl State {
         // unavailable; app-level discovery remains the lifecycle fallback.
         let notifications_registered = self.register_window_notifications(&elem, wid);
         let hidden_by_app = self.is_hidden;
-        let last_seen_txid = self.txid_from_store(Some(window_server_id)).unwrap_or_default();
 
         let old = self.windows.insert(wid, AppWindowState {
             elem: elem.clone(),
             notifications_registered,
-            last_seen_txid,
+            last_seen_txid: TransactionId::default(),
             hidden_by_app,
             window_server_id: Some(window_server_id),
             title: info.title.clone(),
@@ -2588,6 +2592,18 @@ impl State {
         }
 
         false
+    }
+
+    fn handle_frame_result(
+        &mut self,
+        wid: WindowId,
+        txid: TransactionId,
+        result: Result<CGRect, AxError>,
+    ) -> Result<Option<CGRect>, AxError> {
+        if result.is_err() {
+            self.send_event(Event::WindowFrameWriteFailed(wid, txid));
+        }
+        self.handle_ax_result(wid, result)
     }
 
     fn handle_ax_result<T>(

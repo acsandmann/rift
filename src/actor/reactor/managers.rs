@@ -43,31 +43,23 @@ impl AppManager {
 pub struct DragManager {
     pub actor: crate::actor::drag::DragActor,
     pub native_motion_active: Arc<AtomicBool>,
-    pub externally_controlled_window: Option<WindowId>,
     pub(super) preview: Option<crate::ui::drag_preview::DragPreview>,
     pub(super) preview_enabled: bool,
-    pub(super) preview_suppressed: bool,
     pub(super) haptics_enabled: bool,
 }
 
 impl DragManager {
     pub fn sync_motion_gate(&self) {
-        let active = self.actor.is_active()
-            && matches!(
-                self.actor.kind(),
-                Some(
-                    crate::actor::drag::DragKind::NativeMove
-                        | crate::actor::drag::DragKind::NativeResize
-                )
-            );
-        self.native_motion_active.store(active, Ordering::Release);
+        let active = self.actor.drop_enabled()
+            && self.actor.kind() == Some(crate::actor::drag::DragKind::NativeMove);
+        if self.native_motion_active.load(Ordering::Relaxed) != active {
+            self.native_motion_active.store(active, Ordering::Release);
+        }
     }
 
     /// A window leaving Rift's control can no longer be dragged by it.
     pub fn forget_window(&mut self, wid: WindowId) {
-        if self.actor.window_removed(wid) && self.externally_controlled_window == Some(wid) {
-            self.externally_controlled_window = None;
-        }
+        self.actor.window_removed(wid);
         self.sync_motion_gate();
         self.sync_preview();
     }
@@ -76,7 +68,6 @@ impl DragManager {
         self.actor.cancel();
         self.sync_motion_gate();
         self.release_preview();
-        self.externally_controlled_window = None;
     }
 
     pub fn update_config(&mut self, config: DragDropSettings) {
@@ -86,9 +77,6 @@ impl DragManager {
         if !config.enabled || !config.preview {
             self.release_preview();
         }
-        if !config.enabled {
-            self.externally_controlled_window = None;
-        }
         self.sync_preview();
     }
 
@@ -96,11 +84,7 @@ impl DragManager {
         if cfg!(test) {
             return;
         }
-        let Some(target) = self
-            .actor
-            .preview_target()
-            .filter(|_| self.preview_enabled && !self.preview_suppressed)
-        else {
+        let Some(target) = self.actor.preview_target().filter(|_| self.preview_enabled) else {
             self.hide_preview();
             return;
         };
@@ -126,13 +110,6 @@ impl DragManager {
     }
 
     pub fn release_preview(&mut self) { drop(self.preview.take()); }
-
-    pub fn suppress_preview(&mut self, suppressed: bool) {
-        self.preview_suppressed = suppressed;
-        if suppressed {
-            self.hide_preview();
-        }
-    }
 }
 
 /// Manages window notifications
@@ -217,25 +194,13 @@ pub struct LayoutManager {
     pub layout_engine: LayoutEngine,
 }
 
-pub type LayoutResult = Vec<(SpaceId, Vec<(WindowId, CGRect)>)>;
+pub type LayoutResult = Vec<(
+    SpaceId,
+    Vec<(WindowId, CGRect)>,
+    Vec<crate::layout_engine::engine::GroupContainerInfo>,
+)>;
 
 pub(super) use crate::model::hidden_window_placement::ScrollingDisplayBounds;
-
-fn bound_scrolling_tiled_frames_to_screen(
-    reactor: &Reactor,
-    layout: &mut Vec<(WindowId, CGRect)>,
-    bounds: ScrollingDisplayBounds,
-    active_workspace_windows: &HashSet<WindowId>,
-) {
-    for (wid, frame) in layout.iter_mut() {
-        if !active_workspace_windows.contains(wid)
-            || reactor.layout_manager.layout_engine.is_window_floating(*wid)
-        {
-            continue;
-        }
-        *frame = bounds.apply(*frame);
-    }
-}
 
 impl LayoutManager {
     fn publish_stack_tabs(
@@ -326,10 +291,10 @@ impl LayoutManager {
         is_workspace_switch: bool,
         space_scope: Option<SpaceId>,
     ) -> Result<bool, crate::model::reactor::ReactorError> {
-        if reactor.refreshes_blocked() {
+        if reactor.refreshes_blocked() || reactor.is_mission_control_active() {
             return Ok(false);
         }
-        let layout_result = Self::calculate_layout(reactor, space_scope);
+        let layout_result = Self::calculate_layout(reactor, space_scope, true, false);
         Self::apply_layout(
             reactor,
             layout_result,
@@ -345,31 +310,18 @@ impl LayoutManager {
         space_scope: Option<SpaceId>,
         force_frames: bool,
     ) -> Result<bool, crate::model::reactor::ReactorError> {
-        if reactor.refreshes_blocked() {
+        if reactor.refreshes_blocked() || reactor.is_mission_control_active() {
             return Ok(false);
         }
-        let layout = Self::calculate_layout(reactor, space_scope);
-        // Finish the logical scrolling viewport here, without queueing a second
-        // animation behind the overview's own transition.
-        for &(space, _) in &layout {
-            let engine = &mut reactor.layout_manager.layout_engine;
-            if let Some((workspace, layout)) = engine.workspaces().active_layout_for_space(space)
-                && let crate::layout_engine::LayoutSystemKind::Scrolling(system) =
-                    &mut engine.workspaces_mut().workspaces[workspace].layout_system
-                && let Some((mut camera, _)) = system.presentation(layout)
-            {
-                camera.finish();
-                system
-                    .commit_presented_viewport(layout, &camera.snapshot(std::time::Instant::now()));
-            }
-        }
-        let layout = Self::calculate_layout(reactor, space_scope);
+        let layout = Self::calculate_layout(reactor, space_scope, true, true);
         Self::apply_layout(reactor, layout, false, false, true, force_frames)
     }
 
     pub(super) fn calculate_layout(
         reactor: &mut Reactor,
         space_scope: Option<SpaceId>,
+        publish_groups: bool,
+        finish_scrolling: bool,
     ) -> LayoutResult {
         if reactor.state.windows.tracked_window_count() == 0 {
             return LayoutResult::new();
@@ -399,36 +351,34 @@ impl LayoutManager {
             reactor
                 .layout_manager
                 .layout_engine
-                .update_space_display(space, display_uuid_opt.clone());
-            let mut layout =
-                reactor.layout_manager.layout_engine.calculate_layout_with_virtual_workspaces(
-                    &reactor.state.windows,
-                    space,
-                    frame,
-                    &gaps,
-                    reactor.config.settings.ui.stack_line.reserve(),
-                    |wid| reactor.state.windows.window(wid).map(|w| w.frame_monotonic),
-                    &all_screen_frames,
-                );
-            if reactor.layout_manager.layout_engine.active_layout_mode_at(space)
-                == LayoutMode::Scrolling
+                .update_space_display(space, display_uuid_opt);
+            let mut groups = Vec::new();
+            let mut layout = reactor.layout_manager.layout_engine.calculate_layout_with_groups(
+                &reactor.state.windows,
+                space,
+                frame,
+                &gaps,
+                reactor.config.settings.ui.stack_line.reserve(),
+                |wid| reactor.state.windows.window(wid).map(|w| w.frame_monotonic),
+                &all_screen_frames,
+                // Stack metadata feeds IPC even when the overlay is disabled.
+                publish_groups.then_some(&mut groups),
+                finish_scrolling,
+            );
+            let engine = &reactor.layout_manager.layout_engine;
+            if engine.active_layout_mode_at(space) == LayoutMode::Scrolling
                 && let Some(bounds) = ScrollingDisplayBounds::for_screen(frame, &all_screen_frames)
+                && let Some(workspace) = engine.workspaces().active_workspace(space)
             {
-                let active_workspace_windows: HashSet<WindowId> = reactor
-                    .layout_manager
-                    .layout_engine
-                    .workspaces()
-                    .windows_in_active_workspace(&reactor.state.windows, space)
-                    .into_iter()
-                    .collect();
-                bound_scrolling_tiled_frames_to_screen(
-                    reactor,
-                    &mut layout,
-                    bounds,
-                    &active_workspace_windows,
-                );
+                for (window, frame) in &mut layout {
+                    if reactor.state.windows.workspace_for_window(*window) == Some(workspace)
+                        && !engine.is_window_floating(*window)
+                    {
+                        *frame = bounds.apply(*frame);
+                    }
+                }
             }
-            layout_result.push((space, layout));
+            layout_result.push((space, layout, groups));
         }
 
         layout_result
@@ -444,12 +394,12 @@ impl LayoutManager {
     ) -> Result<bool, crate::model::reactor::ReactorError> {
         let main_window = reactor.main_window();
         trace!(?main_window);
-        let skip_wid = reactor.drag_manager.externally_controlled_window;
+        let skip_wid = reactor.drag_manager.actor.source().map(|source| source.window);
         let mut any_frame_changed = false;
 
         let active_space = reactor.workspace_command_space();
-        for (space, layout) in layout_result {
-            // Start native workspace moves before collecting stack tabs and building
+        for (space, layout, group_infos) in layout_result {
+            // Start native workspace moves before publishing stack tabs and building
             // IPC events. App actors can perform AX work while we publish the UI.
             let switch_dispatched = is_workspace_switch && !instant && !force_frames;
             if switch_dispatched {
@@ -457,27 +407,13 @@ impl LayoutManager {
                     AnimationManager::workspace_switch_layout(reactor, space, &layout, skip_wid);
             }
             if let Some(screen) = reactor.space_state.screen_by_space(space) {
-                let screen_frame = screen.frame;
                 let display_uuid = screen.display_uuid_owned();
-                let gaps = reactor
-                    .config
-                    .settings
-                    .layout
-                    .gaps
-                    .effective_for_display(display_uuid.as_deref());
                 let stack_has_fullscreen = reactor
                     .layout_manager
                     .layout_engine
                     .active_workspace_for_space_has_fullscreen(space);
                 let active_workspace_for_space_has_fullscreen =
                     active_space == Some(space) && stack_has_fullscreen;
-                let group_infos = reactor.layout_manager.layout_engine.collect_group_containers(
-                    space,
-                    screen_frame,
-                    &gaps,
-                    reactor.config.settings.ui.stack_line.reserve(),
-                );
-
                 Self::publish_stack_tabs(reactor, space, &group_infos, stack_has_fullscreen, false);
 
                 if let Some(workspace_id) =

@@ -79,10 +79,7 @@ impl Reactor {
                         .get_mut(workspace)
                         && let LayoutSystemKind::Scrolling(system) = &mut ws.layout_system
                     {
-                        if let Some((mut p, _)) = system.presentation(layout) {
-                            p.finish();
-                            system.commit_presented_viewport(layout, &p.snapshot(Instant::now()));
-                        }
+                        system.finish_viewport(layout);
                     }
                     if visible {
                         self.apply_viewport_frames();
@@ -419,7 +416,14 @@ mod tests {
         else {
             panic!("scrolling layout");
         };
-        system.select_window(layout, crate::actor::app::WindowId::new(1, 1));
+        system
+            .focus(
+                layout,
+                crate::layout_engine::systems::Focus::Select(crate::actor::app::WindowId::new(
+                    1, 1,
+                )),
+            )
+            .handled;
         system.prepare_layout(
             layout,
             CGRect::new(CGPoint::ZERO, CGSize::new(1000.0, 1000.0)),
