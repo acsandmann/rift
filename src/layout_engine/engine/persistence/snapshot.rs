@@ -254,7 +254,6 @@ impl PersistedLayout {
             window_layout_constraints: Default::default(),
             workspaces: self.workspaces,
             layout_settings: LayoutSettings::default(),
-            broadcast_tx: None,
             space_display_map: self.space_display_map,
             display_last_space: self.display_last_space,
             persistence: PersistenceState {

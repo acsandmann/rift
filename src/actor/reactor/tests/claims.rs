@@ -30,9 +30,9 @@ fn tiled(reactor: &mut Reactor, space: SpaceId) -> Vec<WindowId> {
 }
 
 fn layout_updates(reactor: &mut Reactor, change: impl FnOnce(&mut Reactor)) -> usize {
-    let before = reactor.layout_update_count;
+    let before = reactor.layout_calculations.len();
     change(reactor);
-    reactor.layout_update_count - before
+    reactor.layout_calculations.len() - before
 }
 
 fn focus(
@@ -98,7 +98,7 @@ fn claim_detaches_without_destroying_and_release_restores_the_slot() {
     assert!(!reactor.query_window_info(wid(1)).unwrap().externally_managed);
 
     // No layout path can reintroduce the window while it is claimed.
-    reactor.send_layout_event(LayoutEvent::WindowAdded(space, wid(2)));
+    reactor.handle_test_layout_event(LayoutEvent::WindowAdded(space, wid(2)));
     reactor.discover_test_windows(1, vec![], vec![wid(1), wid(2), wid(3)]);
     apps.simulate_until_quiet(&mut reactor);
     assert_eq!(tiled(&mut reactor, space), vec![wid(1), wid(3)]);
@@ -168,7 +168,7 @@ fn claims_cost_one_arrangement_and_flag_updates_cost_none() {
 
     // An unadmitted window has no projection to remove.
     reactor.state.windows.window_mut(wid(2)).unwrap().manage_override = Some(false);
-    reactor.send_layout_event(LayoutEvent::WindowRemoved(wid(2)));
+    reactor.handle_test_layout_event(LayoutEvent::WindowRemoved(wid(2)));
     apps.simulate_until_quiet(&mut reactor);
     assert_eq!(
         layout_updates(&mut reactor, |r| r.claim_window(wid(2), OWNER, NONE).unwrap()),
@@ -233,7 +233,7 @@ fn claimed_floating_window_keeps_its_classification_and_adopts_owner_geometry() 
 #[test]
 fn claim_cancels_drag_animation_and_pending_geometry() {
     let (mut reactor, wid, wsid, space, _, frame) = reactor_with_window_on_space1();
-    reactor.send_layout_event(LayoutEvent::WindowAdded(space, wid));
+    reactor.handle_test_layout_event(LayoutEvent::WindowAdded(space, wid));
     reactor.drag_manager.actor.begin_modifier(
         crate::actor::drag::DragSource {
             window: wid,
@@ -325,7 +325,7 @@ fn claimed_window_keeps_its_workspace_across_workspace_switches() {
     // Neither hiding nor revealing a workspace touches the claimed window.
     for workspace in [other, home] {
         assert!(reactor.set_test_active_workspace(space, workspace));
-        reactor.update_layout_or_warn(false, true, Some(space));
+        reactor.arrange_test(true, Some(space));
         apps.simulate_until_quiet(&mut reactor);
         assert!(!tiled(&mut reactor, space).contains(&wid(1)));
         assert_eq!(apps.windows[&wid(1)].frame, parked);
@@ -361,13 +361,15 @@ fn claimed_window_keeps_its_workspace_across_workspace_switches() {
 fn display_churn_while_claimed_rehomes_the_window_on_release() {
     let (mut reactor, wid, wsid, space1, space2, _, screen2) =
         reactor_with_window_on_space1_two_displays();
-    reactor.send_layout_event(LayoutEvent::WindowAdded(space1, wid));
+    reactor.handle_test_layout_event(LayoutEvent::WindowAdded(space1, wid));
     reactor.claim_window(wid, OWNER, NONE).unwrap();
 
     // Display 1 disappears; macOS moves the window to display 2.
     reactor.state.windows.set_window_server_space(wsid, Some(space2));
     reactor.handle_event(space_state_event(vec![screen2], vec![Some(space2)]));
-    reactor.reassign_window_to_authoritative_space(wid, space2, true);
+    reactor.commit_test(|reactor, changes| {
+        reactor.reassign_window_to_authoritative_space(changes, wid, space2, true)
+    });
     assert!(reactor.state.windows.is_claimed(wid));
     assert!(!reactor.test_active_workspace_windows(space2).contains(&wid));
 
@@ -380,7 +382,7 @@ fn display_churn_while_claimed_rehomes_the_window_on_release() {
 #[test]
 fn fullscreen_exit_while_claimed_waits_for_release() {
     let (mut reactor, wid, wsid, space, _, _) = reactor_with_window_on_space1();
-    reactor.send_layout_event(LayoutEvent::WindowAdded(space, wid));
+    reactor.handle_test_layout_event(LayoutEvent::WindowAdded(space, wid));
     let workspace = reactor.state.windows.workspace_for_window(wid).unwrap();
     reactor.claim_window(wid, OWNER, NONE).unwrap();
     let fullscreen = SpaceId::new(0x400000001);
@@ -392,8 +394,9 @@ fn fullscreen_exit_while_claimed_waits_for_release() {
         NativeFullscreenTransition::Suspended,
     );
 
-    let outcome = reactor.restore_native_fullscreen(Some(wsid), wid, Some(space));
-    reactor.apply_event_outcome(outcome);
+    reactor.commit_test(|reactor, changes| {
+        reactor.restore_native_fullscreen(changes, Some(wsid), wid, Some(space))
+    });
     assert!(reactor.state.windows.is_claimed(wid));
     assert!(reactor.state.windows.native_fullscreen_record_for_window(wid).is_some());
     assert!(!reactor.test_active_workspace_windows(space).contains(&wid));
@@ -561,7 +564,7 @@ fn merging_two_claimed_identities_keeps_the_recognized_owner() {
 fn window_queries_place_claimed_windows_from_cached_spaces_only() {
     let (mut reactor, wid, wsid, space1, space2, frame, screen2) =
         reactor_with_window_on_space1_two_displays();
-    reactor.send_layout_event(LayoutEvent::WindowAdded(space1, wid));
+    reactor.handle_test_layout_event(LayoutEvent::WindowAdded(space1, wid));
     reactor.claim_window(wid, OWNER, NONE).unwrap();
     let listed_on = |reactor: &Reactor| {
         let before = window_server::window_space_query_count();
@@ -674,7 +677,7 @@ fn release_arranges_each_affected_space_once_through_the_visible_path() {
     for (window, space) in [(a, space1), (b, space1), (c, space2)] {
         let workspace = reactor.test_workspace(space, 0);
         assert!(reactor.assign_test_window_to_workspace(space, window, workspace));
-        reactor.send_layout_event(LayoutEvent::WindowAdded(space, window));
+        reactor.handle_test_layout_event(LayoutEvent::WindowAdded(space, window));
         reactor.claim_window(window, OWNER, NONE).unwrap();
         assert!(!reactor.test_active_workspace_windows(space).contains(&window));
     }
@@ -719,9 +722,13 @@ fn minimize_and_lose_admission_while_claimed(reactor: &mut Reactor, window: Wind
         min_frame: CGSize::ZERO,
         max_frame: CGSize::ZERO,
     };
-    reactor.update_partial_window_server_info(vec![server_info(3)]);
+    reactor.commit_test(|reactor, changes| {
+        reactor.update_partial_window_server_info(changes, vec![server_info(3)])
+    });
     assert!(!reactor.state.windows.window(window).unwrap().is_admitted());
-    reactor.update_partial_window_server_info(vec![server_info(0)]);
+    reactor.commit_test(|reactor, changes| {
+        reactor.update_partial_window_server_info(changes, vec![server_info(0)])
+    });
     for standard in [false, true] {
         info.is_standard = standard;
         reactor.discover_test_windows(window.pid, vec![(window, info.clone())], visible.clone());

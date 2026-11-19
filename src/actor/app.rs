@@ -505,8 +505,16 @@ impl AppThreadHandle {
     pub fn send(&self, req: Request) -> anyhow::Result<()> {
         let mut req = req;
         match &mut req {
-            Request::SetWindowFrames(_, _, _, _, authority)
-            | Request::BeginWindowAnimation(_, authority)
+            Request::SetWindowFrames(frames, transaction, mode, _, authority) => {
+                trace!(
+                    count = frames.len(),
+                    ?transaction,
+                    ?mode,
+                    "Submitting native frame request"
+                );
+                *authority = self.frame_authority.clone();
+            }
+            Request::BeginWindowAnimation(_, authority)
             | Request::EndWindowAnimation(_, authority) => {
                 *authority = self.frame_authority.clone()
             }
@@ -557,6 +565,7 @@ impl AppThreadHandle {
         }
         let mut changed = false;
         for (wid, frame, set_size, txid, source) in frames {
+            trace!(?wid, ?txid, ?source, "Publishing interactive native frame");
             let set_size = set_size
                 || pending
                     .latest
@@ -3026,7 +3035,7 @@ mod frame_tests {
                 size_step: 10.,
                 ..Default::default()
             };
-            let authority = FrameAuthority(None, ScrollingDisplayBounds::for_screen(screen, &[]));
+            let authority = FrameAuthority(None, ScrollingDisplayBounds::for_screen(screen, []));
             let target = AuthorizedFrameTarget {
                 target: &window,
                 authority: &authority,

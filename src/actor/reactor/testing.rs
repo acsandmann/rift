@@ -1,13 +1,13 @@
 use objc2_core_foundation::{CGPoint, CGRect, CGSize};
 use tracing::debug;
 
-use super::{Event, EventOutcome, Reactor, Record, Requested, ScreenInfo, TransactionId};
+use super::{Changes, Event, Presentation, Reactor, Record, Requested, ScreenInfo, TransactionId};
 use crate::actor;
 use crate::actor::app::{AppThreadHandle, Quiet, Request, WindowId};
 use crate::actor::spaces::ForwardedSpaceState;
 use crate::common::collections::BTreeMap;
 use crate::common::config::Config;
-use crate::layout_engine::{LayoutCommand, LayoutEngine};
+use crate::layout_engine::{LayoutCommand, LayoutEngine, LayoutEvent};
 use crate::sys::app::{AppInfo, WindowInfo, pid_t};
 use crate::sys::geometry::SameAs;
 use crate::sys::screen::SpaceId;
@@ -130,9 +130,25 @@ impl Reactor {
         self.handle_event(Event::Command(crate::model::reactor::Command::Layout(command)));
     }
 
-    pub(crate) fn dispatch_test_layout_command(&mut self, command: LayoutCommand) -> EventOutcome {
-        self.dispatch_workflow(Event::Command(crate::model::reactor::Command::Layout(command)))
-            .expect("test layout command should dispatch")
+    pub(super) fn commit_test(&mut self, reconcile: impl FnOnce(&mut Self, &mut Changes)) {
+        let mut changes = Changes::default();
+        reconcile(self, &mut changes);
+        self.finish(changes, None, None);
+    }
+
+    pub(super) fn handle_test_layout_event(&mut self, event: LayoutEvent) {
+        self.commit_test(|reactor, changes| reactor.reconcile_layout_event(changes, event));
+    }
+
+    pub(super) fn arrange_test(&mut self, workspace_switch: bool, space: Option<SpaceId>) -> bool {
+        let mut changes = Changes::default();
+        let policy = if workspace_switch {
+            Presentation::WorkspaceSwitch
+        } else {
+            Presentation::Animated
+        };
+        changes.arrange(space, policy);
+        super::LayoutManager::commit(self, &mut changes)
     }
 
     pub fn mark_test_window_visible_in_space(&mut self, wsid: WindowServerId, space: SpaceId) {
@@ -278,7 +294,6 @@ pub fn test_reactor_with_workspace_settings(
     Reactor::new_for_test(LayoutEngine::new(
         workspace_settings,
         &crate::common::config::LayoutSettings::default(),
-        None,
     ))
 }
 
