@@ -25,7 +25,7 @@ impl EnhancedUi {
         }
 
         match app.bool_attribute(ATTRIBUTE) {
-            Ok(true) => match app.set_bool_attribute(ATTRIBUTE, false) {
+            Ok(true) => match set_enabled(app, false) {
                 Ok(()) => self.restore = true,
                 Err(err) if is_absent(&err) => self.absent = true,
                 Err(_) => {}
@@ -57,7 +57,7 @@ impl EnhancedUi {
             return;
         }
 
-        match app.set_bool_attribute(ATTRIBUTE, true) {
+        match set_enabled(app, true) {
             Ok(()) => self.restore = false,
             Err(err) if is_absent(&err) => {
                 self.restore = false;
@@ -65,6 +65,18 @@ impl EnhancedUi {
             }
             Err(_) => {}
         }
+    }
+}
+
+fn set_enabled(app: &AXUIElement, enabled: bool) -> Result<(), AxError> {
+    match app.set_bool_attribute(ATTRIBUTE, enabled) {
+        // Firefox can apply the change while returning NotImplemented.
+        Err(AxError::Ax(AXError::NotImplemented))
+            if app.bool_attribute(ATTRIBUTE).is_ok_and(|actual| actual == enabled) =>
+        {
+            Ok(())
+        }
+        result => result,
     }
 }
 
