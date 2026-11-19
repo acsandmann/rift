@@ -203,25 +203,13 @@ Enable it in System Settings > Desktop & Dock (Mission Control) and restart Rift
                     "Could not restore master file at {}; starting with a fresh layout: {error}",
                     path.display()
                 );
-                LayoutEngine::new(
-                    &config.virtual_workspaces,
-                    &config.settings.layout,
-                    Some(broadcast_tx.clone()),
-                )
+                LayoutEngine::new(&config.virtual_workspaces, &config.settings.layout)
             }
         }
     } else {
-        LayoutEngine::new(
-            &config.virtual_workspaces,
-            &config.settings.layout,
-            Some(broadcast_tx.clone()),
-        )
+        LayoutEngine::new(&config.virtual_workspaces, &config.settings.layout)
     };
-    if let Err(error) = layout.finish_loading(
-        &config.virtual_workspaces,
-        &config.settings.layout,
-        Some(broadcast_tx.clone()),
-    ) {
+    if let Err(error) = layout.finish_loading(&config.virtual_workspaces, &config.settings.layout) {
         eprintln!("Could not apply workspace settings to restored layout: {error}");
         process::exit(1);
     }

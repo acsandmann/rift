@@ -96,39 +96,17 @@ pub enum AppRuleRejection {
     Heuristic,
 }
 
-/// Follow-up integration work produced while applying a batch of app rules.
-///
-/// Like the reactor's `EventOutcome`, this is returned to the owning layer and
-/// consumed explicitly rather than stored as transient engine state.
+/// Frame and workspace requests from observing a single window.
 #[derive(Debug, Default)]
 pub(crate) struct AppRuleOutcome {
-    placements: Vec<AppRulePlacement>,
-    resizes: Vec<AppRuleResize>,
-    workspace_focus: Option<AppRuleWorkspaceFocus>,
+    pub(crate) frame: Option<AppRuleFrame>,
+    pub(crate) workspace_focus: Option<AppRuleWorkspaceFocus>,
 }
 
-impl AppRuleOutcome {
-    pub(crate) fn push_placement(&mut self, placement: AppRulePlacement) {
-        self.placements.push(placement);
-    }
-
-    pub(crate) fn push_resize(&mut self, resize: AppRuleResize) { self.resizes.push(resize); }
-
-    pub(crate) fn has_resizes(&self) -> bool { !self.resizes.is_empty() }
-
-    pub(crate) fn set_workspace_focus(&mut self, focus: AppRuleWorkspaceFocus) {
-        self.workspace_focus = Some(focus);
-    }
-
-    pub(crate) fn into_parts(
-        self,
-    ) -> (
-        Vec<AppRulePlacement>,
-        Vec<AppRuleResize>,
-        Option<AppRuleWorkspaceFocus>,
-    ) {
-        (self.placements, self.resizes, self.workspace_focus)
-    }
+#[derive(Debug)]
+pub(crate) enum AppRuleFrame {
+    Place(AppRulePlacement),
+    Resize(AppRuleResize),
 }
 
 /// One-shot frame request derived from a floating app rule.

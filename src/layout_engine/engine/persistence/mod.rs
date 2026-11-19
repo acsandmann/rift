@@ -13,7 +13,6 @@ use crate::actor::app::{WindowId, pid_t};
 use crate::common::collections::{BTreeMap, BTreeSet, HashMap};
 use crate::common::config::{LayoutSettings, VirtualWorkspaceSettings, WorkspaceMode};
 use crate::layout_engine::LayoutSystem;
-use crate::model::broadcast::BroadcastSender;
 use crate::model::reactor::WindowState;
 use crate::model::{
     AppRuleEngine, FloatingPositionStore, VirtualWorkspaceId, WindowStore, WorkspaceStore,

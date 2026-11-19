@@ -1,13 +1,11 @@
 use tracing::{debug, trace};
 
+use super::super::{Changes, Reactor};
 use crate::actor::app::Request;
-use crate::actor::reactor::events::{EventOutcome, window};
-use crate::actor::reactor::managers::{DragManager, MissionControlManager};
-use crate::actor::reactor::{LayoutEvent, MissionControlState, SpaceEventKind};
+use crate::actor::reactor::{LayoutEvent, SpaceEventKind};
 use crate::actor::spaces::ForwardedSpaceState;
 use crate::actor::wm_controller::WmEvent;
 use crate::common::collections::HashSet;
-use crate::model::RiftState;
 use crate::model::space_activation::{SpaceActivationConfig, SpaceActivationPolicy};
 use crate::sys::app::AppInfo;
 use crate::sys::screen::SpaceId;
@@ -98,7 +96,6 @@ pub struct WindowServerLifecyclePayload {
 #[derive(Debug)]
 pub struct WindowServerDestroyedObservations {
     pub resolved_space: Option<SpaceId>,
-    pub active_spaces: HashSet<SpaceId>,
     pub ordered_in: Option<bool>,
     pub suitable: Option<bool>,
 }
@@ -106,255 +103,223 @@ pub struct WindowServerDestroyedObservations {
 #[derive(Debug)]
 pub struct WindowServerAppearedObservations {
     pub resolved_space: Option<SpaceId>,
-    pub active_spaces: HashSet<SpaceId>,
-    pub mission_control_active: bool,
     pub last_known_user_space: Option<SpaceId>,
     pub window_server_info: Option<crate::sys::window_server::WindowServerInfo>,
     pub app_known: bool,
     pub running_app_info: Option<AppInfo>,
 }
 
-pub fn handle_window_server_destroyed(
-    state: &mut RiftState,
-    transactions: &crate::actor::reactor::transaction_manager::TransactionManager,
-    drag: &mut DragManager,
-    payload: WindowServerLifecyclePayload,
-    observations: WindowServerDestroyedObservations,
-) -> anyhow::Result<EventOutcome> {
-    let WindowServerLifecyclePayload {
-        window_server_id: wsid,
-        space: sid,
-        kind,
-    } = payload;
-    let WindowServerDestroyedObservations {
-        resolved_space,
-        active_spaces,
-        ordered_in,
-        suitable,
-    } = observations;
-    let mut outcome = EventOutcome::default();
-    if matches!(kind, SpaceEventKind::Fullscreen) {
-        // Departure alone cannot establish entry. Startup recovery uses positive
-        // fullscreen appearance/discovery, even if this notification arrives late.
-        if let Some(wid) = state.windows.tracked_window_id(wsid) {
-            outcome = outcome.with_app_request(wid.pid, Request::WindowMaybeDestroyed(wid));
-        }
-
-        return Ok(outcome);
-    } else if matches!(kind, SpaceEventKind::User) {
-        match state.windows.observe_native_departure(
-            wsid,
-            sid,
+impl Reactor {
+    pub(in crate::actor::reactor) fn reconcile_native_departure(
+        &mut self,
+        changes: &mut Changes,
+        payload: WindowServerLifecyclePayload,
+        observations: WindowServerDestroyedObservations,
+    ) {
+        let WindowServerLifecyclePayload {
+            window_server_id: wsid,
+            space: sid,
+            kind,
+        } = payload;
+        let WindowServerDestroyedObservations {
             resolved_space,
-            &active_spaces,
             ordered_in,
             suitable,
-        ) {
-            crate::model::window_store::NativeDeparture::Moved(window, space) => {
-                if let Some(wid) = window {
-                    outcome = outcome.with_topology_reassignment(wid, space, false);
-                }
-            }
-            crate::model::window_store::NativeDeparture::Closed(wid) => {
-                outcome.absorb(window::handle_window_destroyed(
-                    state,
-                    transactions,
-                    drag,
-                    window::WindowDestroyedPayload { window: wid },
-                ));
-            }
-            crate::model::window_store::NativeDeparture::Hidden { window, remove_projection } => {
-                if let Some(wid) = window {
-                    if remove_projection {
-                        outcome = outcome.with_layout_event(LayoutEvent::WindowSuspended(wid));
-                    }
-                    outcome = outcome.with_app_request(wid.pid, Request::WindowMaybeDestroyed(wid));
-                }
-            }
-        }
-        return Ok(outcome);
-    }
-    Ok(outcome)
-}
-
-pub fn handle_window_server_appeared(
-    state: &mut RiftState,
-    payload: WindowServerLifecyclePayload,
-    observations: WindowServerAppearedObservations,
-) -> anyhow::Result<EventOutcome> {
-    let WindowServerLifecyclePayload {
-        window_server_id: wsid,
-        space: sid,
-        kind,
-    } = payload;
-    let WindowServerAppearedObservations {
-        resolved_space,
-        active_spaces,
-        mission_control_active,
-        last_known_user_space,
-        window_server_info,
-        app_known,
-        running_app_info,
-    } = observations;
-    let mut outcome = EventOutcome::default();
-    if matches!(kind, SpaceEventKind::User) {
-        if let Some(resolved_space) = resolved_space {
-            if resolved_space != sid {
-                state.windows.observe_native_space(
-                    wsid,
-                    resolved_space,
-                    active_spaces.contains(&resolved_space),
-                );
-                if let Some(wid) = state.windows.tracked_window_id(wsid) {
-                    outcome = outcome.with_topology_reassignment(wid, resolved_space, false);
-                }
-                debug!(
-                    ?wsid,
-                    reported_space = ?sid,
-                    resolved_space = ?resolved_space,
-                    "Resolved user-space appearance to stronger native membership"
-                );
-                return Ok(outcome);
-            }
-
-            state.windows.observe_native_space(wsid, resolved_space, true);
-            state.windows.note_window_server_fullscreen_exit(wsid, resolved_space);
-        }
-    }
-
-    if state.windows.knows_window_server_id(wsid) || state.windows.is_window_server_observed(wsid) {
-        if !mission_control_active {
-            match kind {
-                SpaceEventKind::User => {
-                    if let Some(wid) = state.windows.tracked_window_id(wsid) {
-                        outcome.fullscreen_restorations.push((wsid, sid, wid));
-                        if state.windows.native_fullscreen_record_for_window(wid).is_some() {
-                            outcome = outcome.with_window_inventory_request(wid.pid);
-                        }
-                    } else if let Some(pid) =
-                        state.windows.pending_native_fullscreen_pid_for_window_server_id(wsid)
-                    {
-                        outcome = outcome.with_window_inventory_request(pid);
-                    }
-                }
-                SpaceEventKind::Fullscreen => {
-                    let tracked_window_id = state.windows.tracked_window_id(wsid);
-                    let owner_pid = tracked_window_id.map(|wid| wid.pid).or_else(|| {
-                        state.windows.get_window_server_info(wsid).map(|info| info.pid)
-                    });
-                    if let Some(wid) = state.windows.observe_native_fullscreen(
-                        wsid,
-                        sid,
-                        last_known_user_space,
-                        owner_pid,
-                    ) {
-                        outcome = outcome.with_layout_event(LayoutEvent::WindowSuspended(wid));
-                    }
-                    if tracked_window_id.is_none()
-                        && let Some(pid) = owner_pid
-                    {
-                        outcome = outcome.with_window_inventory_request(pid);
-                    }
-                }
-            }
-        }
-        debug!(
-            ?wsid,
-            "Received WindowServerAppeared for known window - ignoring"
-        );
-        return Ok(outcome);
-    }
-
-    state.windows.mark_window_server_observed(wsid);
-    // TODO: figure out why this is happening, we should really know about this app,
-    // why dont we get notifications that its being launched?
-    if let Some(window_server_info) = window_server_info {
-        if window_server_info.layer != 0 {
-            state.windows.clear_window_server_observed(wsid);
-            trace!(
-                ?wsid,
-                layer = window_server_info.layer,
-                "Ignoring non-normal window"
-            );
-            return Ok(outcome);
-        }
-
-        // Filter out very small windows (likely tooltips or similar UI elements)
-        // that shouldn't be managed by the window manager
-        const MIN_MANAGEABLE_WINDOW_SIZE: f64 = 50.0;
-        if window_server_info.frame.size.width < MIN_MANAGEABLE_WINDOW_SIZE
-            || window_server_info.frame.size.height < MIN_MANAGEABLE_WINDOW_SIZE
-        {
-            state.windows.clear_window_server_observed(wsid);
-            trace!(
-                ?wsid,
-                "Ignoring tiny window ({}x{}) - likely tooltip",
-                window_server_info.frame.size.width,
-                window_server_info.frame.size.height
-            );
-            return Ok(outcome);
-        }
-
+        } = observations;
         if matches!(kind, SpaceEventKind::Fullscreen) {
-            state.windows.observe_native_fullscreen(
+            // Departure alone cannot establish entry. Startup recovery uses positive
+            // fullscreen appearance/discovery, even if this notification arrives late.
+            if let Some(wid) = self.state.windows.tracked_window_id(wsid) {
+                self.send_app_request(wid.pid, Request::WindowMaybeDestroyed(wid));
+            }
+
+            return;
+        } else if matches!(kind, SpaceEventKind::User) {
+            match self.state.windows.observe_native_departure(
                 wsid,
                 sid,
-                last_known_user_space,
-                Some(window_server_info.pid),
-            );
-            outcome = outcome.with_window_inventory_request(window_server_info.pid);
-
-            return Ok(outcome);
-        }
-
-        outcome = outcome.with_window_server_updates(vec![window_server_info]);
-
-        if !app_known {
-            if let Some(app_info) = running_app_info {
-                outcome.wm_events.push(WmEvent::AppLaunch(
-                    window_server_info.pid,
-                    app_info,
-                    crate::actor::wm_controller::AppDiscoverySource::WindowServer,
-                ));
+                resolved_space,
+                &self.active_spaces,
+                ordered_in,
+                suitable,
+            ) {
+                crate::model::window_store::NativeDeparture::Moved(window, space) => {
+                    if let Some(wid) = window {
+                        self.reassign_window_to_authoritative_space(changes, wid, space, false);
+                    }
+                }
+                crate::model::window_store::NativeDeparture::Closed(wid) => {
+                    self.destroy_window(changes, wid);
+                }
+                crate::model::window_store::NativeDeparture::Hidden {
+                    window,
+                    remove_projection,
+                } => {
+                    if let Some(wid) = window {
+                        if remove_projection {
+                            self.reconcile_layout_event(changes, LayoutEvent::WindowSuspended(wid));
+                        }
+                        self.send_app_request(wid.pid, Request::WindowMaybeDestroyed(wid));
+                    }
+                }
             }
-        } else {
-            outcome = outcome.with_window_inventory_request(window_server_info.pid);
+            return;
         }
     }
-    Ok(outcome)
-}
 
-pub fn handle_mission_control_native_entered(
-    mission_control: &mut MissionControlManager,
-    drag: &mut DragManager,
-) -> anyhow::Result<EventOutcome> {
-    drag.reset();
-    let changed = !matches!(
-        mission_control.mission_control_state,
-        MissionControlState::Active
-    );
-    mission_control.mission_control_state = MissionControlState::Active;
-    let outcome = EventOutcome::focus_changed(None, false);
-    Ok(if changed {
-        outcome.with_focus_follows_mouse_refresh()
-    } else {
-        outcome
-    })
-}
+    pub(in crate::actor::reactor) fn reconcile_native_appearance(
+        &mut self,
+        changes: &mut Changes,
+        payload: WindowServerLifecyclePayload,
+        observations: WindowServerAppearedObservations,
+    ) {
+        let WindowServerLifecyclePayload {
+            window_server_id: wsid,
+            space: sid,
+            kind,
+        } = payload;
+        let WindowServerAppearedObservations {
+            resolved_space,
+            last_known_user_space,
+            window_server_info,
+            app_known,
+            running_app_info,
+        } = observations;
+        if matches!(kind, SpaceEventKind::User) {
+            if let Some(resolved_space) = resolved_space {
+                if resolved_space != sid {
+                    self.state.windows.observe_native_space(
+                        wsid,
+                        resolved_space,
+                        self.active_spaces.contains(&resolved_space),
+                    );
+                    if let Some(wid) = self.state.windows.tracked_window_id(wsid) {
+                        self.reassign_window_to_authoritative_space(
+                            changes,
+                            wid,
+                            resolved_space,
+                            false,
+                        );
+                    }
+                    debug!(
+                        ?wsid,
+                        reported_space = ?sid,
+                        resolved_space = ?resolved_space,
+                        "Resolved user-space appearance to stronger native membership"
+                    );
+                    return;
+                }
 
-pub fn handle_mission_control_native_exited(
-    mission_control: &mut MissionControlManager,
-) -> anyhow::Result<EventOutcome> {
-    let changed = matches!(
-        mission_control.mission_control_state,
-        MissionControlState::Active
-    );
-    mission_control.mission_control_state = MissionControlState::Inactive;
-    let mut outcome = EventOutcome::layout_changed(false);
-    outcome.recover_after_mission_control = true;
-    Ok(if changed {
-        outcome.with_focus_follows_mouse_refresh()
-    } else {
-        outcome
-    })
+                self.state.windows.observe_native_space(wsid, resolved_space, true);
+                self.state.windows.note_window_server_fullscreen_exit(wsid, resolved_space);
+            }
+        }
+
+        if self.state.windows.knows_window_server_id(wsid)
+            || self.state.windows.is_window_server_observed(wsid)
+        {
+            if !self.is_mission_control_active() {
+                match kind {
+                    SpaceEventKind::User => {
+                        if let Some(wid) = self.state.windows.tracked_window_id(wsid) {
+                            if self.state.windows.native_fullscreen_record_for_window(wid).is_some()
+                            {
+                                changes.inventory(wid.pid);
+                            }
+                            self.reconcile_native_presence(changes, wsid, sid, wid);
+                        } else if let Some(pid) = self
+                            .state
+                            .windows
+                            .pending_native_fullscreen_pid_for_window_server_id(wsid)
+                        {
+                            changes.inventory(pid);
+                        }
+                    }
+                    SpaceEventKind::Fullscreen => {
+                        let tracked_window_id = self.state.windows.tracked_window_id(wsid);
+                        let owner_pid = tracked_window_id.map(|wid| wid.pid).or_else(|| {
+                            self.state.windows.get_window_server_info(wsid).map(|info| info.pid)
+                        });
+                        if let Some(wid) = self.state.windows.observe_native_fullscreen(
+                            wsid,
+                            sid,
+                            last_known_user_space,
+                            owner_pid,
+                        ) {
+                            self.reconcile_layout_event(changes, LayoutEvent::WindowSuspended(wid));
+                        }
+                        if tracked_window_id.is_none()
+                            && let Some(pid) = owner_pid
+                        {
+                            changes.inventory(pid);
+                        }
+                    }
+                }
+            }
+            debug!(
+                ?wsid,
+                "Received WindowServerAppeared for known window - ignoring"
+            );
+            return;
+        }
+
+        self.state.windows.mark_window_server_observed(wsid);
+        // TODO: figure out why this is happening, we should really know about this app,
+        // why dont we get notifications that its being launched?
+        if let Some(window_server_info) = window_server_info {
+            if window_server_info.layer != 0 {
+                self.state.windows.clear_window_server_observed(wsid);
+                trace!(
+                    ?wsid,
+                    layer = window_server_info.layer,
+                    "Ignoring non-normal window"
+                );
+                return;
+            }
+
+            // Filter out very small windows (likely tooltips or similar UI elements)
+            // that shouldn't be managed by the window manager
+            const MIN_MANAGEABLE_WINDOW_SIZE: f64 = 50.0;
+            if window_server_info.frame.size.width < MIN_MANAGEABLE_WINDOW_SIZE
+                || window_server_info.frame.size.height < MIN_MANAGEABLE_WINDOW_SIZE
+            {
+                self.state.windows.clear_window_server_observed(wsid);
+                trace!(
+                    ?wsid,
+                    "Ignoring tiny window ({}x{}) - likely tooltip",
+                    window_server_info.frame.size.width,
+                    window_server_info.frame.size.height
+                );
+                return;
+            }
+
+            if matches!(kind, SpaceEventKind::Fullscreen) {
+                self.state.windows.observe_native_fullscreen(
+                    wsid,
+                    sid,
+                    last_known_user_space,
+                    Some(window_server_info.pid),
+                );
+                changes.inventory(window_server_info.pid);
+
+                return;
+            }
+
+            self.update_partial_window_server_info(changes, [window_server_info]);
+
+            if !app_known {
+                if let Some(app_info) = running_app_info
+                    && let Some(wm) = &self.communication_manager.wm_sender
+                {
+                    wm.send(WmEvent::AppLaunch(
+                        window_server_info.pid,
+                        app_info,
+                        crate::actor::wm_controller::AppDiscoverySource::WindowServer,
+                    ));
+                }
+            } else {
+                changes.inventory(window_server_info.pid);
+            }
+        }
+    }
 }

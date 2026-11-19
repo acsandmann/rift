@@ -6,7 +6,8 @@ use objc2_core_foundation::{CGPoint, CGRect, CGSize};
 use parking_lot::Mutex;
 use tracing::{debug, trace};
 
-use super::TransactionId;
+use super::managers::ScrollingDisplayBounds;
+use super::{Presentation, TransactionId};
 use crate::actor::app::{AppThreadHandle, FrameMode, FrameSource, Request, WindowId, pid_t};
 use crate::actor::gesture::{Context, Control};
 use crate::actor::reactor::Reactor;
@@ -41,6 +42,23 @@ impl AnimationSender {
     }
 
     pub fn send(&self, message: Message) -> Result<(), crossbeam_channel::SendError<Message>> {
+        match &message {
+            Message::Replace(animation) | Message::SkipToEnd(animation) => {
+                trace!(
+                    display = animation.display,
+                    count = animation.windows.len(),
+                    "Submitting frame animation"
+                );
+            }
+            Message::Camera(camera) => {
+                trace!(
+                    display = camera.display,
+                    count = camera.windows.len(),
+                    "Submitting camera frames"
+                );
+            }
+            _ => {}
+        }
         self.tx.send(message)
     }
 
@@ -199,7 +217,7 @@ pub struct CameraAnimation {
     scale: f64,
     store: WindowTxStore,
     interval: Duration,
-    bound: Option<super::managers::ScrollingDisplayBounds>,
+    bound: Option<ScrollingDisplayBounds>,
 }
 
 #[derive(Debug)]
@@ -230,7 +248,7 @@ enum Sample<'a> {
         presentation: &'a ViewportPresentation,
         offset: f64,
         scale: f64,
-        bound: Option<super::managers::ScrollingDisplayBounds>,
+        bound: Option<ScrollingDisplayBounds>,
         movement: f64,
     },
 }
@@ -631,6 +649,7 @@ impl Reactor {
         animate: bool,
         gesture: Option<(Context, Control, f64, Duration)>,
         skip: Option<WindowId>,
+        bound: Option<ScrollingDisplayBounds>,
     ) -> Option<HashSet<WindowId>> {
         if self.animation_tx.is_none() && gesture.is_none() && self.viewport_gesture.is_none() {
             return None;
@@ -638,10 +657,6 @@ impl Reactor {
         let screen = self.space_state.screen_by_space(space)?;
         let display = screen.id.as_u32();
         let scale = screen.backing_scale;
-        let screen_frames: Vec<_> =
-            self.space_state.screens.iter().map(|screen| screen.frame).collect();
-        let bound =
-            super::managers::ScrollingDisplayBounds::for_screen(screen.frame, &screen_frames);
         let (workspace, layout) =
             self.layout_manager.layout_engine.workspaces().active_layout_for_space(space)?;
         let LayoutSystemKind::Scrolling(system) =
@@ -762,18 +777,20 @@ impl Reactor {
     }
 }
 
-fn scrolling_bounds(
+pub(super) fn scrolling_bounds(
     reactor: &Reactor,
     space: SpaceId,
-) -> Option<super::managers::ScrollingDisplayBounds> {
+) -> Option<ScrollingDisplayBounds> {
     if reactor.layout_manager.layout_engine.active_layout_mode_at(space)
         != crate::common::config::LayoutMode::Scrolling
     {
         return None;
     }
     let screen = reactor.space_state.screen_by_space(space)?;
-    let screens: Vec<_> = reactor.space_state.screens.iter().map(|s| s.frame).collect();
-    super::managers::ScrollingDisplayBounds::for_screen(screen.frame, &screens)
+    ScrollingDisplayBounds::for_screen(
+        screen.frame,
+        reactor.space_state.screens.iter().map(|s| s.frame),
+    )
 }
 
 impl AnimationManager {
@@ -1020,21 +1037,42 @@ impl AnimationManager {
         delay
     }
 
-    pub fn animate_layout(
+    pub(super) fn apply_layout(
+        reactor: &mut Reactor,
+        space: SpaceId,
+        layout: &[(WindowId, CGRect)],
+        presentation: Presentation,
+        skip_wid: Option<WindowId>,
+        bounds: Option<ScrollingDisplayBounds>,
+    ) -> bool {
+        match presentation {
+            Presentation::Animated | Presentation::Resize => Self::animate_layout(
+                reactor,
+                space,
+                layout,
+                presentation == Presentation::Resize,
+                skip_wid,
+                bounds,
+            ),
+            Presentation::WorkspaceSwitch | Presentation::Instant | Presentation::Force => {
+                Self::instant_layout(reactor, space, layout, skip_wid, bounds, presentation)
+            }
+        }
+    }
+
+    fn animate_layout(
         reactor: &mut Reactor,
         space: SpaceId,
         layout: &[(WindowId, CGRect)],
         is_resize: bool,
         skip_wid: Option<WindowId>,
-        allow_animation: bool,
+        bounds: Option<ScrollingDisplayBounds>,
     ) -> bool {
-        reactor.retire_presentations();
         let setting = reactor.layout_manager.layout_engine.layout_specific_animate_settings(space);
-        let animate_camera = allow_animation
-            && !is_resize
+        let animate_camera = !is_resize
             && setting.unwrap_or(reactor.config.settings.animate)
             && !(setting.is_none() && power::is_low_power_mode_enabled());
-        let presentation = reactor.present_camera(space, animate_camera, None, skip_wid);
+        let presentation = reactor.present_camera(space, animate_camera, None, skip_wid, bounds);
         let camera = presentation.is_some();
         let presented = presentation.unwrap_or_default();
         if !animate_camera {
@@ -1058,7 +1096,6 @@ impl AnimationManager {
             return false;
         };
         anim.display = screen.id.as_u32();
-        let bounds = scrolling_bounds(reactor, space);
         let mut any_frame_changed = camera;
 
         for &(wid, target_frame) in layout {
@@ -1149,47 +1186,15 @@ impl AnimationManager {
         any_frame_changed
     }
 
-    pub fn instant_layout(
+    fn instant_layout(
         reactor: &mut Reactor,
         space: SpaceId,
         layout: &[(WindowId, CGRect)],
         skip_wid: Option<WindowId>,
+        bounds: Option<ScrollingDisplayBounds>,
+        presentation: Presentation,
     ) -> bool {
-        Self::instant_layout_inner(reactor, space, layout, skip_wid, false, false)
-    }
-
-    /// Apply the position-only layout used while switching virtual workspaces.
-    ///
-    /// Keep this entry point separate from `instant_layout`: layouts merely suppressed
-    /// while a switch is in progress may still change window sizes and must use the
-    /// full-frame request.
-    pub fn workspace_switch_layout(
-        reactor: &mut Reactor,
-        space: SpaceId,
-        layout: &[(WindowId, CGRect)],
-        skip_wid: Option<WindowId>,
-    ) -> bool {
-        Self::instant_layout_inner(reactor, space, layout, skip_wid, true, false)
-    }
-
-    /// Restore native geometry after a display change invalidated cached frames.
-    pub fn reapply_layout(
-        reactor: &mut Reactor,
-        space: SpaceId,
-        layout: &[(WindowId, CGRect)],
-        skip_wid: Option<WindowId>,
-    ) -> bool {
-        Self::instant_layout_inner(reactor, space, layout, skip_wid, false, true)
-    }
-
-    fn instant_layout_inner(
-        reactor: &mut Reactor,
-        space: SpaceId,
-        layout: &[(WindowId, CGRect)],
-        skip_wid: Option<WindowId>,
-        position_only: bool,
-        force_frames: bool,
-    ) -> bool {
+        let force_frames = presentation == Presentation::Force;
         reactor.cancel_window_presentations(
             layout
                 .iter()
@@ -1197,7 +1202,6 @@ impl AnimationManager {
                 .filter(|wid| Some(*wid) != skip_wid)
                 .collect(),
         );
-        let bounds = scrolling_bounds(reactor, space);
         let active = reactor.layout_manager.layout_engine.workspaces().active_workspace(space);
         let mut per_app: HashMap<(pid_t, bool), _> = HashMap::default();
         let mut any_frame_changed = false;
@@ -1243,7 +1247,7 @@ impl AnimationManager {
             let (frames, positions) = per_app
                 .entry((wid.pid, constrained))
                 .or_insert_with(|| (Vec::new(), Vec::new()));
-            if position_only && size_unchanged {
+            if presentation == Presentation::WorkspaceSwitch && size_unchanged {
                 positions.push((wid, target_frame));
             } else {
                 frames.push((wid, target_frame));
@@ -2426,7 +2430,15 @@ mod tests {
                 .frames
                 .insert(wid, (handle.clone(), retained));
             // Within a Space, a new camera must preserve the last publication.
-            reactor.present_camera(spaces[source], true, None, None).unwrap();
+            reactor
+                .present_camera(
+                    spaces[source],
+                    true,
+                    None,
+                    None,
+                    scrolling_bounds(&reactor, spaces[source]),
+                )
+                .unwrap();
             let Message::Camera(source_camera) = receiver.commands.try_recv().unwrap() else {
                 panic!("expected source camera");
             };

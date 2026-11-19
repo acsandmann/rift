@@ -4,12 +4,10 @@
 
 use rift_protocol::WindowClaimFlags;
 
-use super::{LayoutEvent, Reactor};
+use super::{Changes, LayoutEvent, Reactor};
 use crate::actor::app::WindowId;
-use crate::common::collections::HashSet;
 use crate::layout_engine::systems::{LayoutSystem, WindowChange};
 use crate::model::window_store::ClaimOwner;
-use crate::sys::screen::SpaceId;
 
 const OWNED_ELSEWHERE: &str = "Window owned by another external manager";
 
@@ -42,18 +40,11 @@ impl Reactor {
             reactor.drag_manager.forget_window(wid);
             // Leave the projection (keeping floating state and the layout slot) before the
             // claim takes the assignment, but arrange only after: no write may target it.
-            let space = reactor.assigned_space_for_window_id(wid);
-            let removal = LayoutEvent::WindowSuspended(wid);
-            let removed = reactor
-                .layout_manager
-                .layout_engine
-                .handle_event(&mut reactor.state.windows, removal)
-                .changed;
+            let mut changes = Changes::default();
+            reactor.reconcile_layout_event(&mut changes, LayoutEvent::WindowSuspended(wid));
             reactor.state.windows.insert_claim(wid, owner, flags);
-            if removed {
-                reactor.update_layout_or_warn(false, false, space);
-            }
-            reactor.maybe_send_menu_update();
+            changes.refresh_menu = true;
+            reactor.finish(changes, None, None);
         });
         Ok(())
     }
@@ -84,18 +75,20 @@ impl Reactor {
 
     fn release_claims_of(&mut self, windows: impl IntoIterator<Item = WindowId>) {
         self.with_claim_focus_policy(|reactor| {
-            let spaces: HashSet<_> =
-                windows.into_iter().filter_map(|wid| reactor.readmit(wid)).collect();
-            for space in spaces {
-                reactor.update_layout_or_warn(false, false, Some(space));
+            let mut changes = Changes::default();
+            for window in windows {
+                reactor.readmit(&mut changes, window);
             }
-            reactor.maybe_send_menu_update();
+            changes.refresh_menu = true;
+            reactor.finish(changes, None, None);
         });
     }
 
-    /// Replays normal reconciliation for a released window; returns an active space to arrange.
-    fn readmit(&mut self, wid: WindowId) -> Option<SpaceId> {
-        let claim = self.state.windows.remove_claim(wid)?;
+    /// Replays normal reconciliation for a released window.
+    fn readmit(&mut self, changes: &mut Changes, wid: WindowId) {
+        let Some(claim) = self.state.windows.remove_claim(wid) else {
+            return;
+        };
         let engine = &mut self.layout_manager.layout_engine;
         if let Some(workspace) =
             claim.workspace().filter(|id| engine.workspaces().workspaces.contains_key(*id))
@@ -117,13 +110,12 @@ impl Reactor {
         }
         if self.state.windows.native_fullscreen_record_for_window(wid).is_some() {
             // Suspended windows return through native fullscreen recovery.
-            let outcome = self.restore_native_fullscreen(None, wid, None);
-            self.apply_event_outcome(outcome);
-            return None;
+            self.restore_native_fullscreen(changes, None, wid, None);
+            return;
         }
-        let space = self.best_space_for_window_id(wid)?;
-        self.reassign_window_to_authoritative_space(wid, space, false);
-        self.is_space_active(space).then_some(space)
+        if let Some(space) = self.best_space_for_window_id(wid) {
+            self.reassign_window_to_authoritative_space(changes, wid, space, false);
+        }
     }
 
     /// Recompute focus-follows-mouse only when the focused window's claim policy changed.

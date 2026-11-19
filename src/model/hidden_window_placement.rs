@@ -26,13 +26,16 @@ pub(crate) struct ScrollingDisplayBounds {
 }
 
 impl ScrollingDisplayBounds {
-    pub(crate) fn for_screen(screen: CGRect, screens: &[CGRect]) -> Option<Self> {
+    pub(crate) fn for_screen(
+        screen: CGRect,
+        screens: impl IntoIterator<Item = CGRect>,
+    ) -> Option<Self> {
         let mut bounds = Self {
             screen,
             left: false,
             right: false,
         };
-        for other in screens.iter().filter(|other| **other != screen) {
+        for other in screens.into_iter().filter(|other| *other != screen) {
             if other.max().y <= screen.origin.y || other.origin.y >= screen.max().y {
                 continue;
             }
@@ -165,7 +168,7 @@ mod tests {
             rect(-200.5, -900.5, 1000.0, 800.0),
             rect(-250.5, -150.5, 1000.0, 800.0),
         ] {
-            let bounds = ScrollingDisplayBounds::for_screen(screen, &[neighbor]).unwrap();
+            let bounds = ScrollingDisplayBounds::for_screen(screen, [neighbor]).unwrap();
             for scale in [1.0_f64, 2.0] {
                 for x in [-3000.25, -1250.25, -200.25, 1000.25] {
                     let frame =

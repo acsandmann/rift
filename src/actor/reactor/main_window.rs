@@ -182,7 +182,6 @@ mod tests {
         let mut reactor = Reactor::new_for_test(LayoutEngine::new(
             &crate::common::config::VirtualWorkspaceSettings::default(),
             &crate::common::config::LayoutSettings::default(),
-            None,
         ));
         let space = SpaceId::new(1);
         let screen_frame = CGRect::new(CGPoint::new(0., 0.), CGSize::new(1920., 1080.));
@@ -254,7 +253,6 @@ mod tests {
         let mut reactor = Reactor::new_for_test(LayoutEngine::new(
             &crate::common::config::VirtualWorkspaceSettings::default(),
             &crate::common::config::LayoutSettings::default(),
-            None,
         ));
         let space = SpaceId::new(1);
         let screen_frame = CGRect::new(CGPoint::new(0., 0.), CGSize::new(1920., 1080.));
@@ -335,7 +333,6 @@ mod tests {
         let mut reactor = Reactor::new_for_test(LayoutEngine::new(
             &crate::common::config::VirtualWorkspaceSettings::default(),
             &crate::common::config::LayoutSettings::default(),
-            None,
         ));
         let pid = 3;
         let windows = make_windows(2);
