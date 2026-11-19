@@ -253,7 +253,7 @@ impl Projection<'_> {
         if children.is_empty() {
             return;
         }
-        let mut total = 0.0_f32;
+        let mut total = 0.0;
         let mut invalid = false;
         let (mut offset, usable_axis, inner_gap) =
             axis_span(rect, horizontal, gaps, children.len());
@@ -261,21 +261,21 @@ impl Projection<'_> {
             .iter()
             .map(|&child| {
                 let (min, fixed, max, can_grow) = prepared[&child][horizontal as usize];
-                let weight = map[child].layout.size;
+                let weight = f64::from(map[child].layout.size);
                 total += weight;
-                invalid |= !weight.is_finite() || weight < 0.05 - f32::EPSILON;
+                invalid |= !weight.is_finite() || weight < 0.0;
                 AxisConstraints {
                     min,
                     fixed,
                     max,
-                    weight: f64::from(weight),
+                    weight,
                     can_grow,
                 }
             })
             .collect();
         // Splitting and promotion can generate small positive weights. The fallback
         // applies to the participating siblings, which can change without a tree edit.
-        if invalid || !total.is_finite() || total <= f32::EPSILON {
+        if invalid || !total.is_finite() || total <= 0.0 {
             for axis in &mut axis_constraints {
                 axis.weight = 1.0;
             }

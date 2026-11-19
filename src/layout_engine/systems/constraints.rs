@@ -201,7 +201,7 @@ pub(crate) fn solve_axis_lengths(
         let growable_count = growable.len();
         let total_weight: f64 = growable.iter().map(|&idx| items[idx].weight).sum();
         let proposed = |item: AxisConstraints| {
-            if total_weight <= f64::EPSILON {
+            if total_weight == 0.0 {
                 remaining / growable_count as f64
             } else {
                 remaining * (item.weight / total_weight)

@@ -1766,7 +1766,7 @@ impl Reactor {
                 outcome.focused_window = raised_window;
                 return Ok(outcome);
             }
-            Event::WindowCreated(wid, mut window, ws_info, mouse_state) => {
+            Event::WindowCreated(wid, mut window, ws_info, _) => {
                 self.replace_native_tab(wid, &mut window);
                 let mut outcome = window_workflow::handle_window_created(
                     &mut self.state,
@@ -1777,16 +1777,6 @@ impl Reactor {
                         window_server_info: ws_info,
                     },
                 )?;
-                if mouse_state == Some(MouseState::Down)
-                    && let Some(window) = self.state.windows.window(wid)
-                    && self.can_start_native_drag(wid, window.frame_monotonic)
-                    && window_server::current_cursor_location()
-                        .is_ok_and(|point| window.frame_monotonic.contains(point))
-                {
-                    let frame = window.frame_monotonic;
-                    let space = self.best_space_for_window_state(window);
-                    self.begin_native_drag(wid, frame, frame, space, space);
-                }
                 outcome.focused_window = raised_window;
                 return Ok(outcome);
             }

@@ -733,6 +733,47 @@ mod tests {
     fn w(idx: u32) -> WindowId { WindowId::new(1, idx) }
 
     #[test]
+    fn splitting_a_narrow_tile_preserves_the_other_tiles_width() {
+        let mut system = TraditionalLayoutSystem::new(WindowInsertionPoint::NextToSelection, false);
+        let layout = system.create_layout();
+        for window in [w(1), w(2)] {
+            system.update(WindowChange::Add(layout, window, None));
+        }
+        for amount in [-0.25, -0.9] {
+            assert!(
+                system
+                    .edit(layout, LayoutEdit::Resize {
+                        amount,
+                        orientation: crate::layout_engine::ResizeOrientation::Horizontal,
+                    })
+                    .changed()
+            );
+        }
+
+        let widths = |system: &TraditionalLayoutSystem| {
+            system
+                .calculate_layout(
+                    layout,
+                    CGRect::new(CGPoint::ZERO, CGSize::new(4000., 800.)),
+                    0.0,
+                    &Default::default(),
+                    &Default::default(),
+                    Default::default(),
+                )
+                .into_iter()
+                .map(|(window, frame)| (window, frame.size.width))
+                .collect::<HashMap<_, _>>()
+        };
+        let before = widths(&system);
+        assert_eq!(before[&w(2)], 100.);
+        system.update(WindowChange::Add(layout, w(3), None));
+        let after = widths(&system);
+        assert_eq!(after[&w(1)], before[&w(1)]);
+        assert_eq!(after[&w(2)], 50.);
+        assert_eq!(after[&w(3)], 50.);
+    }
+
+    #[test]
     fn joining_resized_neighbors_preserves_the_unrelated_tiles_width() {
         let mut system = TraditionalLayoutSystem::default();
         let layout = system.create_layout();

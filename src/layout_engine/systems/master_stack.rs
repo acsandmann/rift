@@ -646,7 +646,7 @@ impl MasterStackLayoutSystem {
         let mut neighbors = self.tiles.windows_from(region, start, forward).peekable();
         let participates = |window| self.tiles.window_participates(window);
         if toward_other && (!parallel || neighbors.peek().is_none()) {
-            // Match the region boundary even when its edge tab is suspended.
+            // Enter the destination from the near edge, skipping suspended windows.
             let edge = if forward {
                 other
             } else {
@@ -654,11 +654,7 @@ impl MasterStackLayoutSystem {
             };
             let mut destination = self.tiles.windows_from(other, Some(edge), forward).peekable();
             if destination.peek().is_some() {
-                if master_first {
-                    destination.find(|&window| participates(window))
-                } else {
-                    destination.next().filter(|&window| participates(window))
-                }
+                destination.find(|&window| participates(window))
             } else if in_master {
                 // With no stack region, use the next master window if one exists.
                 self.tiles
@@ -809,6 +805,41 @@ mod tests {
             .expect("the complete group moved into the master region");
         assert_eq!(moved.children, group.children);
         assert_eq!(system.selected_window(layout), Some(w(2)));
+    }
+
+    #[test]
+    fn keyboard_move_across_regions_skips_suspended_edge_windows() {
+        for (master_side, direction, edge, target) in [
+            (MasterStackSide::Left, Direction::Right, w(2), w(3)),
+            (MasterStackSide::Right, Direction::Left, w(3), w(2)),
+        ] {
+            let mut settings = MasterStackSettings {
+                master_side,
+                new_window_placement: MasterStackNewWindowPlacement::Stack,
+                ..Default::default()
+            };
+            settings.base.window_insertion_point = Some(WindowInsertionPoint::EndOfTree);
+            let mut system = MasterStackLayoutSystem::new(settings);
+            let layout = system.create_layout();
+            for window in [w(1), w(2), w(3)] {
+                system.update(WindowChange::Add(layout, window, None));
+            }
+            assert!(system.focus(layout, Focus::Select(w(1))).handled);
+            let target_slot = system.tiles.window_slot(layout, target);
+            let edge_slot = system.tiles.window_slot(layout, edge);
+            system.set_window_participation(edge, false);
+            assert!(
+                system
+                    .edit(layout, LayoutEdit::Move {
+                        direction,
+                        has_display_neighbor: false
+                    })
+                    .changed(),
+                "{master_side:?}"
+            );
+            assert_eq!(system.tiles.window_slot(layout, w(1)), target_slot);
+            assert_eq!(system.tiles.window_slot(layout, edge), edge_slot);
+        }
     }
 
     #[test]

@@ -2327,7 +2327,7 @@ fn cross_display_drag_relocates_the_window_once_and_preserves_floating() {
 }
 
 #[test]
-fn new_window_under_a_held_pointer_keeps_its_frame_until_release() {
+fn new_window_under_a_held_pointer_waits_for_a_frame_change_before_dragging() {
     let (mut apps, mut reactor) = test_context();
     let screen = CGRect::new(CGPoint::ZERO, CGSize::new(1000., 1000.));
     let space = SpaceId::new(1);
@@ -2343,14 +2343,25 @@ fn new_window_under_a_held_pointer_keeps_its_frame_until_release() {
         Some(MouseState::Down),
     ));
     window_server::set_cursor_location_override(None);
-    let wrote_frame = |requests: Vec<Request>| {
-        requests.iter().any(|request| {
-        matches!(request, Request::SetWindowFrames(frames, ..) if frames.iter().any(|(window, _)| *window == wid))
-    })
+    assert!(reactor.state.windows.is_admitted(wid));
+    assert!(
+        !reactor.is_in_drag(),
+        "creation alone must not acquire drag ownership"
+    );
+
+    let original = reactor.state.windows.window(wid).unwrap().frame_monotonic;
+    let frame_changed = |frame| {
+        Event::WindowFrameChanged(wid, frame, None, Requested(false), Some(MouseState::Down))
     };
-    assert!(!wrote_frame(apps.requests()));
+    reactor.handle_event(frame_changed(original));
+    assert!(!reactor.is_in_drag());
+
+    let mut moved = original;
+    moved.origin.x += 25.;
+    reactor.handle_event(frame_changed(moved));
+    assert!(reactor.is_dragging_window(wid));
     reactor.handle_event(Event::MouseUp(crate::actor::drag::MouseButton::Left));
-    assert!(wrote_frame(apps.requests()));
+    assert!(!reactor.is_in_drag());
 }
 
 #[test]
