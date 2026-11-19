@@ -2036,6 +2036,50 @@ fn native_frame_changes_only_resize_layout_during_user_drag() {
 }
 
 #[test]
+fn untracked_tiled_motion_reconciles_before_mouse_release() {
+    let (mut apps, mut reactor) = test_context();
+    let screen = CGRect::new(CGPoint::ZERO, CGSize::new(1000., 1000.));
+    let space = SpaceId::new(1);
+    apps.make_app_and_settle_on_screen(&mut reactor, screen, space, 1, make_windows(2));
+    let wid = WindowId::new(1, 1);
+    let expected = apps.windows[&wid].frame;
+
+    for mouse_state in [MouseState::Up, MouseState::Down] {
+        for frame in [
+            CGRect::new(
+                CGPoint::new(expected.origin.x + 40., expected.origin.y),
+                expected.size,
+            ),
+            CGRect::new(
+                expected.origin,
+                CGSize::new(expected.size.width + 40., expected.size.height),
+            ),
+        ] {
+            apps.windows.get_mut(&wid).unwrap().frame = frame;
+            let (tx, _rx) = actor::channel();
+            reactor.communication_manager.events_tx = Some(tx);
+            window_server::set_cursor_location_override(Some(CGPoint::new(-1000., -1000.)));
+            reactor.handle_event(Event::WindowFrameChanged(
+                wid,
+                frame,
+                None,
+                Requested(false),
+                Some(mouse_state),
+            ));
+            window_server::set_cursor_location_override(None);
+            reactor.communication_manager.events_tx = None;
+            assert!(!reactor.is_in_drag());
+            apps.simulate_until_quiet(&mut reactor);
+            assert_eq!(apps.windows[&wid].frame, expected);
+
+            let before = reactor.layout_update_count;
+            reactor.handle_event(Event::MouseUp(crate::actor::drag::MouseButton::Left));
+            assert_eq!(reactor.layout_update_count, before);
+        }
+    }
+}
+
+#[test]
 fn crossing_native_spaces_reconciles_membership_with_one_arrange_pass() {
     let (mut reactor, wid, wsid, _space1, space2, frame, screen2) =
         reactor_with_window_on_space1_two_displays();

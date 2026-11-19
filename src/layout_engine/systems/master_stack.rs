@@ -375,8 +375,10 @@ impl MasterStackLayoutSystem {
         let Some((node, focused_wid)) = self.tiles.focused_leaf(layout) else {
             return;
         };
-        let promoted = if node.parent(self.tiles.map()) != Some(master)
-            && let Some(overflow) = master.last_child(self.tiles.map())
+        let map = self.tiles.map();
+        let overflow = master.last_descendant(map);
+        let promoted = if !node.ancestors(map).any(|ancestor| ancestor == master)
+            && self.count_windows(master) >= self.settings.master_count
             && let Some(overflow_wid) = self.tiles.window_at(overflow)
         {
             let swapped = self.tiles.swap_windows(layout, focused_wid, overflow_wid);
@@ -391,6 +393,10 @@ impl MasterStackLayoutSystem {
             node
         };
         self.move_to_region(promoted, master, true);
+        let current = self.count_windows(master);
+        if current > self.settings.master_count {
+            self.enforce_master_count(layout, master, stack, current, Some(focused_wid));
+        }
         self.tiles.select(promoted);
     }
 
@@ -805,6 +811,49 @@ mod tests {
             .expect("the complete group moved into the master region");
         assert_eq!(moved.children, group.children);
         assert_eq!(system.selected_window(layout), Some(w(2)));
+    }
+
+    #[test]
+    fn promotion_demotes_a_window_from_the_last_nested_master_group() {
+        use crate::layout_engine::WindowDropAction;
+        let settings = MasterStackSettings {
+            master_count: 3,
+            new_window_placement: MasterStackNewWindowPlacement::Stack,
+            ..Default::default()
+        };
+        let mut system = MasterStackLayoutSystem::new(settings);
+        let layout = system.create_layout();
+        for index in 1..=5 {
+            system.update(WindowChange::Add(layout, w(index), None));
+        }
+        for source in [w(2), w(1)] {
+            assert!(
+                system
+                    .edit(layout, LayoutEdit::Drop {
+                        source,
+                        target: w(3),
+                        action: WindowDropAction::Stack,
+                    })
+                    .changed()
+            );
+        }
+        let before = system.container_tree(layout);
+        let [group] = &before.children[0].children[..] else {
+            panic!("expected one grouped master child");
+        };
+        assert_eq!(group.children.len(), 3);
+
+        assert!(system.focus(layout, Focus::Select(w(4))).handled);
+        system.promote_to_master(layout);
+
+        let in_master =
+            |window| system.tiles.window_slot(layout, window).unwrap().first() == Some(&0);
+        assert_eq!((1..=5).map(w).filter(|&window| in_master(window)).count(), 3);
+        assert_eq!(system.tiles.window_slot(layout, w(4)), Some(vec![0, 0]));
+        assert_eq!(system.selected_window(layout), Some(w(4)));
+        let after = system.container_tree(layout);
+        assert_eq!(after.children[0].children[1].node_id, group.node_id);
+        assert_eq!(after.children[0].children[1].children.len(), 2);
     }
 
     #[test]
