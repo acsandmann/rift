@@ -1165,16 +1165,10 @@ impl State {
         Ok(())
     }
 
-    fn txid_from_store(&self, wsid: Option<WindowServerId>) -> Option<TransactionId> {
-        let store = self.tx_store.as_ref()?;
-        let wsid = wsid?;
-        let record = store.get(&wsid)?;
-        record.target.map(|_| record.txid)
-    }
-
-    fn txid_for_window_state(&self, window: &AppWindowState) -> Option<TransactionId> {
-        self.txid_from_store(window.window_server_id)
-            .or_else(|| Self::some_txid(window.last_seen_txid))
+    fn frame_write_is_current(&self, server: Option<WindowServerId>, txid: TransactionId) -> bool {
+        server
+            .and_then(|id| self.tx_store.as_ref()?.get(&id))
+            .is_none_or(|record| record.txid == txid)
     }
 
     fn some_txid(txid: TransactionId) -> Option<TransactionId> {
@@ -1299,7 +1293,9 @@ impl State {
         wid: WindowId,
         pending: PendingFrame,
     ) -> Result<(), AxError> {
-        if !pending.authority.is_current() {
+        if !pending.authority.is_current()
+            || !self.frame_write_is_current(self.window(wid)?.window_server_id, pending.txid)
+        {
             return Ok(());
         }
         let PendingFrame {
@@ -1533,6 +1529,11 @@ impl State {
                     if !authority.is_current() {
                         break;
                     }
+                    if let Ok(window) = self.window(wid)
+                        && !self.frame_write_is_current(window.window_server_id, txid)
+                    {
+                        continue;
+                    }
                     let (elem, hint) = match self.window_mut(wid) {
                         Ok(window) => {
                             window.last_seen_txid = txid;
@@ -1683,6 +1684,8 @@ impl State {
                 // only a hint: repair against observed geometry once motion ends.
                 if let Some((target, authority)) = last_animation_frame
                     && authority.is_current()
+                    && self
+                        .frame_write_is_current(self.window(wid)?.window_server_id, last_seen_txid)
                     && !frame.same_as(target)
                 {
                     let result = trace("set_frame", &elem, || {
@@ -1809,7 +1812,7 @@ impl State {
                             trace!(?wid, ?notif, "Ignoring notification during owned frame writes");
                             return;
                         }
-                        (self.txid_for_window_state(window), window.frame_source)
+                        (Self::some_txid(window.last_seen_txid), window.frame_source)
                     }
                     Err(err) => {
                         match err {
@@ -2366,12 +2369,11 @@ impl State {
         // unavailable; app-level discovery remains the lifecycle fallback.
         let notifications_registered = self.register_window_notifications(&elem, wid);
         let hidden_by_app = self.is_hidden;
-        let last_seen_txid = self.txid_from_store(Some(window_server_id)).unwrap_or_default();
 
         let old = self.windows.insert(wid, AppWindowState {
             elem: elem.clone(),
             notifications_registered,
-            last_seen_txid,
+            last_seen_txid: TransactionId::default(),
             hidden_by_app,
             window_server_id: Some(window_server_id),
             title: info.title.clone(),

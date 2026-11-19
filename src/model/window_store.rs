@@ -1716,6 +1716,12 @@ impl WindowStore {
         }
     }
 
+    pub(crate) fn cancel_transfer(&mut self, window: WindowId) {
+        if let Some(record) = self.windows.get_mut(&window) {
+            record.pending_transfer = None;
+        }
+    }
+
     /// Only an accepted native membership snapshot can complete a transfer.
     pub(crate) fn confirm_transfer(
         &mut self,

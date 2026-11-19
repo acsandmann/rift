@@ -450,13 +450,13 @@ impl CameraAnimation {
         for window in &mut self.windows {
             window.announced = false;
             window.txid = window.wsid.map_or_else(TransactionId::default, |wsid| {
-                let txid = self.store.next_txid(wsid);
-                if self.gesture.is_none() && !self.presentation.gesturing() {
-                    let frame = self.presentation.target_frame(window.to, window.fixed, self.scale);
-                    let frame = self.bound.map_or(frame, |bounds| bounds.apply(frame));
-                    self.store.insert(wsid, txid, frame);
-                }
-                txid
+                let target =
+                    (self.gesture.is_none() && !self.presentation.gesturing()).then(|| {
+                        let frame =
+                            self.presentation.target_frame(window.to, window.fixed, self.scale);
+                        self.bound.map_or(frame, |bounds| bounds.apply(frame))
+                    });
+                self.store.begin(wsid, target)
             });
             window.begin();
         }
@@ -664,6 +664,8 @@ impl Reactor {
         });
         let now = Instant::now();
         let control = self.animation_tx.as_ref().map(|tx| tx.control.lock());
+        let mut covered = HashSet::default();
+        let semantic = gesture.is_none() && !presentation.gesturing();
         let windows = frames
             .into_iter()
             .filter_map(|(wid, base_frame, fixed)| {
@@ -671,6 +673,18 @@ impl Reactor {
                     return None;
                 }
                 let window = self.state.windows.window(wid)?;
+                if semantic
+                    && control.as_ref().is_none_or(|control| !control.frames.contains_key(&wid))
+                    && let Some(wsid) = window.info.sys_id
+                    && let Some(write) = self.transaction_manager.store.get(&wsid)
+                {
+                    let target = presentation.target_frame(base_frame, fixed, scale);
+                    let target = bound.map_or(target, |bounds| bounds.apply(target));
+                    if write.refused(target, window.frame_monotonic) {
+                        covered.insert(wid);
+                        return None;
+                    }
+                }
                 let app = self.app_manager.apps.get(&wid.pid)?;
                 let frame = control.as_ref().map_or(window.frame_monotonic, |control| {
                     control.frame(wid, window.frame_monotonic)
@@ -721,7 +735,7 @@ impl Reactor {
         if !previous_was_absent {
             next.replace(previous);
         }
-        let windows = next.windows.iter().map(|w| w.wid).collect();
+        covered.extend(next.windows.iter().map(|w| w.wid));
         let ids = next.windows.iter().map(|w| w.wid).collect();
         self.presentations.insert(space, ViewportHandle {
             identity,
@@ -740,7 +754,7 @@ impl Reactor {
             self.presentations.get_mut(&space).unwrap().headless = Some(next);
             self.commit_presentations();
         }
-        Some(windows)
+        Some(covered)
     }
 }
 
@@ -1023,7 +1037,7 @@ impl AnimationManager {
             let windows = layout
                 .iter()
                 .map(|(wid, _)| *wid)
-                .filter(|wid| !presented.contains(wid))
+                .filter(|wid| Some(*wid) != skip_wid && !presented.contains(wid))
                 .collect();
             reactor.cancel_window_presentations(windows);
         }
@@ -1063,29 +1077,24 @@ impl AnimationManager {
             };
             let current_frame = window.frame_monotonic;
             let window_server_id = window.info.sys_id;
-            let pending = window_server_id
-                .and_then(|wsid| reactor.transaction_manager.get_target_frame(wsid));
-            // Matching the observed frame cannot cancel an older, different target.
-            if pending.is_some_and(|frame| frame.same_as(target_frame))
-                || (pending.is_none() && target_frame.same_as(current_frame))
+            let transactions = &reactor.transaction_manager;
+            if window_server_id
+                .and_then(|id| transactions.store.get(&id))
+                .unwrap_or_default()
+                .covers(target_frame, current_frame)
             {
                 continue;
             }
-            any_frame_changed = true;
-            let txid = window_server_id
-                .map(|wsid| reactor.transaction_manager.generate_next_txid(wsid))
-                .unwrap_or_default();
-
-            let Some(app_state) = &reactor.app_manager.apps.get(&wid.pid) else {
+            let Some(app_state) = reactor.app_manager.apps.get(&wid.pid) else {
                 debug!(?wid, "Skipping for window - app no longer exists");
                 continue;
             };
-
+            any_frame_changed = true;
+            let txid = window_server_id
+                .map(|wsid| transactions.begin(wsid, target_frame))
+                .unwrap_or_default();
             let is_active = reactor.state.windows.workspace_for_window(wid) == Some(active_ws);
 
-            if let Some(wsid) = window_server_id {
-                reactor.transaction_manager.update_txid_entries([(wsid, txid, target_frame)]);
-            }
             if is_active {
                 trace!(?wid, ?current_frame, ?target_frame, "Animating visible window");
                 let handle = app_state.handle.with_scrolling_bounds(
@@ -1180,7 +1189,13 @@ impl AnimationManager {
         position_only: bool,
         force_frames: bool,
     ) -> bool {
-        reactor.cancel_window_presentations(layout.iter().map(|(wid, _)| *wid).collect());
+        reactor.cancel_window_presentations(
+            layout
+                .iter()
+                .map(|(wid, _)| *wid)
+                .filter(|wid| Some(*wid) != skip_wid)
+                .collect(),
+        );
         let bounds = scrolling_bounds(reactor, space);
         let active = reactor.layout_manager.layout_engine.workspaces().active_workspace(space);
         let mut per_app: HashMap<(pid_t, bool), _> = HashMap::default();
@@ -1202,16 +1217,12 @@ impl AnimationManager {
             };
             let target_frame = target_frame.round();
             let current_frame = window.frame_monotonic;
-            if !force_frames && target_frame.same_as(current_frame) {
-                continue;
-            }
-            if !force_frames
-                && let Some(wsid) = window.info.sys_id
-                && reactor
-                    .transaction_manager
-                    .get_target_frame(wsid)
-                    .is_some_and(|pending| pending.same_as(target_frame))
-            {
+            let write = window
+                .info
+                .sys_id
+                .and_then(|id| reactor.transaction_manager.store.get(&id))
+                .unwrap_or_default();
+            if !force_frames && write.covers(target_frame, current_frame) {
                 trace!(?wid, ?target_frame, "Skipping redundant instant layout request");
                 continue;
             }
@@ -1223,12 +1234,13 @@ impl AnimationManager {
                 "Instant workspace positioning"
             );
 
-            let size_unchanged = !force_frames && current_frame.size.same_as(target_frame.size);
+            let size_unchanged = !force_frames
+                && write.target().is_none()
+                && current_frame.size.same_as(target_frame.size);
             window.frame_monotonic = target_frame;
-            let (frames, positions, first_wsid) = per_app
+            let (frames, positions) = per_app
                 .entry((wid.pid, constrained))
-                .or_insert_with(|| (Vec::new(), Vec::new(), None));
-            *first_wsid = first_wsid.or(window.info.sys_id);
+                .or_insert_with(|| (Vec::new(), Vec::new()));
             if position_only && size_unchanged {
                 positions.push((wid, target_frame));
             } else {
@@ -1236,7 +1248,7 @@ impl AnimationManager {
             }
         }
 
-        for ((pid, constrained), (frames, positions, first_wsid)) in per_app {
+        for ((pid, constrained), (frames, positions)) in per_app {
             let Some(app_state) = reactor.app_manager.apps.get(&pid) else {
                 debug!(?pid, "Skipping layout update for app - app no longer exists");
                 continue;
@@ -1244,9 +1256,7 @@ impl AnimationManager {
 
             let handle = app_state.handle.with_scrolling_bounds(bounds.filter(|_| constrained));
 
-            let txid = first_wsid
-                .map(|wsid| reactor.transaction_manager.generate_next_txid(wsid))
-                .unwrap_or_default();
+            let txid = reactor.transaction_manager.store.next_id();
             for wid in frames.iter().map(|(wid, _)| wid).chain(positions.iter().map(|(wid, _)| wid))
             {
                 if let Some(window) = reactor.state.windows.window(*wid)
@@ -2239,7 +2249,7 @@ mod tests {
                 "display sampling cannot advance transactions"
             );
             assert_eq!(
-                store.get(&wsid).unwrap().target,
+                store.get(&wsid).unwrap().target(),
                 None,
                 "free gestures have no semantic target"
             );

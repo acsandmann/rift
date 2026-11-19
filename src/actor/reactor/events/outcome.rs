@@ -68,7 +68,6 @@ pub(crate) struct EventOutcome {
     pub(crate) app_requests: Vec<(pid_t, Request)>,
     pub(crate) window_inventory_requests: Vec<pid_t>,
     pub(crate) topology_reassignments: Vec<TopologyReassignment>,
-    pub(crate) confirmed_window_spaces: Vec<(WindowServerId, SpaceId)>,
     pub(crate) fullscreen_restorations: Vec<(WindowServerId, SpaceId, WindowId)>,
     pub(crate) raise_requests: Vec<raise_manager::Event>,
     pub(crate) make_key_windows: Vec<(pid_t, WindowServerId)>,
@@ -130,7 +129,6 @@ impl EventOutcome {
         self.app_requests.append(&mut other.app_requests);
         self.window_inventory_requests.append(&mut other.window_inventory_requests);
         self.topology_reassignments.append(&mut other.topology_reassignments);
-        self.confirmed_window_spaces.append(&mut other.confirmed_window_spaces);
         self.fullscreen_restorations.append(&mut other.fullscreen_restorations);
         self.raise_requests.append(&mut other.raise_requests);
         self.make_key_windows.append(&mut other.make_key_windows);

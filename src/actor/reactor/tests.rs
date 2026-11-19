@@ -1830,67 +1830,47 @@ fn geometry_cross_display_frame_change_waits_for_authoritative_membership() {
 }
 
 #[test]
-fn matching_rift_frame_clears_pending_target() {
-    let (mut reactor, wid, wsid, _space1, _space2, frame) = reactor_with_window_on_space1();
-    let target_frame = CGRect::new(
-        CGPoint::new(frame.origin.x + 40.0, frame.origin.y + 25.0),
-        frame.size,
+fn accepted_frame_settles_the_write_without_retrying_an_adjusted_size() {
+    let (mut apps, mut reactor) = test_context();
+    let screen = CGRect::new(CGPoint::ZERO, CGSize::new(1000., 1000.));
+    let space = SpaceId::new(1);
+    let wid = WindowId::new(1, 1);
+    apps.make_app_and_settle_on_screen(&mut reactor, screen, space, wid.pid, make_windows(1));
+    let wsid = reactor.test_window_server_id(wid);
+    let arrange = |reactor: &mut Reactor, target| {
+        super::animation::AnimationManager::instant_layout(reactor, space, &[(wid, target)], None)
+    };
+    let target = CGRect::new(CGPoint::new(20., 20.), CGSize::new(620., 500.));
+    let accepted = CGRect::new(target.origin, CGSize::new(700., 500.));
+    assert!(arrange(&mut reactor, target));
+    let txid = reactor.transaction_manager.get_last_sent_txid(wsid);
+    apps.requests();
+
+    let readback = |frame, txid| {
+        Event::WindowFrameChanged(wid, frame, Some(txid), Requested(true), Some(MouseState::Up))
+    };
+    reactor.handle_event(readback(accepted, txid));
+    assert_eq!(
+        reactor.state.windows.window(wid).unwrap().frame_monotonic,
+        accepted
     );
-    let txid = reactor.transaction_manager.generate_next_txid(wsid);
-    reactor.transaction_manager.store_txid(wsid, txid, target_frame);
-
-    reactor.handle_event(Event::WindowFrameChanged(
-        wid,
-        target_frame,
-        Some(txid),
-        Requested(true),
-        Some(MouseState::Up),
-    ));
-
+    assert_eq!(reactor.transaction_manager.get_target_frame(wsid), None);
+    let mut new_target = target;
+    new_target.origin.x += 100.;
+    assert!(!arrange(&mut reactor, target));
+    assert!(apps.requests().is_empty());
+    assert!(arrange(&mut reactor, new_target));
+    let newer = reactor.transaction_manager.get_last_sent_txid(wsid);
+    reactor.handle_event(readback(accepted, txid));
     assert_eq!(
         reactor.transaction_manager.get_target_frame(wsid),
-        None,
-        "a confirmed Rift frame must clear the pending target"
+        Some(new_target)
     );
-    assert!(
-        reactor
-            .state
-            .windows
-            .window(wid)
-            .expect("window should still exist")
-            .frame_monotonic
-            .same_as(target_frame)
-    );
-
-    // AX may adjust a requested frame; cache the accepted geometry but keep the target pending.
-    let adjusted_target = CGRect::new(CGPoint::new(80.0, 40.0), frame.size);
-    let accepted = CGRect::new(CGPoint::new(81.0, 40.0), frame.size);
-    let txid = reactor.transaction_manager.generate_next_txid(wsid);
-    reactor.transaction_manager.store_txid(wsid, txid, adjusted_target);
-    let outcome = reactor
-        .dispatch_workflow(Event::WindowFrameChanged(
-            wid,
-            accepted,
-            Some(txid),
-            Requested(true),
-            Some(MouseState::Up),
-        ))
-        .unwrap();
-    assert!(reactor.state.windows.window(wid).unwrap().frame_monotonic.same_as(accepted));
+    reactor.handle_event(readback(new_target, newer));
     assert_eq!(
-        reactor.transaction_manager.get_target_frame(wsid),
-        Some(adjusted_target)
+        reactor.state.windows.window(wid).unwrap().frame_monotonic,
+        new_target
     );
-    assert!(outcome.arrange.passes == 0 && !outcome.refresh_layout_mode);
-
-    // A user drag beginning during the transaction clears it instead of accepting it blindly.
-    reactor.handle_event(Event::WindowFrameChanged(
-        wid,
-        accepted,
-        Some(txid),
-        Requested(true),
-        Some(MouseState::Down),
-    ));
     assert_eq!(reactor.transaction_manager.get_target_frame(wsid), None);
 }
 
@@ -2203,6 +2183,7 @@ fn layout_events_defer_arrangement_during_drag_except_removal() {
         if modifier {
             reactor.drag_manager.actor.begin_modifier(
                 source,
+                crate::actor::drag::MouseButton::Left,
                 frame.mid(),
                 crate::common::config::MouseAction::Move,
                 crate::actor::drag::DragScene::default(),
@@ -2246,77 +2227,110 @@ fn layout_events_defer_arrangement_during_drag_except_removal() {
 }
 
 #[test]
-fn cross_display_drag_clears_source_floating_position() {
-    let (mut reactor, wid, _wsid, space1, space2, initial_frame, screen2) =
-        reactor_with_window_on_space1_two_displays();
-    let source_workspace = reactor
-        .layout_manager
-        .layout_engine
-        .workspaces()
-        .active_workspace(space1)
-        .expect("source workspace");
-    let target_workspace = reactor
-        .layout_manager
-        .layout_engine
-        .workspaces()
-        .active_workspace(space2)
-        .expect("target workspace");
+fn cross_display_drag_relocates_the_window_once_and_preserves_floating() {
+    for floating in [false, true] {
+        let (mut reactor, wid, _wsid, space1, space2, initial_frame, screen2) =
+            reactor_with_window_on_space1_two_displays();
+        reactor.send_layout_event(LayoutEvent::WindowAdded(space1, wid));
+        let source = reactor.state.windows.workspace_for_window(wid).unwrap();
+        if floating {
+            reactor.send_layout_event(LayoutEvent::WindowFocused(space1, wid));
+            reactor.handle_test_layout_command(LayoutCommand::ToggleWindowFloating);
+            reactor.layout_manager.layout_engine.store_floating_position(
+                source,
+                wid,
+                initial_frame,
+            );
+        }
+        let released = CGRect::new(
+            CGPoint::new(screen2.origin.x + 120.0, initial_frame.origin.y),
+            initial_frame.size,
+        );
+        reactor.handle_event(Event::WindowFrameChanged(
+            wid,
+            released,
+            None,
+            Requested(false),
+            Some(MouseState::Down),
+        ));
+        assert!(reactor.is_in_drag());
+        reactor.handle_event(Event::MouseUp(crate::actor::drag::MouseButton::Left));
+        assert!(!reactor.is_in_drag());
+        assert_eq!(reactor.assigned_space_for_window_id(wid), Some(space2));
 
-    reactor.send_layout_event(LayoutEvent::WindowAdded(space1, wid));
-    reactor.send_layout_event(LayoutEvent::WindowFocused(space1, wid));
-    reactor.handle_test_layout_command(LayoutCommand::ToggleWindowFloating);
-    assert!(reactor.layout_manager.layout_engine.is_window_floating(wid));
-    reactor.layout_manager.layout_engine.store_floating_position(
-        source_workspace,
+        let engine = &reactor.layout_manager.layout_engine;
+        let workspaces = engine.workspaces();
+        let source_layout = workspaces.active_layout(space1, source).unwrap();
+        let (target, target_layout) = workspaces.active_layout_for_space(space2).unwrap();
+        assert!(!workspaces[source].layout_system.contains_window(source_layout, wid));
+        assert_eq!(
+            workspaces[target].layout_system.contains_window(target_layout, wid),
+            !floating
+        );
+        assert_eq!(engine.is_window_floating(wid), floating);
+        if floating {
+            assert_eq!(engine.get_floating_position(source, wid), None);
+            assert_eq!(engine.get_floating_position(target, wid), Some(released));
+        }
+    }
+}
+
+#[test]
+fn new_window_under_a_held_pointer_keeps_its_frame_until_release() {
+    let (mut apps, mut reactor) = test_context();
+    let screen = CGRect::new(CGPoint::ZERO, CGSize::new(1000., 1000.));
+    let space = SpaceId::new(1);
+    apps.make_app_and_settle_on_screen(&mut reactor, screen, space, 1, make_windows(1));
+    apps.requests();
+    let wid = WindowId::new(1, 2);
+    let frame = CGRect::new(CGPoint::new(200., 200.), CGSize::new(500., 500.));
+    window_server::set_cursor_location_override(Some(frame.mid()));
+    reactor.handle_event(Event::WindowCreated(
         wid,
-        initial_frame,
-    );
-
-    let moved_frame = CGRect::new(
-        CGPoint::new(screen2.origin.x + 120.0, initial_frame.origin.y),
-        initial_frame.size,
-    );
-    reactor.drag_manager.actor.begin_native(
-        crate::actor::drag::DragSource {
-            window: wid,
-            origin_frame: initial_frame,
-            last_frame: moved_frame,
-            origin_space: None,
-            current_space: Some(space2),
-            tiled: false,
-        },
-        crate::actor::drag::DragScene::default(),
-    );
-
-    let outcome = crate::actor::reactor::events::drag::handle_mouse_up(
-        &mut reactor.state,
-        &mut reactor.layout_manager,
-        &mut reactor.drag_manager,
-        crate::actor::reactor::events::drag::MouseUpPayload {
-            button: crate::actor::drag::MouseButton::Left,
-            final_space: Some(space2),
-        },
-    )
-    .unwrap();
-    assert!(outcome.arrange.passes > 0);
-    assert!(!reactor.drag_manager.actor.is_active());
-
-    assert_eq!(reactor.assigned_space_for_window_id(wid), Some(space2));
-    assert_eq!(
-        reactor
-            .layout_manager
-            .layout_engine
-            .get_floating_position(source_workspace, wid),
+        make_window_info(frame, None, "Detached tab", None),
         None,
-        "cross-display drags must clear the source workspace's floating position"
-    );
-    assert_eq!(
-        reactor
-            .layout_manager
-            .layout_engine
-            .get_floating_position(target_workspace, wid),
-        Some(moved_frame)
-    );
+        Some(MouseState::Down),
+    ));
+    window_server::set_cursor_location_override(None);
+    let wrote_frame = |requests: Vec<Request>| {
+        requests.iter().any(|request| {
+        matches!(request, Request::SetWindowFrames(frames, ..) if frames.iter().any(|(window, _)| *window == wid))
+    })
+    };
+    assert!(!wrote_frame(apps.requests()));
+    reactor.handle_event(Event::MouseUp(crate::actor::drag::MouseButton::Left));
+    assert!(wrote_frame(apps.requests()));
+}
+
+#[test]
+fn unrelated_native_resize_cannot_steal_a_drag_or_revive_its_transfer() {
+    let (mut reactor, wid, wsid, space1, space2, frame, screen2) =
+        reactor_with_window_on_space1_two_displays();
+    let workspace = reactor.state.windows.workspace_for_window(wid).unwrap();
+    let other = WindowId::new(wid.pid, 2);
+    reactor.add_test_window(other, WindowServerId::new(102), Some(space1), frame);
+    assert!(reactor.assign_test_window_to_workspace(space1, other, workspace));
+    reactor.send_layout_event(LayoutEvent::WindowAdded(space1, other));
+    let transfer_frame = CGRect::new(screen2.origin, frame.size);
+    reactor.state.windows.request_transfer(wid, Some(transfer_frame), space1, false);
+    let drag_frame = CGRect::new(CGPoint::new(screen2.origin.x + 80., 60.), frame.size);
+    let moved = |window, frame| {
+        Event::WindowFrameChanged(window, frame, None, Requested(false), Some(MouseState::Down))
+    };
+    reactor.handle_event(moved(wid, drag_frame));
+    let mut resized = reactor.state.windows.window(other).unwrap().frame_monotonic;
+    resized.size.width += 80.;
+    reactor.handle_event(moved(other, resized));
+
+    assert!(reactor.state.windows.record(wid).unwrap().pending_transfer().is_none());
+    let mut restated = forwarded_space_state(reactor.space_state.screens.clone());
+    restated.membership_complete = true;
+    restated.active_window_spaces.insert(wsid, space2);
+    reactor.handle_event(Event::SpaceStateChanged(restated));
+    assert_eq!(reactor.assigned_space_for_window_id(wid), Some(space1));
+    reactor.handle_event(Event::MouseUp(crate::actor::drag::MouseButton::Left));
+    assert_eq!(reactor.assigned_space_for_window_id(wid), Some(space2));
+    assert_eq!(reactor.assigned_space_for_window_id(other), Some(space1));
 }
 
 #[test]
@@ -2397,6 +2411,7 @@ fn cancelling_tiled_modifier_move_reconciles_layout() {
 
     reactor.drag_manager.actor.begin_modifier(
         source,
+        crate::actor::drag::MouseButton::Left,
         frame.mid(),
         crate::common::config::MouseAction::Move,
         crate::actor::drag::DragScene::default(),
@@ -2410,13 +2425,12 @@ fn cancelling_tiled_modifier_move_reconciles_layout() {
     assert_eq!(reactor.layout_update_count, before);
     reactor.apply_event_outcome(EventOutcome::window_membership_changed(true, false));
     assert_eq!(reactor.layout_update_count - before, 1);
-    reactor.drag_manager.externally_controlled_window = Some(wid);
     let move_cancel = reactor.dispatch_workflow(Event::DragCancel).unwrap();
     assert!(move_cancel.arrange.passes > 0);
-    assert_eq!(reactor.drag_manager.externally_controlled_window, None);
 
     reactor.drag_manager.actor.begin_modifier(
         source,
+        crate::actor::drag::MouseButton::Left,
         frame.mid(),
         crate::common::config::MouseAction::Move,
         crate::actor::drag::DragScene::default(),
@@ -2448,6 +2462,7 @@ fn frame_echo_reading_mouse_up_does_not_end_a_modifier_drag() {
             current_space: Some(space),
             tiled: true,
         },
+        crate::actor::drag::MouseButton::Left,
         frame.mid(),
         crate::common::config::MouseAction::Move,
         crate::actor::drag::DragScene::default(),
@@ -3196,11 +3211,8 @@ fn mission_control_enter_clears_active_drag_state() {
             .native_motion_active
             .load(std::sync::atomic::Ordering::Acquire)
     );
-    assert!(reactor.drag_manager.externally_controlled_window.is_none());
-    assert!(reactor.drag_manager.preview_suppressed);
 
     reactor.handle_event(Event::MissionControlNativeExited);
-    assert!(!reactor.drag_manager.preview_suppressed);
 }
 
 #[test]

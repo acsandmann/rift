@@ -845,6 +845,15 @@ impl BspLayoutSystem {
             self.select(node);
             return;
         }
+        if let NodeKind::Leaf {
+            fullscreen,
+            fullscreen_within_gaps,
+            ..
+        } = self.kind_mut(node)
+        {
+            *fullscreen = false;
+            *fullscreen_within_gaps = false;
+        }
         if self.nodes[node].parent.is_some() {
             self.detach_child(node);
             self.nodes.remove(node);
@@ -1143,6 +1152,32 @@ mod tests {
             assert!(system.visible_windows_in_layout(layout).is_empty());
             assert_eq!(system.selected_window(layout), None);
         }
+    }
+
+    #[test]
+    fn closing_the_last_fullscreen_window_clears_the_tile() {
+        let (mut system, layout) = tiled(&[1]);
+        system.toggle_fullscreen(layout, false);
+        assert!(system.container_tree(layout).is_fullscreen);
+        system.remove_window(w(1));
+        assert!(!system.container_tree(layout).is_fullscreen);
+        system.add_window_after_selection(layout, w(2));
+        assert!(!system.container_tree(layout).is_fullscreen);
+    }
+
+    #[test]
+    fn join_adds_the_selected_window_to_the_neighboring_stack() {
+        let (mut system, layout) = tiled(&[1, 2, 3]);
+        assert!(system.apply_target_drop(
+            layout,
+            w(2),
+            w(1),
+            crate::layout_engine::WindowDropAction::Stack
+        ));
+        assert!(system.select_window(layout, w(3)));
+        system.join_selection_with_direction(layout, Direction::Left);
+        assert_eq!(system.stack_members(layout, w(3)), vec![w(1), w(2), w(3)]);
+        assert_eq!(system.visible_windows_in_layout(layout), vec![w(3)]);
     }
 }
 
@@ -1781,6 +1816,19 @@ impl BspLayoutSystem {
         let Some(neighbor) = self.find_neighbor_leaf(sel_leaf, direction) else {
             return false;
         };
+
+        if self.stack(neighbor).is_some()
+            && self.stack(sel_leaf).is_none()
+            && let Some(source) = self.participating_window(sel_leaf)
+            && let Some(target) = self.participating_window(neighbor)
+        {
+            return self.apply_target_drop(
+                layout,
+                source,
+                target,
+                crate::layout_engine::WindowDropAction::Stack,
+            );
+        }
 
         let mut current = sel_leaf;
         while let Some(parent) = self.parent(current) {

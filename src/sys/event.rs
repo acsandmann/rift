@@ -54,11 +54,7 @@ pub fn get_mouse_state() -> Option<MouseState> {
     }
 
     let down =
-        CGEventSource::button_state(CGEventSourceStateID::HIDSystemState, CGMouseButton::Left)
-            || CGEventSource::button_state(
-                CGEventSourceStateID::HIDSystemState,
-                CGMouseButton::Right,
-            );
+        CGEventSource::button_state(CGEventSourceStateID::HIDSystemState, CGMouseButton::Left);
     Some(if down {
         MouseState::Down
     } else {

@@ -43,31 +43,23 @@ impl AppManager {
 pub struct DragManager {
     pub actor: crate::actor::drag::DragActor,
     pub native_motion_active: Arc<AtomicBool>,
-    pub externally_controlled_window: Option<WindowId>,
     pub(super) preview: Option<crate::ui::drag_preview::DragPreview>,
     pub(super) preview_enabled: bool,
-    pub(super) preview_suppressed: bool,
     pub(super) haptics_enabled: bool,
 }
 
 impl DragManager {
     pub fn sync_motion_gate(&self) {
-        let active = self.actor.is_active()
-            && matches!(
-                self.actor.kind(),
-                Some(
-                    crate::actor::drag::DragKind::NativeMove
-                        | crate::actor::drag::DragKind::NativeResize
-                )
-            );
-        self.native_motion_active.store(active, Ordering::Release);
+        let active = self.actor.drop_enabled()
+            && self.actor.kind() == Some(crate::actor::drag::DragKind::NativeMove);
+        if self.native_motion_active.load(Ordering::Relaxed) != active {
+            self.native_motion_active.store(active, Ordering::Release);
+        }
     }
 
     /// A window leaving Rift's control can no longer be dragged by it.
     pub fn forget_window(&mut self, wid: WindowId) {
-        if self.actor.window_removed(wid) && self.externally_controlled_window == Some(wid) {
-            self.externally_controlled_window = None;
-        }
+        self.actor.window_removed(wid);
         self.sync_motion_gate();
         self.sync_preview();
     }
@@ -76,7 +68,6 @@ impl DragManager {
         self.actor.cancel();
         self.sync_motion_gate();
         self.release_preview();
-        self.externally_controlled_window = None;
     }
 
     pub fn update_config(&mut self, config: DragDropSettings) {
@@ -86,9 +77,6 @@ impl DragManager {
         if !config.enabled || !config.preview {
             self.release_preview();
         }
-        if !config.enabled {
-            self.externally_controlled_window = None;
-        }
         self.sync_preview();
     }
 
@@ -96,11 +84,7 @@ impl DragManager {
         if cfg!(test) {
             return;
         }
-        let Some(target) = self
-            .actor
-            .preview_target()
-            .filter(|_| self.preview_enabled && !self.preview_suppressed)
-        else {
+        let Some(target) = self.actor.preview_target().filter(|_| self.preview_enabled) else {
             self.hide_preview();
             return;
         };
@@ -126,13 +110,6 @@ impl DragManager {
     }
 
     pub fn release_preview(&mut self) { drop(self.preview.take()); }
-
-    pub fn suppress_preview(&mut self, suppressed: bool) {
-        self.preview_suppressed = suppressed;
-        if suppressed {
-            self.hide_preview();
-        }
-    }
 }
 
 /// Manages window notifications
@@ -314,7 +291,7 @@ impl LayoutManager {
         is_workspace_switch: bool,
         space_scope: Option<SpaceId>,
     ) -> Result<bool, crate::model::reactor::ReactorError> {
-        if reactor.refreshes_blocked() {
+        if reactor.refreshes_blocked() || reactor.is_mission_control_active() {
             return Ok(false);
         }
         let layout_result = Self::calculate_layout(reactor, space_scope, true, false);
@@ -333,7 +310,7 @@ impl LayoutManager {
         space_scope: Option<SpaceId>,
         force_frames: bool,
     ) -> Result<bool, crate::model::reactor::ReactorError> {
-        if reactor.refreshes_blocked() {
+        if reactor.refreshes_blocked() || reactor.is_mission_control_active() {
             return Ok(false);
         }
         let layout = Self::calculate_layout(reactor, space_scope, true, true);
@@ -417,7 +394,7 @@ impl LayoutManager {
     ) -> Result<bool, crate::model::reactor::ReactorError> {
         let main_window = reactor.main_window();
         trace!(?main_window);
-        let skip_wid = reactor.drag_manager.externally_controlled_window;
+        let skip_wid = reactor.drag_manager.actor.source().map(|source| source.window);
         let mut any_frame_changed = false;
 
         let active_space = reactor.workspace_command_space();
