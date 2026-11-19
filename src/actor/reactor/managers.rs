@@ -349,9 +349,6 @@ impl LayoutManager {
         if reactor.state.windows.tracked_window_count() == 0 {
             return LayoutResult::new();
         }
-        let collect_groups = publish_groups
-            && reactor.config.settings.ui.stack_line.enabled
-            && reactor.communication_manager.stack_line_tx.is_some();
         let all_screen_frames: Vec<CGRect> =
             reactor.space_state.screens.iter().map(|s| s.frame).collect();
         let mut layout_result = LayoutResult::new();
@@ -387,7 +384,8 @@ impl LayoutManager {
                 reactor.config.settings.ui.stack_line.reserve(),
                 |wid| reactor.state.windows.window(wid).map(|w| w.frame_monotonic),
                 &all_screen_frames,
-                collect_groups.then_some(&mut groups),
+                // Stack metadata feeds IPC even when the overlay is disabled.
+                publish_groups.then_some(&mut groups),
                 finish_scrolling,
             );
             let engine = &reactor.layout_manager.layout_engine;

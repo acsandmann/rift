@@ -8997,7 +8997,7 @@ fn stack_tabs_publish_in_on_screen_order_and_follow_focus() {
 
 #[test]
 fn toggling_stack_tabs_reserves_and_publishes_only_while_enabled() {
-    let (mut apps, mut reactor, mut tabs, _) = stacked_reactor(false);
+    let (mut apps, mut reactor, mut tabs, mut events) = stacked_reactor(false);
     let left = |reactor: &Reactor| {
         reactor
             .state
@@ -9011,6 +9011,7 @@ fn toggling_stack_tabs_reserves_and_publishes_only_while_enabled() {
     let enabled_left = left(&reactor);
     last_groups(&mut tabs);
     for enabled in [false, true] {
+        while events.try_recv().is_ok() {}
         let mut config = reactor.config.clone();
         config.settings.ui.stack_line.enabled = enabled;
         reactor.handle_event(Event::ConfigUpdated(config));
@@ -9022,6 +9023,14 @@ fn toggling_stack_tabs_reserves_and_publishes_only_while_enabled() {
         // A vertical stack's bar sits on its left edge.
         assert_eq!(enabled_left - left(&reactor), if enabled { 0.0 } else { 28.0 });
         assert_eq!(last_groups(&mut tabs).map(|g| g.len()), enabled.then_some(1));
+        assert!(
+            std::iter::from_fn(|| events.try_recv().ok()).any(|(_, event)| matches!(
+                event,
+                BroadcastEvent::StacksChanged { stacks, .. }
+                    if stacks.len() == 1 && stacks[0].total_count == 3
+            )),
+            "IPC clients must receive stack data with the overlay enabled={enabled}"
+        );
     }
     reactor.handle_test_layout_command(LayoutCommand::ToggleStack);
     apps.simulate_until_quiet(&mut reactor);
