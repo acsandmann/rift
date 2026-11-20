@@ -80,20 +80,16 @@ pub struct DisplayLink {
 
 impl DisplayLink {
     pub fn for_display(display: u32, wake: Sender<()>) -> Self {
-        Self::create(
-            display,
-            move || {
-                let _ = wake.try_send(());
-            },
-            false,
-        )
+        Self::create(display, move || {
+            let _ = wake.try_send(());
+        })
     }
 
     pub fn for_display_callback(display: u32, wake: impl Fn() + Send + Sync + 'static) -> Self {
-        Self::create(display, wake, true)
+        Self::create(display, wake)
     }
 
-    fn create(display: u32, wake: impl Fn() + Send + Sync + 'static, high_refresh: bool) -> Self {
+    fn create(display: u32, wake: impl Fn() + Send + Sync + 'static) -> Self {
         let id = NEXT_ID.fetch_add(1, Ordering::Relaxed);
         let state = Arc::new(State {
             wake: Box::new(wake),
@@ -104,8 +100,8 @@ impl DisplayLink {
         });
         queue::main().after_f_s(
             Time::NOW,
-            (id, display, state.clone(), high_refresh),
-            |(id, display, state, high_refresh)| {
+            (id, display, state.clone()),
+            |(id, display, state)| {
                 if state.cancelled.load(Ordering::Acquire) {
                     return;
                 }
@@ -125,14 +121,7 @@ impl DisplayLink {
                 let target: Retained<DisplayLinkTarget> = unsafe { msg_send![super(target), init] };
                 // The target is retained by the link. It does not retain the link in return.
                 let link = unsafe { screen.displayLinkWithTarget_selector(&target, sel!(tick:)) };
-                if high_refresh {
-                    let fps = screen.maximumFramesPerSecond() as f32;
-                    link.setPreferredFrameRateRange(CAFrameRateRange::new(
-                        30_f32.min(fps),
-                        fps,
-                        fps,
-                    ));
-                }
+                link.setPreferredFrameRateRange(frame_rate_range(screen.maximumFramesPerSecond()));
                 link.setPaused(paused);
                 unsafe {
                     link.addToRunLoop_forMode(&NSRunLoop::mainRunLoop(), NSRunLoopCommonModes)
@@ -182,6 +171,13 @@ impl DisplayLink {
     }
 }
 
+/// An unconfigured link may be held at 60 Hz on ProMotion displays. Idle links
+/// are paused, so asking for the panel's full rate only costs while animating.
+fn frame_rate_range(maximum_fps: isize) -> CAFrameRateRange {
+    let fps = maximum_fps as f32;
+    CAFrameRateRange::new(30_f32.min(fps), fps, fps)
+}
+
 impl Drop for DisplayLink {
     fn drop(&mut self) {
         self.state.cancelled.store(true, Ordering::Release);
@@ -213,5 +209,16 @@ mod tests {
         ticks.publish(4.0, 4.008);
         assert_eq!(ticks.take().unwrap().timestamp, 4.0);
         assert!(ticks.take().is_none());
+    }
+
+    #[test]
+    fn links_prefer_the_display_maximum_refresh_rate() {
+        for (maximum, minimum) in [(120, 30.0), (60, 30.0), (24, 24.0)] {
+            let range = frame_rate_range(maximum);
+            assert_eq!(
+                (range.minimum, range.maximum, range.preferred),
+                (minimum, maximum as f32, maximum as f32)
+            );
+        }
     }
 }
