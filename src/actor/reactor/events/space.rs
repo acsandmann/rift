@@ -1,8 +1,7 @@
-use tracing::{debug, trace};
+use tracing::debug;
 
 use super::super::{Changes, Reactor};
-use crate::actor::app::Request;
-use crate::actor::reactor::{LayoutEvent, SpaceEventKind};
+use crate::actor::reactor::SpaceEventKind;
 use crate::actor::spaces::ForwardedSpaceState;
 use crate::actor::wm_controller::WmEvent;
 use crate::common::collections::HashSet;
@@ -116,7 +115,7 @@ impl Reactor {
             // Departure alone cannot establish entry. Startup recovery uses positive
             // fullscreen appearance/discovery, even if this notification arrives late.
             if let Some(wid) = self.state.windows.tracked_window_id(wsid) {
-                self.send_app_request(wid.pid, Request::WindowMaybeDestroyed(wid));
+                changes.inventory(wid.pid);
             }
         } else {
             match self.state.windows.observe_native_departure(
@@ -131,18 +130,13 @@ impl Reactor {
                     self.reassign_window_to_authoritative_space(changes, wid, space, false);
                 }
                 NativeDeparture::Closed(wid) => {
-                    self.destroy_window(changes, wid);
+                    self.retire_window(changes, wid);
                 }
-                NativeDeparture::Hidden {
-                    window: Some(wid),
-                    remove_projection,
-                } => {
-                    if remove_projection {
-                        self.reconcile_layout_event(changes, LayoutEvent::WindowSuspended(wid));
-                    }
-                    self.send_app_request(wid.pid, Request::WindowMaybeDestroyed(wid));
+                NativeDeparture::Hidden(Some(wid)) => {
+                    self.reconcile_window_membership(changes, wid, None);
+                    changes.inventory(wid.pid);
                 }
-                NativeDeparture::Moved(None, _) | NativeDeparture::Hidden { window: None, .. } => {}
+                NativeDeparture::Moved(None, _) | NativeDeparture::Hidden(None) => {}
             }
         }
     }
@@ -190,98 +184,63 @@ impl Reactor {
             self.state.windows.note_window_server_fullscreen_exit(wsid, resolved_space);
         }
 
-        if self.state.windows.knows_window_server_id(wsid)
-            || self.state.windows.is_window_server_observed(wsid)
-        {
-            if !self.is_mission_control_active() {
-                match kind {
-                    SpaceEventKind::User => {
-                        if let Some(wid) = self.state.windows.tracked_window_id(wsid) {
-                            if self.state.windows.native_fullscreen_record_for_window(wid).is_some()
-                            {
-                                changes.inventory(wid.pid);
-                            }
-                            self.reconcile_native_presence(changes, wsid, sid, wid);
-                        } else if let Some(pid) = self
-                            .state
-                            .windows
-                            .pending_native_fullscreen_pid_for_window_server_id(wsid)
-                        {
-                            changes.inventory(pid);
-                        }
-                    }
-                    SpaceEventKind::Fullscreen => {
-                        let tracked_window_id = self.state.windows.tracked_window_id(wsid);
-                        let owner_pid = tracked_window_id.map(|wid| wid.pid).or_else(|| {
-                            self.state.windows.get_window_server_info(wsid).map(|info| info.pid)
-                        });
-                        if let Some(wid) = self.state.windows.observe_native_fullscreen(
-                            wsid,
-                            sid,
-                            last_known_user_space,
-                            owner_pid,
-                        ) {
-                            self.reconcile_layout_event(changes, LayoutEvent::WindowSuspended(wid));
-                        }
-                        if tracked_window_id.is_none()
-                            && let Some(pid) = owner_pid
-                        {
-                            changes.inventory(pid);
-                        }
-                    }
-                }
-            }
-            debug!(
-                ?wsid,
-                "Received WindowServerAppeared for known window - ignoring"
-            );
+        let tracked = self.state.windows.tracked_window_id(wsid);
+        let known = tracked.is_some()
+            || self.state.windows.knows_window_server_id(wsid)
+            || self.state.windows.is_window_server_observed(wsid);
+        if known && self.is_mission_control_active() {
             return;
         }
-
-        self.state.windows.mark_window_server_observed(wsid);
-        // TODO: figure out why this is happening, we should really know about this app,
-        // why dont we get notifications that its being launched?
-        if let Some(window_server_info) = window_server_info {
-            if window_server_info.layer != 0 {
-                self.state.windows.clear_window_server_observed(wsid);
-                trace!(
-                    ?wsid,
-                    layer = window_server_info.layer,
-                    "Ignoring non-normal window"
-                );
-                return;
-            }
-
-            // Filter out very small windows (likely tooltips or similar UI elements)
-            // that shouldn't be managed by the window manager
-            const MIN_MANAGEABLE_WINDOW_SIZE: f64 = 50.0;
-            if window_server_info.frame.size.width < MIN_MANAGEABLE_WINDOW_SIZE
-                || window_server_info.frame.size.height < MIN_MANAGEABLE_WINDOW_SIZE
+        if !known {
+            self.state.windows.mark_window_server_observed(wsid);
+            if let Some(info) = window_server_info
+                && (info.layer != 0
+                    || info.frame.size.width < 50.0
+                    || info.frame.size.height < 50.0)
             {
                 self.state.windows.clear_window_server_observed(wsid);
-                trace!(
-                    ?wsid,
-                    "Ignoring tiny window ({}x{}) - likely tooltip",
-                    window_server_info.frame.size.width,
-                    window_server_info.frame.size.height
-                );
                 return;
             }
+        }
 
-            if matches!(kind, SpaceEventKind::Fullscreen) {
-                self.state.windows.observe_native_fullscreen(
-                    wsid,
-                    sid,
-                    last_known_user_space,
-                    Some(window_server_info.pid),
-                );
-                changes.inventory(window_server_info.pid);
-
+        if matches!(kind, SpaceEventKind::Fullscreen) {
+            let pid = tracked.map(|wid| wid.pid).or_else(|| {
+                self.state
+                    .windows
+                    .get_window_server_info(wsid)
+                    .or(window_server_info)
+                    .map(|info| info.pid)
+            });
+            if pid.is_none() {
                 return;
             }
-
+            if let Some(wid) =
+                self.state
+                    .windows
+                    .observe_native_fullscreen(wsid, sid, last_known_user_space, pid)
+            {
+                self.reconcile_window_membership(changes, wid, None);
+            }
+            if tracked.is_none()
+                && let Some(pid) = pid
+            {
+                changes.inventory(pid);
+            }
+            return;
+        }
+        if let Some(wid) = tracked {
+            if self.state.windows.native_fullscreen_record_for_window(wid).is_some() {
+                changes.inventory(wid.pid);
+            }
+            self.reconcile_native_presence(changes, wsid, sid, wid);
+        } else if known {
+            if let Some(pid) =
+                self.state.windows.pending_native_fullscreen_pid_for_window_server_id(wsid)
+            {
+                changes.inventory(pid);
+            }
+        } else if let Some(window_server_info) = window_server_info {
             self.update_partial_window_server_info(changes, [window_server_info]);
-
             let pid = window_server_info.pid;
             if self.app_manager.apps.contains_key(&pid) {
                 changes.inventory(pid);

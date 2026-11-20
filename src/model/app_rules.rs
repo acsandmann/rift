@@ -41,6 +41,7 @@ pub struct AppRuleEffects {
     /// Source captured by the membership mutation, used only to update layout projections.
     pub source_workspace: Option<VirtualWorkspaceId>,
     pub workspace_id: VirtualWorkspaceId,
+    pub(crate) names_workspace: bool,
     pub floating: bool,
     pub position: Option<AppRulePosition>,
     pub size: Option<AppRuleSize>,

@@ -53,78 +53,114 @@ impl Reactor {
         &mut self,
         changes: &mut Changes,
         button: crate::actor::drag::MouseButton,
-        final_space: Option<SpaceId>,
     ) {
+        let kind = self.drag_manager.actor.kind();
         let Some(commit) = self.drag_manager.actor.finish(button) else {
             return;
         };
-        let origin = self
-            .assigned_space_for_window_id(commit.source.window)
-            .or(commit.source.origin_space);
-        for space in [origin, final_space].into_iter().flatten() {
-            changes.arrange(Some(space), Presentation::Animated);
+        self.drag_manager.release_preview();
+        if self.refreshes_blocked() {
+            return;
         }
-        let drag = &mut self.drag_manager;
-        let state = &mut self.state;
-        let layout = &mut self.layout_manager;
-        drag.release_preview();
-        let window = commit.source.window;
+        let source = commit.source;
+        let window = source.window;
+        let Some(workspace) = self.state.windows.workspace_for_window(window) else {
+            return;
+        };
+        let Some(owner) = self.assigned_space_for_window_id(window) else {
+            return;
+        };
+        changes.arrange(Some(owner), Presentation::Animated);
+
+        let start = self.best_space_for_frame(&source.origin_frame);
+        let landing = self.best_space_for_frame(&source.last_frame);
+        let crossing =
+            landing.filter(|space| Some(*space) != start && self.is_space_active(*space));
+        let crossing = crossing.or_else(|| {
+            // The last AX frame can lag mouse-up. Use a complete membership sample
+            // only when current WindowServer membership corroborates its destination.
+            if kind != Some(crate::actor::drag::DragKind::NativeMove)
+                || !self.space_state.membership_complete
+            {
+                return None;
+            }
+            let wsid = self.state.windows.record(window)?.window_server_id()?;
+            let space = *self.space_state.active_window_spaces.get(&wsid)?;
+            (Some(space) != start
+                && self.is_space_active(space)
+                && crate::sys::window_server::window_spaces(wsid).as_slice() == [space])
+            .then_some(space)
+        });
+        let space = crossing.unwrap_or(owner);
+        let destination = if space == owner {
+            workspace
+        } else if let Some(id) = self.ensure_window_move_destination(changes, space) {
+            id
+        } else {
+            self.request_window_transfer(changes, window, owner, None);
+            self.request_space_snapshot();
+            return;
+        };
 
         if let Some(target) = commit.target
-            && final_space == Some(target.intent.space)
-            && state.windows.contains_window(window)
-            && state.windows.contains_window(target.intent.window)
+            && owner == space
+            && target.intent.space == space
+            && self.state.windows.contains_window(target.intent.window)
         {
             trace!(source=?window, target=?target.intent.window, action=?target.intent.action, "performing window drop");
-            if layout.layout_engine.apply_window_drop(crate::layout_engine::WindowDropRequest {
-                source: window,
-                target: target.intent.window,
-                space: target.intent.space,
-                action: target.intent.action,
-            }) {
-                changes.space(target.intent.space).layout_changed = true;
-                changes.drop_haptic = drag.haptics_enabled;
+            if self.layout_manager.layout_engine.apply_window_drop(
+                crate::layout_engine::WindowDropRequest {
+                    source: window,
+                    target: target.intent.window,
+                    space,
+                    action: target.intent.action,
+                },
+            ) {
+                changes.space(space).layout_changed = true;
+                changes.drop_haptic = self.drag_manager.haptics_enabled;
             }
         }
 
-        if let Some(space) = final_space {
-            let engine = &mut layout.layout_engine;
-            let floating = engine.is_window_floating(window);
-            let source = state.windows.workspace_for_window(window);
-            let same_space = source
-                .and_then(|workspace| engine.workspaces().workspace_space(workspace))
-                == Some(space);
-            let destination = if same_space {
-                source.filter(|_| floating)
-            } else {
-                engine.workspaces().active_workspace(space)
-            };
-            let moved = if let Some(workspace) = destination {
-                engine.relocate_window_with_drop(
-                    &mut state.windows,
-                    &crate::layout_engine::WorkspaceDropRequest {
-                        window,
-                        workspace,
-                        target: None,
-                        frame: floating.then_some(commit.source.last_frame),
-                    },
-                )
-            } else if !same_space && source.is_some() {
-                engine.detach_window_from_workspace(&mut state.windows, window);
-                true
-            } else {
-                false
-            };
-            if moved {
-                changes.membership_for(origin);
-                changes.membership_for(Some(space));
-            }
-            if moved
-                && let Some(server_id) =
-                    state.windows.window(window).and_then(|win| win.info.sys_id)
+        if crossing.is_some() || landing == Some(space) {
+            let floating = self.layout_manager.layout_engine.is_window_floating(window);
+            let frame = floating.then(|| {
+                self.space_state
+                    .screen_by_space(space)
+                    .filter(|_| landing != Some(space))
+                    .map_or(source.last_frame, |screen| {
+                        crate::sys::geometry::frame_on_display(
+                            source.last_frame,
+                            None,
+                            screen.frame,
+                            Default::default(),
+                        )
+                    })
+            });
+            if self.layout_manager.layout_engine.relocate_window_with_drop(
+                &mut self.state.windows,
+                &crate::layout_engine::WorkspaceDropRequest {
+                    window,
+                    workspace: destination,
+                    target: None,
+                    frame,
+                },
+            ) && space != owner
             {
-                state.windows.observe_native_space(server_id, space, true);
+                changes.move_between(owner, space, Presentation::Animated);
             }
+        }
+        // A completed drag has placement intent, not native membership. Use the
+        // transfer fence for late snapshots and any queued modifier-frame writes.
+        let owner = self.assigned_space_for_window_id(window).unwrap_or(owner);
+        if crossing.is_some() || landing.is_some_and(|space| space != owner) {
+            if landing == Some(owner)
+                && self.layout_manager.layout_engine.is_window_floating(window)
+            {
+                self.send_transfer_frame(window, owner, Some(source.last_frame), true, None);
+            } else {
+                self.request_window_transfer(changes, window, owner, None);
+            }
+            self.request_space_snapshot();
         }
     }
 }

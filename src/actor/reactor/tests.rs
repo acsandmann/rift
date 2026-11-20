@@ -2416,7 +2416,6 @@ fn restoring_minimized_window_retiles_survivor_without_focus_change() {
     let mut info = reactor.state.windows.window(restored).unwrap().info.clone();
     info.is_minimized = false;
     reactor.discover_test_windows(restored.pid, vec![(restored, info)], vec![restored, survivor]);
-    reactor.handle_event(Event::WindowDeminiaturized(restored));
     let requests = apps.requests();
     assert!(requests.iter().any(|request| matches!(request,
         Request::SetWindowFrames(frames, ..)
@@ -2670,9 +2669,17 @@ fn scrolling_boundary_discards_the_original_focus_decision_after_switching() {
 
 #[test]
 fn cross_display_drag_relocates_the_window_once_and_preserves_floating() {
-    for floating in [false, true] {
-        let (mut reactor, wid, _wsid, space1, space2, initial_frame, screen2) =
+    for (floating, last_frame_delayed) in [(false, false), (true, false), (false, true)] {
+        let (mut reactor, wid, wsid, space1, space2, initial_frame, screen2) =
             reactor_with_window_on_space1_two_displays();
+        let screen1 = reactor.space_state.screen_by_space(space1).unwrap().frame;
+        let mut screen3 = screen2;
+        screen3.origin.x += screen2.size.width;
+        reactor.handle_event(space_state_event(vec![screen1, screen2, screen3], vec![
+            Some(space1),
+            Some(space2),
+            Some(SpaceId::new(3)),
+        ]));
         reactor.handle_test_layout_event(LayoutEvent::WindowAdded(space1, wid));
         let source = reactor.state.windows.workspace_for_window(wid).unwrap();
         if floating {
@@ -2690,15 +2697,44 @@ fn cross_display_drag_relocates_the_window_once_and_preserves_floating() {
         );
         reactor.handle_event(Event::WindowFrameChanged(
             wid,
-            released,
+            if last_frame_delayed {
+                let mut intermediate = reactor.state.windows.window(wid).unwrap().frame_monotonic;
+                intermediate.origin.x += 25.;
+                intermediate
+            } else {
+                released
+            },
             None,
             Requested(false),
             Some(MouseState::Down),
         ));
         assert!(reactor.is_in_drag());
+        let snapshot = |reactor: &Reactor, space| {
+            let mut snapshot = forwarded_space_state(reactor.space_state.screens.clone());
+            snapshot.membership_complete = true;
+            snapshot.active_window_spaces.insert(wsid, space);
+            Event::SpaceStateChanged(snapshot)
+        };
+        reactor.handle_event(snapshot(&reactor, space2));
+        assert_eq!(reactor.assigned_space_for_window_id(wid), Some(space1));
+        if last_frame_delayed {
+            window_server::set_window_spaces_override(wsid, Some(vec![space2.get()]));
+        }
         reactor.handle_event(Event::MouseUp(crate::actor::drag::MouseButton::Left));
+        window_server::set_window_spaces_override(wsid, None);
         assert!(!reactor.is_in_drag());
+        assert_eq!(
+            reactor.assigned_space_for_window_id(wid),
+            Some(space2),
+            "floating={floating}, last_frame_delayed={last_frame_delayed}"
+        );
+
+        reactor.handle_event(snapshot(&reactor, space1));
         assert_eq!(reactor.assigned_space_for_window_id(wid), Some(space2));
+        reactor.handle_event(snapshot(&reactor, space2));
+        let before = reactor.layout_calculations.len();
+        reactor.handle_event(snapshot(&reactor, space2));
+        assert_eq!(reactor.layout_calculations.len(), before);
 
         let engine = &reactor.layout_manager.layout_engine;
         let workspaces = engine.workspaces();
@@ -4452,10 +4488,10 @@ fn auto_workspace_switch_follows_activated_window_when_same_app_is_visible_elsew
         )
     });
     assert!(!reactor.state.windows.is_temporarily_unavailable(activated));
-    let retired = reactor.state.windows.reconcile_app_inventory(
+    let retired = reactor.state.windows.inventory_retirements(
         activated.pid,
-        &[same_app_visible],
-        &HashSet::default(),
+        [same_app_visible],
+        |_| false,
         |_, info| crate::model::window_store::InventoryWindowObservation {
             info,
             suitable: Some(true),
@@ -7248,6 +7284,7 @@ fn ax_destroyed_window_stops_consuming_space_until_positive_ax_return() {
         reactor.reconcile_discovered_windows(changes, window_discovery::EmitLayoutPayload {
             pid: window.pid,
             known_visible: &[],
+            resumed: &HashSet::default(),
             app_info: &None,
             window_spaces: [(window, (Some(space), Some(space)))].into_iter().collect(),
             active_spaces: vec![space],
@@ -7269,10 +7306,10 @@ fn ax_destroyed_window_stops_consuming_space_until_positive_ax_return() {
         window,
         super::WindowInvalidationSource::StaleAxElement,
     ));
-    let retired = reactor.state.windows.reconcile_app_inventory(
+    let retired = reactor.state.windows.inventory_retirements(
         window.pid,
-        &[WindowId::new(1, 1), WindowId::new(1, 3)],
-        &HashSet::default(),
+        [WindowId::new(1, 1), WindowId::new(1, 3)],
+        |_| false,
         |_, info| crate::model::window_store::InventoryWindowObservation {
             info,
             suitable: Some(true),
@@ -7324,8 +7361,13 @@ fn window_closed_removes_logical_window_without_inventory_refresh() {
     apps.make_app_and_settle_on_screen(&mut reactor, screen, space, 1, make_windows(1));
     let wsid = reactor.test_window_server_id(wid);
 
+    reactor.handle_event(Event::ApplicationGloballyActivated(wid.pid));
+    reactor.handle_event(Event::WindowServerFocusChanged(wid, space));
+    assert_eq!(reactor.main_window(), Some(wid));
+
     reactor.handle_event(Event::WindowClosed(wsid));
 
+    assert_eq!(reactor.main_window(), None);
     assert!(reactor.state.windows.record(wid).is_none());
     assert!(!has_window_in_layout(&mut reactor, space, screen, wid));
 }
@@ -9215,30 +9257,18 @@ fn inventory_negatives_require_native_authority_even_when_hidden() {
                     ));
                 }
                 reactor.state.windows.observe_native_visibility(wsid, visible);
-                let result = reactor.state.windows.reconcile_app_inventory(
+                let result = reactor.state.windows.inventory_retirements(
                     wid.pid,
-                    &[],
-                    &if inactive {
-                        [wid].into_iter().collect()
-                    } else {
-                        HashSet::default()
-                    },
+                    [],
+                    |_| inactive,
                     |_, _| InventoryWindowObservation {
                         info: None,
                         suitable,
                         ordered_in,
                     },
                 );
-                assert_eq!(
-                    result,
-                    if retired {
-                        vec![(wid, Some(wsid))]
-                    } else {
-                        vec![]
-                    }
-                );
-                assert_eq!(reactor.state.windows.contains_window(wid), !retired);
-                reactor.state.windows.debug_assert_invariants();
+                assert_eq!(result, if retired { vec![wid] } else { vec![] });
+                assert!(reactor.state.windows.contains_window(wid));
             }
         }
     }
@@ -9262,10 +9292,10 @@ fn inventory_observes_only_eligible_omitted_windows() {
     );
     let omitted_wsid = reactor.test_window_server_id(windows[1]);
     let mut observed = Vec::new();
-    let retired = reactor.state.windows.reconcile_app_inventory(
+    let retired = reactor.state.windows.inventory_retirements(
         1,
-        &windows[..1],
-        &[windows[3]].into_iter().collect(),
+        [windows[0]],
+        |wid| wid == windows[3],
         |wsid, _| {
             observed.push(wsid);
             InventoryWindowObservation {
@@ -9276,7 +9306,7 @@ fn inventory_observes_only_eligible_omitted_windows() {
         },
     );
     assert_eq!(observed, vec![omitted_wsid]);
-    assert_eq!(retired, vec![(windows[1], Some(omitted_wsid))]);
+    assert_eq!(retired, vec![windows[1]]);
     reactor.state.windows.debug_assert_invariants();
 }
 
@@ -10625,6 +10655,9 @@ fn shared_destroyed_desktop_evacuates_even_when_its_display_stays_connected() {
         display: Some(vec!["test-display-1".into()]),
     }];
     reactor.handle_event(Event::ConfigUpdated(config));
+    let balanced = reactor.layout_manager.layout_engine.workspaces();
+    assert_eq!(balanced.workspace_ids(a), [ids[1], ids[3]]);
+    assert_eq!(balanced.workspace_ids(b), [ids[0], ids[2]]);
     let mut survivor = reactor.space_state.screens[1].clone();
     // Clamshell transition from the log: the LG stays connected but borrows the
     // built-in desktop, and its original native desktop is destroyed.
@@ -10661,7 +10694,7 @@ fn shared_destroyed_desktop_evacuates_even_when_its_display_stays_connected() {
     reactor.handle_event(Event::SpaceStateChanged(snapshot));
     apps.simulate_until_quiet(&mut reactor);
     let workspaces = reactor.layout_manager.layout_engine.workspaces();
-    for &id in &[ids[0], ids[2], ids[3]] {
+    for &id in &[ids[0], ids[2]] {
         assert_eq!(
             workspaces[id].space, replacement,
             "{id:?} returns to its home display"
@@ -10669,7 +10702,8 @@ fn shared_destroyed_desktop_evacuates_even_when_its_display_stays_connected() {
     }
     assert_eq!(workspaces.active_workspace(replacement), Some(ids[0]));
     assert_eq!(
-        workspaces[ids[1]].space, a,
+        workspaces.workspace_ids(a),
+        [ids[1], ids[3]],
         "the built-in desktop is dormant, not destroyed"
     );
     assert_eq!(workspaces.catalog().count(), 4);
@@ -11459,6 +11493,180 @@ fn shared_explicit_move_overrides_an_unavailable_pin_across_reload_and_return() 
 }
 
 #[test]
+fn connecting_displays_balances_the_existing_global_catalog() {
+    let spaces = [1, 2, 3].map(SpaceId::new);
+    let frames =
+        [0., 1000., 2000.].map(|x| CGRect::new(CGPoint::new(x, 0.), CGSize::new(1000., 900.)));
+    let topology = |count| {
+        space_state_event_with(
+            frames[..count].to_vec(),
+            spaces[..count].iter().copied().map(Some).collect(),
+            |snapshot| {
+                snapshot.display_set_changed = true;
+                snapshot.membership_complete = true;
+                snapshot.resized_spaces = spaces[..count]
+                    .iter()
+                    .zip(&frames)
+                    .map(|(&space, frame)| (space, frame.size))
+                    .collect();
+            },
+        )
+    };
+    for (display_rules, app_rules) in [(false, false), (false, true), (true, true)] {
+        let mut settings = shared_settings();
+        settings.default_workspace_count = 6;
+        if display_rules {
+            settings.workspace_rules = [0, 1, 0]
+                .into_iter()
+                .enumerate()
+                .map(|(index, display)| crate::common::config::WorkspaceLayoutRule {
+                    workspace: WorkspaceSelector::Index(index),
+                    layout: None,
+                    display: Some(vec![format!("test-display-{display}")]),
+                })
+                .collect();
+        }
+        if app_rules {
+            settings.app_rules = vec![crate::common::config::AppWorkspaceRule {
+                app_id: Some("com.testapp1".into()),
+                workspace: Some(WorkspaceSelector::Index(5)),
+                ..Default::default()
+            }];
+        }
+        let mut reactor = test_reactor_with_workspace_settings(&settings);
+        reactor.config.virtual_workspaces = settings;
+        reactor.handle_event(topology(1));
+        let original = reactor.test_workspace_ids(spaces[0]);
+        let mut apps = Apps::new();
+        let window = WindowId::new(1, 1);
+        make_active_app(&mut apps, &mut reactor, 1, make_windows(1), None);
+        let workspace = original[if app_rules { 5 } else { 0 }];
+        assert_eq!(
+            reactor.state.windows.workspace_for_window(window),
+            Some(workspace)
+        );
+
+        let mut manual = None;
+        for count in [2, 2, 3, 3] {
+            let before: Vec<_> = {
+                let store = reactor.layout_manager.layout_engine.workspaces();
+                original.iter().map(|&id| store[id].space).collect()
+            };
+            reactor.handle_event(topology(count));
+            apps.simulate_until_quiet(&mut reactor);
+            let store = reactor.layout_manager.layout_engine.workspaces();
+            assert_eq!(store.catalog().collect::<Vec<_>>(), original);
+            for (index, expected) in original.chunks_exact(6 / count).enumerate() {
+                let actual = store.workspace_ids(spaces[index]);
+                assert_eq!(actual.len(), expected.len());
+            }
+            let moved: Vec<_> = original
+                .iter()
+                .zip(before)
+                .filter(|(id, old)| store[**id].space != *old)
+                .collect();
+            assert!(moved.iter().all(|(id, _)| store[**id].space == spaces[count - 1]
+                || (display_rules && **id == original[1] && count == 2)));
+            if display_rules {
+                for (index, owner) in [0, 1, 0].into_iter().enumerate() {
+                    assert_eq!(store[original[index]].space, spaces[owner]);
+                }
+            }
+            assert_eq!(
+                reactor.state.windows.workspace_for_window(window),
+                Some(workspace)
+            );
+            assert_eq!(
+                reactor.assigned_space_for_window_id(window),
+                Some(store[workspace].space)
+            );
+            if let Some(id) = manual {
+                assert_eq!(store[id].space, spaces[1]);
+            } else if display_rules && count == 2 {
+                let id = *store.workspace_ids(spaces[1]).last().unwrap();
+                let store = reactor.layout_manager.layout_engine.workspaces_mut();
+                store.transfer_workspace(
+                    id,
+                    spaces[1],
+                    Some("test-display-1"),
+                    crate::model::virtual_workspace::WorkspaceTransferReason::Explicit,
+                );
+                manual = Some(id);
+            }
+        }
+        let owners = {
+            let store = reactor.layout_manager.layout_engine.workspaces();
+            original.iter().map(|&id| store[id].space).collect::<Vec<_>>()
+        };
+        for count in [2, 3, 3] {
+            reactor.handle_event(topology(count));
+            apps.simulate_until_quiet(&mut reactor);
+            let store = reactor.layout_manager.layout_engine.workspaces();
+            assert_eq!(store.catalog().count(), original.len());
+            if count == 3 {
+                assert!(original.iter().zip(&owners).all(|(&id, &owner)| store[id].space == owner));
+            }
+        }
+    }
+}
+
+#[test]
+fn display_rules_balance_an_existing_eight_to_two_split() {
+    use crate::common::config::WorkspaceLayoutRule;
+
+    let (lg, other) = (SpaceId::new(1), SpaceId::new(2));
+    let mut screens =
+        make_screen_snapshots(vec![shared_left(), shared_right()], vec![Some(lg), Some(other)]);
+    screens[0].name = Some("LG UltraFine".into());
+    let topology = || Event::SpaceStateChanged(forwarded_space_state(screens.clone()));
+    let names = ["B", "C", "E", "T", "X", "S", "M", "N", "G", "V"];
+    let pinned = |workspace, display: &str| WorkspaceLayoutRule {
+        workspace,
+        layout: None,
+        display: Some(vec![display.into()]),
+    };
+    let mut initial = shared_settings();
+    initial.default_workspace_count = names.len();
+    initial.workspace_names = names.map(str::to_owned).to_vec();
+    let desired = vec![
+        pinned(WorkspaceSelector::Name("N".into()), "LG UltraFine"),
+        pinned(WorkspaceSelector::Index(0), &screens[0].display_uuid),
+        pinned(WorkspaceSelector::Index(5), &screens[1].display_uuid),
+        pinned(WorkspaceSelector::Index(1), &screens[1].display_uuid),
+    ];
+    initial.workspace_rules = desired.clone();
+    initial.workspace_rules.extend(
+        [2, 3, 4, 6, 8, 9]
+            .map(|index| pinned(WorkspaceSelector::Index(index), &screens[0].display_uuid)),
+    );
+    for restart in [false, true] {
+        let mut reactor = test_reactor_with_workspace_settings(&initial);
+        reactor.config.virtual_workspaces = initial.clone();
+        reactor.handle_event(topology());
+        let engine = &reactor.layout_manager.layout_engine;
+        assert_eq!(engine.workspaces().workspace_ids(lg).len(), 8);
+        let original: Vec<_> = engine.workspaces().catalog().collect();
+        let mut config = reactor.config.clone();
+        config.virtual_workspaces.workspace_rules = desired.clone();
+        if restart {
+            let saved = engine.serialize_to_string(&reactor.state.windows);
+            reactor = test_reactor_with_workspace_settings(&config.virtual_workspaces);
+            reactor.layout_manager.layout_engine =
+                LayoutEngine::deserialize_from_str(&saved).unwrap();
+        }
+        reactor.handle_event(Event::ConfigUpdated(config));
+        reactor.handle_event(topology());
+        let store = reactor.layout_manager.layout_engine.workspaces();
+        assert_eq!(store.catalog().collect::<Vec<_>>(), original);
+        assert_eq!(store.workspace_ids(lg).len(), 5, "restart: {restart}");
+        assert_eq!(store.workspace_ids(other).len(), 5);
+        for (index, owner) in [(0, lg), (1, other), (5, other), (7, lg)] {
+            assert_eq!(store[original[index]].space, owner);
+        }
+    }
+}
+
+#[test]
 fn connecting_display_applies_named_pin_after_disambiguating_native_workspaces() {
     let mut settings = shared_settings();
     settings.default_workspace_count = 1;
@@ -11509,14 +11717,15 @@ fn connecting_display_applies_named_pin_after_disambiguating_native_workspaces()
         assert_ne!(workspaces[independent].name, workspaces[original].name);
         assert_eq!(
             workspaces.catalog().count(),
-            3,
-            "connecting seeds the emptied display without replacing existing identities"
+            2,
+            "applying the pin preserves both existing identities"
         );
+        assert_eq!(workspaces.active_workspace(a), None);
     }
 }
 
 #[test]
-fn named_pin_reload_moves_immediately_and_seeds_only_once() {
+fn named_pin_reload_moves_immediately_without_creating_workspaces() {
     for create_scratch in [false, true] {
         let mut settings = shared_settings();
         settings.default_workspace_count = 2;
@@ -11560,16 +11769,16 @@ fn named_pin_reload_moves_immediately_and_seeds_only_once() {
                 reactor.layout_manager.layout_engine.workspaces()[ids[1]].space,
                 target
             );
-            // Repeated exposure must keep the replacement workspace.
+            // Repeated exposure must retain the workspace moved to balance the displays.
             reactor.handle_event(space_state_event_with(
                 vec![shared_left(), shared_right()],
                 vec![Some(a), Some(b)],
                 |s| s.should_force_refresh_layout = true,
             ));
             if target == a {
+                let workspaces = reactor.layout_manager.layout_engine.workspaces_mut();
+                assert_eq!(workspaces.active_workspace(b), Some(ids[0]));
                 if create_scratch {
-                    let workspaces = reactor.layout_manager.layout_engine.workspaces_mut();
-                    assert!(workspaces.active_workspace(b).is_some());
                     workspaces.create_workspace(b, Some("scratch".into())).unwrap();
                 }
                 let snapshot = reactor
@@ -11587,7 +11796,7 @@ fn named_pin_reload_moves_immediately_and_seeds_only_once() {
         }
         let catalog: Vec<_> = reactor.layout_manager.layout_engine.workspaces().catalog().collect();
         assert_eq!(&catalog[..ids.len()], &ids);
-        assert_eq!(catalog.len(), ids.len() + 1 + usize::from(create_scratch));
+        assert_eq!(catalog.len(), ids.len() + usize::from(create_scratch));
     }
 }
 
@@ -11753,8 +11962,9 @@ fn floating_display_transfer_round_trip_preserves_user_geometry() {
 fn window_moves_never_relocate_workspaces_or_strand_layout_members() {
     let (a, b) = (SpaceId::new(1), SpaceId::new(2));
     let windows = [1, 2, 3].map(|idx| WindowId::new(1, idx));
-    // Connecting adds one workspace, regardless of the existing default count.
-    for count in [1, 2] {
+    use crate::common::config::MAX_WORKSPACES;
+
+    for (count, at_capacity) in [(1, false), (2, false), (1, true)] {
         let mut settings = shared_settings();
         settings.default_workspace_count = count;
         let mut reactor = test_reactor_with_workspace_settings(&settings);
@@ -11771,19 +11981,40 @@ fn window_moves_never_relocate_workspaces_or_strand_layout_members() {
             let owners: Vec<_> = store.catalog().map(|id| (id, store[id].space)).collect();
             (owners, windows.map(|w| r.state.windows.workspace_for_window(w)))
         };
+        if at_capacity {
+            let store = reactor.layout_manager.layout_engine.workspaces_mut();
+            for _ in 1..MAX_WORKSPACES {
+                store.create_workspace(a, None).unwrap();
+            }
+        }
         let before = model(&reactor);
+        assert_eq!(
+            before.0.iter().filter(|&&(_, owner)| owner == b).count(),
+            count - 1,
+            "display discovery must preserve the configured catalog"
+        );
         let move_first = |index| {
             Event::Command(Command::Reactor(ReactorCommand::MoveWindowToDisplay {
                 selector: DisplaySelector::Index(index),
                 window_id: Some(1),
             }))
         };
-        let target = reactor.layout_manager.layout_engine.workspaces().active_workspace(b).unwrap();
-        // A newly connected display immediately accepts commands and pointer placement.
         for _ in 0..2 {
             reactor.handle_event(move_first(1));
             apps.simulate_until_quiet(&mut reactor);
         }
+        let Some(target) = reactor.layout_manager.layout_engine.workspaces().active_workspace(b)
+        else {
+            assert!(at_capacity);
+            assert_eq!(model(&reactor), before);
+            assert!(reactor.state.windows.record(windows[0]).unwrap().pending_transfer().is_none());
+            for window in windows {
+                assert!(has_window_in_layout(&mut reactor, a, shared_left(), window));
+            }
+            continue;
+        };
+        assert!(!at_capacity);
+        // A newly connected display with a workspace accepts commands and pointer placement.
         let opened = WindowId::new(1, 9);
         crate::sys::window_server::set_cursor_location_override(Some(CGPoint::new(1500., 500.)));
         reactor.handle_event(Event::WindowCreated(
@@ -11806,7 +12037,11 @@ fn window_moves_never_relocate_workspaces_or_strand_layout_members() {
         ));
         apps.simulate_until_quiet(&mut reactor);
         let (owners, members) = model(&reactor);
-        assert_eq!(owners, before.0, "window moves preserve workspace ownership");
+        assert_eq!(&owners[..before.0.len()], &before.0);
+        assert_eq!(owners.len(), before.0.len() + usize::from(count == 1));
+        if count == 1 {
+            assert_eq!(owners.last(), Some(&(target, b)));
+        }
         assert_eq!(members, [Some(target), before.1[1], before.1[2]]);
         assert!(has_window_in_layout(&mut reactor, b, shared_right(), windows[0]));
         assert!(!has_window_in_layout(&mut reactor, a, shared_left(), windows[0]));
@@ -12589,8 +12824,16 @@ fn native_admission_veto_survives_manage_rule() {
     window.manage_override = Some(true);
     assert!(!window.is_admitted());
     assert!(reactor.test_workspace_for_window(space, wid).is_none());
+    reactor.handle_event(Event::WindowServerHidden(id));
+    assert!(reactor.test_workspace_for_window(space, wid).is_none());
     reactor.handle_event(Event::WindowServerAppeared(id, space, SpaceEventKind::User));
-    assert!(!reactor.state.windows.window(wid).unwrap().native_transient);
+    assert!(reactor.test_workspace_for_window(space, wid).is_none());
+    reactor.transient_focus.native(id, main.pid, space, false);
+    reactor.handle_event(Event::WindowServerAppeared(id, space, SpaceEventKind::User));
+    assert!(reactor.test_active_workspace_windows(space).contains(&wid));
+    let layouts = reactor.layout_calculations.len();
+    reactor.handle_event(Event::WindowServerAppeared(id, space, SpaceEventKind::User));
+    assert_eq!(reactor.layout_calculations.len(), layouts);
     apps.simulate_until_quiet(&mut reactor);
 }
 
@@ -12773,10 +13016,10 @@ fn native_fullscreen_restores_middle_window_exactly_across_notification_ordering
                     )
                 });
             } else if early == 2 {
-                let retired = reactor.state.windows.reconcile_app_inventory(
+                let retired = reactor.state.windows.inventory_retirements(
                     1,
-                    &[WindowId::new(1, 1), WindowId::new(1, 3)],
-                    &HashSet::default(),
+                    [WindowId::new(1, 1), WindowId::new(1, 3)],
+                    |_| false,
                     |_, info| InventoryWindowObservation {
                         info,
                         suitable: Some(true),
