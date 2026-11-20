@@ -3247,7 +3247,6 @@ impl Reactor {
         } else {
             StaleCleanupState::Enabled
         };
-        self.expose_all_spaces();
         if let Some(main_window) = self.main_window() {
             if let Some(space) = self.main_window_space() {
                 self.reconcile_layout_event(
@@ -3759,15 +3758,15 @@ impl Reactor {
                 }
             }
         }
+        // Initialize the shared catalog before any individual Space can initialize it.
+        self.expose_all_spaces();
         self.advance_workspace_transfers(changes);
         self.reconcile_native_fullscreen_exits(changes, true);
 
-        for (space, size) in resized_spaces {
-            if !self.is_space_active(space) {
-                continue;
+        for (space, _) in resized_spaces {
+            if self.is_space_active(space) {
+                changes.arrange(Some(space), Presentation::Force);
             }
-            self.reconcile_layout_event(changes, LayoutEvent::SpaceExposed(space, size));
-            changes.arrange(Some(space), Presentation::Force);
         }
         let active_windows = self.authoritative_active_space_windows();
         self.finalize_space_change(
@@ -3951,33 +3950,34 @@ impl Reactor {
                 }
             }
             let Some((target, reason)) = placement else { continue };
-            let screen = &self.space_state.screens[target];
-            let target = screen.space.unwrap();
-            let source = self.layout_manager.layout_engine.workspaces()[id].space;
-            let source_frame = previous_screens
-                .iter()
-                .chain(&self.space_state.screens)
-                .find(|screen| screen.space == Some(source))
-                .map(|screen| screen.frame)
-                .or_else(|| self.last_screen_frames.get(&source).copied());
-            let response = self.layout_manager.layout_engine.transfer_workspace(
-                &mut self.state.windows,
-                id,
-                target,
-                screen.frame.size,
-                screen.display_uuid_opt(),
-                reason,
-            );
-            for window in response.transferred_windows {
-                self.request_window_transfer(changes, window, target, source_frame);
-            }
-            if response.changed {
-                changes.move_between(source, target, Presentation::Animated);
-                changes.workspace_changed(source);
-                changes.workspace_changed(target);
+            let target = self.space_state.screens[target].space.unwrap();
+            self.place_workspace(changes, id, target, previous_screens, reason);
+        }
+        if pins_only.is_none() && self.space_state.screens.len() > 1 {
+            let displays: Vec<_> = self
+                .screens_in_physical_order()
+                .into_iter()
+                .filter_map(|screen| {
+                    let space = screen.space.filter(|space| self.active_spaces.contains(space))?;
+                    // A native desktop switch on a connected display keeps its own catalog.
+                    let arrived = !previous_screens
+                        .iter()
+                        .any(|old| old.display_uuid == screen.display_uuid && old.space.is_some());
+                    Some((space, arrived))
+                })
+                .collect();
+            let workspaces = self.layout_manager.layout_engine.workspaces();
+            for (id, target) in workspaces.plan_display_arrival(&displays) {
+                self.place_workspace(
+                    changes,
+                    id,
+                    target,
+                    previous_screens,
+                    WorkspaceTransferReason::DisplayArrival,
+                );
             }
         }
-        // Topology changes expose displays in finalize_space_change, after restoration.
+        // The topology handler exposes displays after restoration.
         // A config-only pin change has no topology finalization, so expose it here.
         if pins_only.is_some() {
             self.expose_all_spaces();
@@ -4016,6 +4016,42 @@ impl Reactor {
                 // Unknown membership preserves intent without issuing a speculative write.
                 self.state.windows.request_transfer(window, frame, target, false);
             }
+        }
+    }
+
+    fn place_workspace(
+        &mut self,
+        changes: &mut Changes,
+        id: crate::model::VirtualWorkspaceId,
+        target: SpaceId,
+        previous_screens: &[ScreenInfo],
+        reason: crate::model::virtual_workspace::WorkspaceTransferReason,
+    ) {
+        let Some(screen) = self.space_state.screen_by_space(target) else {
+            return;
+        };
+        let source = self.layout_manager.layout_engine.workspaces()[id].space;
+        let source_frame = previous_screens
+            .iter()
+            .chain(&self.space_state.screens)
+            .find(|screen| screen.space == Some(source))
+            .map(|screen| screen.frame)
+            .or_else(|| self.last_screen_frames.get(&source).copied());
+        let response = self.layout_manager.layout_engine.transfer_workspace(
+            &mut self.state.windows,
+            id,
+            target,
+            screen.frame.size,
+            screen.display_uuid_opt(),
+            reason,
+        );
+        for window in response.transferred_windows {
+            self.request_window_transfer(changes, window, target, source_frame);
+        }
+        if response.changed {
+            changes.move_between(source, target, Presentation::Animated);
+            changes.workspace_changed(source);
+            changes.workspace_changed(target);
         }
     }
 
@@ -6190,8 +6226,7 @@ impl Reactor {
         self.move_window_to_display(changes, window, space, target_screen.space.unwrap());
     }
 
-    /// Moves one window into the destination's active workspace. Accepted visible
-    /// topology seeds empty displays without relocating an existing workspace.
+    /// Moves one window into the destination's active workspace when available.
     fn move_window_to_display(
         &mut self,
         changes: &mut Changes,

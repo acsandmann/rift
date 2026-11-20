@@ -11455,6 +11455,88 @@ fn shared_explicit_move_overrides_an_unavailable_pin_across_reload_and_return() 
 }
 
 #[test]
+fn connecting_displays_balances_the_existing_global_catalog() {
+    let spaces = [1, 2, 3].map(SpaceId::new);
+    let frames =
+        [0., 1000., 2000.].map(|x| CGRect::new(CGPoint::new(x, 0.), CGSize::new(1000., 900.)));
+    let topology = |count| {
+        space_state_event_with(
+            frames[..count].to_vec(),
+            spaces[..count].iter().copied().map(Some).collect(),
+            |snapshot| {
+                snapshot.display_set_changed = true;
+                snapshot.resized_spaces = spaces[..count]
+                    .iter()
+                    .zip(&frames)
+                    .map(|(&space, frame)| (space, frame.size))
+                    .collect();
+            },
+        )
+    };
+    for (display_rules, app_rules) in [(false, false), (false, true), (true, true)] {
+        let mut settings = shared_settings();
+        settings.default_workspace_count = 6;
+        if display_rules {
+            settings.workspace_rules = [0, 1, 0]
+                .into_iter()
+                .enumerate()
+                .map(|(index, display)| crate::common::config::WorkspaceLayoutRule {
+                    workspace: WorkspaceSelector::Index(index),
+                    layout: None,
+                    display: Some(vec![format!("test-display-{display}")]),
+                })
+                .collect();
+        }
+        if app_rules {
+            settings.app_rules = vec![crate::common::config::AppWorkspaceRule {
+                app_id: Some("com.testapp1".into()),
+                workspace: Some(WorkspaceSelector::Index(5)),
+                ..Default::default()
+            }];
+        }
+        let mut reactor = test_reactor_with_workspace_settings(&settings);
+        reactor.config.virtual_workspaces = settings;
+        reactor.handle_event(topology(1));
+        let original = reactor.test_workspace_ids(spaces[0]);
+        let mut apps = Apps::new();
+        let window = WindowId::new(1, 1);
+        make_active_app(&mut apps, &mut reactor, 1, make_windows(1), None);
+        let workspace = original[if app_rules { 5 } else { 0 }];
+        assert_eq!(
+            reactor.state.windows.workspace_for_window(window),
+            Some(workspace)
+        );
+
+        for count in [2, 2, 3, 3] {
+            reactor.handle_event(topology(count));
+            apps.simulate_until_quiet(&mut reactor);
+            let store = reactor.layout_manager.layout_engine.workspaces();
+            assert_eq!(store.catalog().collect::<Vec<_>>(), original);
+            for (index, expected) in original.chunks_exact(6 / count).enumerate() {
+                let actual = store.workspace_ids(spaces[index]);
+                assert_eq!(actual.len(), expected.len());
+                if !display_rules {
+                    assert_eq!(actual, expected);
+                }
+            }
+            if display_rules {
+                for (index, owner) in [0, 1, 0].into_iter().enumerate() {
+                    assert_eq!(store[original[index]].space, spaces[owner]);
+                }
+            }
+            assert_eq!(
+                reactor.state.windows.workspace_for_window(window),
+                Some(workspace)
+            );
+            assert_eq!(
+                reactor.assigned_space_for_window_id(window),
+                Some(store[workspace].space)
+            );
+        }
+    }
+}
+
+#[test]
 fn connecting_display_applies_named_pin_after_disambiguating_native_workspaces() {
     let mut settings = shared_settings();
     settings.default_workspace_count = 1;
@@ -11505,14 +11587,15 @@ fn connecting_display_applies_named_pin_after_disambiguating_native_workspaces()
         assert_ne!(workspaces[independent].name, workspaces[original].name);
         assert_eq!(
             workspaces.catalog().count(),
-            3,
-            "connecting seeds the emptied display without replacing existing identities"
+            2,
+            "applying the pin preserves both existing identities"
         );
+        assert_eq!(workspaces.active_workspace(a), None);
     }
 }
 
 #[test]
-fn named_pin_reload_moves_immediately_and_seeds_only_once() {
+fn named_pin_reload_moves_immediately_without_creating_workspaces() {
     for create_scratch in [false, true] {
         let mut settings = shared_settings();
         settings.default_workspace_count = 2;
@@ -11556,16 +11639,16 @@ fn named_pin_reload_moves_immediately_and_seeds_only_once() {
                 reactor.layout_manager.layout_engine.workspaces()[ids[1]].space,
                 target
             );
-            // Repeated exposure must keep the replacement workspace.
+            // Repeated exposure must leave the vacated display empty.
             reactor.handle_event(space_state_event_with(
                 vec![shared_left(), shared_right()],
                 vec![Some(a), Some(b)],
                 |s| s.should_force_refresh_layout = true,
             ));
             if target == a {
+                let workspaces = reactor.layout_manager.layout_engine.workspaces_mut();
+                assert_eq!(workspaces.active_workspace(b), None);
                 if create_scratch {
-                    let workspaces = reactor.layout_manager.layout_engine.workspaces_mut();
-                    assert!(workspaces.active_workspace(b).is_some());
                     workspaces.create_workspace(b, Some("scratch".into())).unwrap();
                 }
                 let snapshot = reactor
@@ -11583,7 +11666,7 @@ fn named_pin_reload_moves_immediately_and_seeds_only_once() {
         }
         let catalog: Vec<_> = reactor.layout_manager.layout_engine.workspaces().catalog().collect();
         assert_eq!(&catalog[..ids.len()], &ids);
-        assert_eq!(catalog.len(), ids.len() + 1 + usize::from(create_scratch));
+        assert_eq!(catalog.len(), ids.len() + usize::from(create_scratch));
     }
 }
 
@@ -11749,7 +11832,7 @@ fn floating_display_transfer_round_trip_preserves_user_geometry() {
 fn window_moves_never_relocate_workspaces_or_strand_layout_members() {
     let (a, b) = (SpaceId::new(1), SpaceId::new(2));
     let windows = [1, 2, 3].map(|idx| WindowId::new(1, idx));
-    // Connecting adds one workspace, regardless of the existing default count.
+    // Only a spare workspace gives the new display a window destination.
     for count in [1, 2] {
         let mut settings = shared_settings();
         settings.default_workspace_count = count;
@@ -11774,12 +11857,21 @@ fn window_moves_never_relocate_workspaces_or_strand_layout_members() {
                 window_id: Some(1),
             }))
         };
-        let target = reactor.layout_manager.layout_engine.workspaces().active_workspace(b).unwrap();
-        // A newly connected display immediately accepts commands and pointer placement.
         for _ in 0..2 {
             reactor.handle_event(move_first(1));
             apps.simulate_until_quiet(&mut reactor);
         }
+        let Some(target) = reactor.layout_manager.layout_engine.workspaces().active_workspace(b)
+        else {
+            assert_eq!(count, 1);
+            assert_eq!(model(&reactor), before);
+            for window in windows {
+                assert!(has_window_in_layout(&mut reactor, a, shared_left(), window));
+            }
+            continue;
+        };
+        assert_eq!(count, 2);
+        // A newly connected display with a workspace accepts commands and pointer placement.
         let opened = WindowId::new(1, 9);
         crate::sys::window_server::set_cursor_location_override(Some(CGPoint::new(1500., 500.)));
         reactor.handle_event(Event::WindowCreated(

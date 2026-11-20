@@ -40,20 +40,16 @@ pub(crate) struct WorkspaceTarget {
     pub space: SpaceId,
 }
 
-/// Allocate only a fresh catalog. Pins are hard constraints. Minimize owner runs
-/// first, then squared run loads (including pins outside each run), then physical
-/// owner order. Unpinned displays need only one run, in physical order: splitting
-/// or permuting those unconstrained runs cannot improve the transition count.
-fn distribute(displays: usize, mut pins: Vec<Option<usize>>) -> Vec<usize> {
+/// Start with contiguous blocks, then balance any uneven loads the pins forced
+/// into separate blocks. Pins are hard constraints throughout.
+fn distribute(displays: usize, pins: Vec<Option<usize>>, occupied: &[usize]) -> Vec<usize> {
     let mut pinned = vec![0; displays];
     pins.iter().flatten().for_each(|&d| pinned[d] += 1);
     let mut bare: Vec<_> = (0..displays).filter(|&d| pinned[d] == 0).collect();
-    let free = pins.iter().filter(|pin| pin.is_none()).count();
-    pins.resize(
-        (pins.len() + bare.len().saturating_sub(free)).min(MAX_WORKSPACES),
-        None,
-    );
+    // When there are too few workspaces for every display, preserve occupied displays first.
+    bare.sort_by_key(|&display| occupied.get(display).copied().unwrap_or_default() == 0);
     bare.truncate(pins.iter().filter(|pin| pin.is_none()).count());
+    bare.sort_unstable();
 
     // (number of runs, balance penalty, owners); tuple ordering supplies a stable
     // physical left-to-right tie break without reordering workspace identities.
@@ -111,20 +107,54 @@ fn distribute(displays: usize, mut pins: Vec<Option<usize>>) -> Vec<usize> {
             best
         }
     }
-    Allocator {
+    let mut owners = Allocator {
         pins: &pins,
         pinned: &pinned,
         bare: &bare,
         memo: HashMap::default(),
     }
     .solve(0, 0, displays)
-    .expect("pins and appended empty slots admit a distribution")
-    .2
+    .expect("pins and available unassigned workspaces admit a distribution")
+    .2;
+
+    let mut counts = vec![0; displays];
+    for &owner in &owners {
+        counts[owner] += 1;
+    }
+    let mut movable = counts.clone();
+    for (movable, pinned) in movable.iter_mut().zip(pinned) {
+        *movable -= pinned;
+    }
+    loop {
+        let Some(target) = (0..displays).min_by_key(|&display| counts[display]) else {
+            break;
+        };
+        let Some(source) = (0..displays)
+            .filter(|&display| movable[display] > 0 && counts[display] > counts[target] + 1)
+            .max_by_key(|&display| counts[display])
+        else {
+            break;
+        };
+        let mut eligible =
+            (0..owners.len()).filter(|&index| owners[index] == source && pins[index].is_none());
+        let index = if source < target {
+            eligible.next_back()
+        } else {
+            eligible.next()
+        };
+        owners[index.expect("source has a movable workspace")] = target;
+        counts[source] -= 1;
+        counts[target] += 1;
+        movable[source] -= 1;
+        movable[target] += 1;
+    }
+    owners
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum WorkspaceTransferReason {
     Explicit,
+    DisplayArrival,
     DisplayDeparture,
     Restoration,
 }
@@ -533,6 +563,51 @@ impl WorkspaceStore {
         self.order.iter().copied()
     }
 
+    /// Balance the visible catalog when displays arrive. Keep workspaces already
+    /// restored to those displays and respect display rules, including offline pins.
+    pub(crate) fn plan_display_arrival(
+        &self,
+        displays: &[(SpaceId, bool)],
+    ) -> Vec<(VirtualWorkspaceId, SpaceId)> {
+        if displays.len() < 2 || !displays.iter().any(|&(_, arrived)| arrived) {
+            return Vec::new();
+        }
+        let mut current_counts = vec![0; displays.len()];
+        let mut visible = Vec::new();
+        let pins = self
+            .catalog()
+            .enumerate()
+            .filter_map(|(index, id)| {
+                let workspace = &self[id];
+                let owner = displays.iter().position(|&(space, _)| space == workspace.space)?;
+                visible.push((id, owner));
+                current_counts[owner] += 1;
+                let fixed = displays[owner].1
+                    || workspace.home_space.is_some_and(|home| home != workspace.space)
+                    || self
+                        .matching_rules(index, &workspace.name)
+                        .any(|rule| rule.display.is_some());
+                Some(fixed.then_some(owner))
+            })
+            .collect();
+        let allocation = distribute(displays.len(), pins, &current_counts);
+        let mut target_counts = vec![0; displays.len()];
+        for &owner in &allocation {
+            target_counts[owner] += 1;
+        }
+        let imbalance = |counts: &[usize]| counts.iter().map(|count| count * count).sum::<usize>();
+        if imbalance(&target_counts) >= imbalance(&current_counts) {
+            return Vec::new();
+        }
+        visible
+            .into_iter()
+            .zip(allocation)
+            .filter_map(|((id, source), target)| {
+                (source != target).then_some((id, displays[target].0))
+            })
+            .collect()
+    }
+
     /// Ownership changes leave the workspace object, layout and focus history intact.
     pub(crate) fn transfer_workspace(
         &mut self,
@@ -545,21 +620,6 @@ impl WorkspaceStore {
             return false;
         };
         let source = workspace.space;
-        // An explicit move must leave its source usable without growing the catalog
-        // beyond the user creation limit. Check before mutating ownership or history.
-        if reason == WorkspaceTransferReason::Explicit
-            && source != target
-            && self.effective_mode() == WorkspaceMode::Global
-            && self.catalog().count() >= MAX_WORKSPACES
-            && self.workspaces_on(source).count() == 1
-        {
-            warn!(
-                ?source,
-                ?target,
-                "Workspace move refused: replacement would exceed workspace limit"
-            );
-            return false;
-        }
         if reason == WorkspaceTransferReason::Explicit
             && let Some(home) = workspace.home_space
             && let Some(activation) = self.active_workspace_per_space.get_mut(&home)
@@ -585,7 +645,10 @@ impl WorkspaceStore {
             }
         }
         let workspace = &mut self[id];
-        if reason == WorkspaceTransferReason::Explicit {
+        if matches!(
+            reason,
+            WorkspaceTransferReason::Explicit | WorkspaceTransferReason::DisplayArrival
+        ) {
             workspace.preferred_display = display.map(str::to_owned);
             workspace.home_space = Some(target);
         }
@@ -604,9 +667,6 @@ impl WorkspaceStore {
         }
         self.repair_activation(source);
         self.repair_activation(target);
-        if reason == WorkspaceTransferReason::Explicit {
-            self.seed_space(source);
-        }
         true
     }
 
@@ -740,9 +800,8 @@ impl WorkspaceStore {
         let scope_ids =
             |space| self.catalog().filter(move |id| namespace(self[*id].space) == namespace(space));
         for space in self.initialized_spaces() {
-            // Automatic global seeds may exceed the creation limit so every live display
-            // remains usable. Reloading that catalog must remain valid; mode migrations
-            // still cannot merge independent catalogs beyond the limit.
+            // Legacy catalogs may exceed the limit because earlier versions appended
+            // workspaces for empty displays. Keep those catalogs valid on reload.
             if scope_ids(space).count() > MAX_WORKSPACES
                 && (mode_changed || config.mode != WorkspaceMode::Global)
             {
@@ -910,9 +969,8 @@ impl WorkspaceStore {
         }
     }
 
-    /// Allocate the initial global target in contiguous blocks across visible managed
-    /// desktops. Later arrivals receive one workspace without redistributing the catalog.
-    /// Reconnection and physical display reordering never rebalance existing ownership.
+    /// Allocate the configured global catalog in contiguous blocks across visible managed
+    /// desktops. Existing catalogs retain their placement as desktops are exposed.
     /// `rule_space` resolves a workspace rule's display to one of `spaces`.
     pub(crate) fn ensure_visible_spaces(
         &mut self,
@@ -927,7 +985,7 @@ impl WorkspaceStore {
         if self.effective_mode() == WorkspaceMode::Global
             && self.scope_ids(spaces[0]).next().is_none()
         {
-            let count = self.settings.default_workspace_count.max(spaces.len()).min(MAX_WORKSPACES);
+            let count = self.settings.default_workspace_count.clamp(1, MAX_WORKSPACES);
             let pins: Vec<_> = (0..count)
                 .map(|index| {
                     let name = self.settings.workspace_name(index);
@@ -938,7 +996,7 @@ impl WorkspaceStore {
                     spaces.iter().position(|candidate| *candidate == space)
                 })
                 .collect();
-            for (index, owner) in distribute(spaces.len(), pins).into_iter().enumerate() {
+            for (index, owner) in distribute(spaces.len(), pins, &[]).into_iter().enumerate() {
                 let space = spaces[owner];
                 let id = self.append_default_workspace(space);
                 if index == self.settings.default_workspace
@@ -951,19 +1009,6 @@ impl WorkspaceStore {
             for &space in spaces {
                 self.ensure_space_initialized(space);
             }
-        }
-        for &space in spaces {
-            self.seed_space(space);
-        }
-    }
-
-    /// Only accepted visible topology and explicit moves seed an empty global desktop.
-    /// Internal restoration may temporarily have no owner and must preserve its history.
-    fn seed_space(&mut self, space: SpaceId) {
-        if self.effective_mode() == WorkspaceMode::Global && self.active_workspace(space).is_none()
-        {
-            let id = self.append_default_workspace(space);
-            self.set_active_workspace(space, id);
         }
     }
 
@@ -1808,7 +1853,7 @@ mod tests {
             store
                 .workspace_view(WorkspaceContext { space: a, visible: &[a, other] })
                 .count(),
-            3
+            2
         );
         store.ensure_visible_spaces(&[b], 1, |_| None);
         assert_eq!(store.workspace_ids(b), independent);
@@ -1817,7 +1862,7 @@ mod tests {
     }
 
     #[test]
-    fn global_display_lifecycle_always_has_an_active_workspace() {
+    fn moving_the_last_global_workspace_preserves_the_catalog() {
         let (a, b) = (SpaceId::new(901), SpaceId::new(902));
         let settings = VirtualWorkspaceSettings {
             mode: WorkspaceMode::Global,
@@ -1828,42 +1873,25 @@ mod tests {
         let mut store = WorkspaceStore::new_with_config(&settings, &LayoutSettings::default());
         let original = store.create_workspace(a, None).unwrap();
         store.ensure_visible_spaces(&[a, b], 2, |_| None);
-        let seeded = store.active_workspace(b).expect("new displays need a workspace");
-        assert_ne!(seeded, original);
+        assert_eq!(store.active_workspace(b), None);
+        while store.catalog().count() < MAX_WORKSPACES {
+            store.create_workspace(b, None).unwrap();
+        }
+        let catalog: Vec<_> = store.catalog().collect();
         assert!(store.transfer_workspace(original, b, None, WorkspaceTransferReason::Explicit));
-        let replacement =
-            store.active_workspace(a).expect("moving the last workspace seeds its source");
-        assert_ne!(replacement, original);
-        assert!(store.transfer_workspace(original, a, None, WorkspaceTransferReason::Explicit));
-        let created = store.create_workspace(b, None).unwrap();
-        assert_eq!(store.active_workspace(b), Some(seeded));
+        assert_eq!(store.active_workspace(a), None);
+        assert_eq!(store.active_workspace(b), Some(original));
         // Rediscovery must retain a non-default assignment even on another display.
-        store.transfer_workspace(created, a, None, WorkspaceTransferReason::Explicit);
+        let assigned = catalog[1];
         let mut windows = WindowStore::default();
         let window = WindowId::new(90, 1);
-        store.assign_window_to_workspace(&mut windows, a, window, created);
+        store.assign_window_to_workspace(&mut windows, b, window, assigned);
         assert_eq!(
-            expect_managed(store.apply_app_rule_decision(&mut windows, window, b, None, true))
+            expect_managed(store.apply_app_rule_decision(&mut windows, window, a, None, true))
                 .workspace_id,
-            created
+            assigned
         );
-        // Repeatedly moving the sole replacement must stop at the creation limit.
-        while store.catalog().count() < MAX_WORKSPACES {
-            let last = store.active_workspace(b).unwrap();
-            assert!(store.transfer_workspace(last, a, None, WorkspaceTransferReason::Explicit));
-        }
-        let owners: Vec<_> = store.catalog().map(|id| (id, store[id].space)).collect();
-        let last = store.active_workspace(b).unwrap();
-        assert!(!store.transfer_workspace(last, a, None, WorkspaceTransferReason::Explicit));
-        assert_eq!(
-            store.catalog().map(|id| (id, store[id].space)).collect::<Vec<_>>(),
-            owners
-        );
-        assert_eq!(store.active_workspace(b), Some(last));
-        // Moves that need no replacement remain available at the limit.
-        assert!(store.transfer_workspace(original, b, None, WorkspaceTransferReason::Explicit));
-        assert_eq!(store.catalog().count(), MAX_WORKSPACES);
-        assert!(store.active_workspace(a).is_some());
+        assert_eq!(store.catalog().collect::<Vec<_>>(), catalog);
         store.validate_persisted_topology().unwrap();
     }
 
@@ -1921,7 +1949,7 @@ mod tests {
     }
 
     #[test]
-    fn shared_initial_count_is_global_and_later_desktops_are_seeded_once() {
+    fn shared_initial_count_stays_fixed_across_topology_changes() {
         let (a, b, c) = (SpaceId::new(51), SpaceId::new(52), SpaceId::new(53));
         for (count, pin_all) in [
             (1, false),
@@ -1949,17 +1977,18 @@ mod tests {
             let mut store = WorkspaceStore::new_with_config(&settings, &LayoutSettings::default());
             store.ensure_visible_spaces(&[a, b], 2, |_| pin_all.then_some(a));
             let catalog: Vec<_> = store.catalog().collect();
-            assert_eq!(catalog.len(), count.max(2) + usize::from(pin_all));
+            assert_eq!(catalog.len(), count);
             for (index, &id) in catalog.iter().enumerate() {
-                let boundary = if pin_all { count } else { count.max(2) / 2 };
+                let boundary = if pin_all || count == 1 {
+                    count
+                } else {
+                    count / 2
+                };
                 assert_eq!(store[id].space, if index < boundary { a } else { b });
             }
             store.ensure_visible_spaces(&[a, b, c], 3, |_| None);
-            assert_eq!(store.workspace_ids(c).len(), 1);
-            assert!(store.active_workspace(c).is_some());
-            assert_eq!(store.catalog().take(catalog.len()).collect::<Vec<_>>(), catalog);
-            store.ensure_visible_spaces(&[a, b, c], 3, |_| None);
-            assert_eq!(store.catalog().count(), catalog.len() + 1);
+            assert_eq!(store.active_workspace(c), None);
+            assert_eq!(store.catalog().collect::<Vec<_>>(), catalog);
             let placement: Vec<_> = store.catalog().map(|id| (id, store[id].space)).collect();
             let active = [a, b, c].map(|space| store.active_workspace(space));
             // Display loss, return, and physical reordering must not run the initial
@@ -1974,14 +2003,14 @@ mod tests {
                 assert_eq!(
                     store.catalog().map(|id| (id, store[id].space)).collect::<Vec<_>>(),
                     placement,
-                    "seeding must preserve catalog order and ownership"
+                    "exposure must preserve catalog order and ownership"
                 );
                 assert_eq!([a, b, c].map(|space| store.active_workspace(space)), active);
             }
             store.validate_persisted_topology().unwrap();
             store
                 .plan_settings(&settings)
-                .expect("automatic seeds must allow configuration reload");
+                .expect("the existing catalog must allow configuration reload");
         }
     }
 
@@ -1996,8 +2025,7 @@ mod tests {
             (3, 6, &[(1, 2)], &[2, 2, 0, 0, 1, 1]),
             (2, 6, &[(1, 0), (2, 0), (3, 0), (4, 0)], &[0, 0, 0, 0, 1, 1]),
             (2, 4, &[(1, 0), (2, 1), (3, 0), (4, 1)], &[0, 1, 0, 1]),
-            // Everything pinned to one display: append rather than steal.
-            (3, 2, &[(1, 0), (2, 0)], &[0, 0, 1, 2]),
+            (3, 2, &[(1, 0), (2, 0)], &[0, 0]),
         ];
         for &(displays, count, pinned, expected) in cases {
             let mut pins = vec![None; count];
@@ -2005,7 +2033,7 @@ mod tests {
                 pins[workspace - 1] = Some(display);
             }
             assert_eq!(
-                distribute(displays, pins),
+                distribute(displays, pins, &[]),
                 expected,
                 "{displays} displays {pinned:?}"
             );

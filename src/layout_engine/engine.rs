@@ -3441,7 +3441,6 @@ impl LayoutEngine {
             return EventResponse::default();
         };
 
-        // Accepted visible topology seeds destinations without relocating a workspace.
         let Some(target_workspace_id) = self.workspaces.active_workspace(target_space) else {
             debug!(
                 ?window_id,
