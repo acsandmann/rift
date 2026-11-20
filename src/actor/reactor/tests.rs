@@ -2416,7 +2416,6 @@ fn restoring_minimized_window_retiles_survivor_without_focus_change() {
     let mut info = reactor.state.windows.window(restored).unwrap().info.clone();
     info.is_minimized = false;
     reactor.discover_test_windows(restored.pid, vec![(restored, info)], vec![restored, survivor]);
-    reactor.handle_event(Event::WindowDeminiaturized(restored));
     let requests = apps.requests();
     assert!(requests.iter().any(|request| matches!(request,
         Request::SetWindowFrames(frames, ..)
@@ -4452,9 +4451,9 @@ fn auto_workspace_switch_follows_activated_window_when_same_app_is_visible_elsew
         )
     });
     assert!(!reactor.state.windows.is_temporarily_unavailable(activated));
-    let retired = reactor.state.windows.reconcile_app_inventory(
+    let retired = reactor.state.windows.inventory_retirements(
         activated.pid,
-        &[same_app_visible],
+        [same_app_visible],
         &HashSet::default(),
         |_, info| crate::model::window_store::InventoryWindowObservation {
             info,
@@ -7269,9 +7268,9 @@ fn ax_destroyed_window_stops_consuming_space_until_positive_ax_return() {
         window,
         super::WindowInvalidationSource::StaleAxElement,
     ));
-    let retired = reactor.state.windows.reconcile_app_inventory(
+    let retired = reactor.state.windows.inventory_retirements(
         window.pid,
-        &[WindowId::new(1, 1), WindowId::new(1, 3)],
+        [WindowId::new(1, 1), WindowId::new(1, 3)],
         &HashSet::default(),
         |_, info| crate::model::window_store::InventoryWindowObservation {
             info,
@@ -7324,8 +7323,13 @@ fn window_closed_removes_logical_window_without_inventory_refresh() {
     apps.make_app_and_settle_on_screen(&mut reactor, screen, space, 1, make_windows(1));
     let wsid = reactor.test_window_server_id(wid);
 
+    reactor.handle_event(Event::ApplicationGloballyActivated(wid.pid));
+    reactor.handle_event(Event::WindowServerFocusChanged(wid, space));
+    assert_eq!(reactor.main_window(), Some(wid));
+
     reactor.handle_event(Event::WindowClosed(wsid));
 
+    assert_eq!(reactor.main_window(), None);
     assert!(reactor.state.windows.record(wid).is_none());
     assert!(!has_window_in_layout(&mut reactor, space, screen, wid));
 }
@@ -9215,9 +9219,9 @@ fn inventory_negatives_require_native_authority_even_when_hidden() {
                     ));
                 }
                 reactor.state.windows.observe_native_visibility(wsid, visible);
-                let result = reactor.state.windows.reconcile_app_inventory(
+                let result = reactor.state.windows.inventory_retirements(
                     wid.pid,
-                    &[],
+                    [],
                     &if inactive {
                         [wid].into_iter().collect()
                     } else {
@@ -9229,16 +9233,8 @@ fn inventory_negatives_require_native_authority_even_when_hidden() {
                         ordered_in,
                     },
                 );
-                assert_eq!(
-                    result,
-                    if retired {
-                        vec![(wid, Some(wsid))]
-                    } else {
-                        vec![]
-                    }
-                );
-                assert_eq!(reactor.state.windows.contains_window(wid), !retired);
-                reactor.state.windows.debug_assert_invariants();
+                assert_eq!(result, if retired { vec![wid] } else { vec![] });
+                assert!(reactor.state.windows.contains_window(wid));
             }
         }
     }
@@ -9262,9 +9258,9 @@ fn inventory_observes_only_eligible_omitted_windows() {
     );
     let omitted_wsid = reactor.test_window_server_id(windows[1]);
     let mut observed = Vec::new();
-    let retired = reactor.state.windows.reconcile_app_inventory(
+    let retired = reactor.state.windows.inventory_retirements(
         1,
-        &windows[..1],
+        [windows[0]],
         &[windows[3]].into_iter().collect(),
         |wsid, _| {
             observed.push(wsid);
@@ -9276,7 +9272,7 @@ fn inventory_observes_only_eligible_omitted_windows() {
         },
     );
     assert_eq!(observed, vec![omitted_wsid]);
-    assert_eq!(retired, vec![(windows[1], Some(omitted_wsid))]);
+    assert_eq!(retired, vec![windows[1]]);
     reactor.state.windows.debug_assert_invariants();
 }
 
@@ -12773,9 +12769,9 @@ fn native_fullscreen_restores_middle_window_exactly_across_notification_ordering
                     )
                 });
             } else if early == 2 {
-                let retired = reactor.state.windows.reconcile_app_inventory(
+                let retired = reactor.state.windows.inventory_retirements(
                     1,
-                    &[WindowId::new(1, 1), WindowId::new(1, 3)],
+                    [WindowId::new(1, 1), WindowId::new(1, 3)],
                     &HashSet::default(),
                     |_, info| InventoryWindowObservation {
                         info,

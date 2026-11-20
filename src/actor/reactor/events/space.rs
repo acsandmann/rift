@@ -1,8 +1,7 @@
 use tracing::{debug, trace};
 
 use super::super::{Changes, Reactor};
-use crate::actor::app::Request;
-use crate::actor::reactor::{LayoutEvent, SpaceEventKind};
+use crate::actor::reactor::SpaceEventKind;
 use crate::actor::spaces::ForwardedSpaceState;
 use crate::actor::wm_controller::WmEvent;
 use crate::common::collections::HashSet;
@@ -116,7 +115,7 @@ impl Reactor {
             // Departure alone cannot establish entry. Startup recovery uses positive
             // fullscreen appearance/discovery, even if this notification arrives late.
             if let Some(wid) = self.state.windows.tracked_window_id(wsid) {
-                self.send_app_request(wid.pid, Request::WindowMaybeDestroyed(wid));
+                changes.inventory(wid.pid);
             }
         } else {
             match self.state.windows.observe_native_departure(
@@ -131,18 +130,13 @@ impl Reactor {
                     self.reassign_window_to_authoritative_space(changes, wid, space, false);
                 }
                 NativeDeparture::Closed(wid) => {
-                    self.destroy_window(changes, wid);
+                    self.retire_window(changes, wid);
                 }
-                NativeDeparture::Hidden {
-                    window: Some(wid),
-                    remove_projection,
-                } => {
-                    if remove_projection {
-                        self.reconcile_layout_event(changes, LayoutEvent::WindowSuspended(wid));
-                    }
-                    self.send_app_request(wid.pid, Request::WindowMaybeDestroyed(wid));
+                NativeDeparture::Hidden(Some(wid)) => {
+                    self.reconcile_window_membership(changes, wid, None);
+                    changes.inventory(wid.pid);
                 }
-                NativeDeparture::Moved(None, _) | NativeDeparture::Hidden { window: None, .. } => {}
+                NativeDeparture::Moved(None, _) | NativeDeparture::Hidden(None) => {}
             }
         }
     }
@@ -221,7 +215,7 @@ impl Reactor {
                             last_known_user_space,
                             owner_pid,
                         ) {
-                            self.reconcile_layout_event(changes, LayoutEvent::WindowSuspended(wid));
+                            self.reconcile_window_membership(changes, wid, None);
                         }
                         if tracked_window_id.is_none()
                             && let Some(pid) = owner_pid

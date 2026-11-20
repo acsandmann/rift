@@ -175,7 +175,7 @@ pub struct WindowStore {
 pub(crate) struct NativeFullscreenRestoration {
     pub(crate) record: NativeFullscreenRecord,
     pub(crate) window: Option<WindowId>,
-    pub(crate) removed_window: Option<WindowId>,
+    pub(crate) previous_assignment: Option<WindowId>,
 }
 
 /// Native facts supplementing a successful AX inventory omission. Unknown
@@ -192,10 +192,7 @@ pub(crate) struct InventoryWindowObservation {
 pub(crate) enum NativeDeparture {
     Moved(Option<WindowId>, SpaceId),
     Closed(WindowId),
-    Hidden {
-        window: Option<WindowId>,
-        remove_projection: bool,
-    },
+    Hidden(Option<WindowId>),
 }
 
 impl WindowStore {
@@ -323,21 +320,10 @@ impl WindowStore {
         Some(assignment)
     }
 
-    /// Temporary unavailability changes admission, not logical workspace ownership.
-    pub(crate) fn reconcile_admission(&mut self, wid: WindowId) -> bool {
-        let admitted = self.window(wid).is_some_and(WindowState::is_admitted);
-        let explicitly_excluded =
-            self.window(wid).is_some_and(|w| w.manage_override == Some(false));
-        if !admitted && (explicitly_excluded || !self.is_temporarily_unavailable(wid)) {
-            self.remove_window_assignment(wid);
-        }
-        admitted
-    }
-
-    pub(crate) fn invalidate_ax_identity(&mut self, wid: WindowId) {
-        if let Some(record) = self.windows.get_mut(&wid) {
-            record.ax_invalidated = true;
-        }
+    pub(crate) fn invalidate_ax_identity(&mut self, wid: WindowId) -> bool {
+        self.windows
+            .get_mut(&wid)
+            .is_some_and(|record| !std::mem::replace(&mut record.ax_invalidated, true))
     }
 
     /// Only a fresh AX observation validates an invalidated identity.
@@ -368,7 +354,7 @@ impl WindowStore {
 
     /// Restore identity for native presence or a return to the recorded user Space.
     pub(crate) fn restore_native_identity(
-        &mut self,
+        &self,
         wsid: Option<WindowServerId>,
         original: WindowId,
     ) -> Option<NativeFullscreenRestoration> {
@@ -391,11 +377,14 @@ impl WindowStore {
         .into_iter()
         .flatten()
         .find(|wid| self.is_admitted(*wid));
-        let removed_window = window
-            .filter(|wid| *wid != original)
-            .and_then(|_| self.remove_window_assignment(original))
-            .map(|_| original);
-        Some(NativeFullscreenRestoration { record, window, removed_window })
+        let previous_assignment = window
+            .is_some_and(|wid| wid != original && self.workspace_for_window(original).is_some())
+            .then_some(original);
+        Some(NativeFullscreenRestoration {
+            record,
+            window,
+            previous_assignment,
+        })
     }
 
     /// Native fullscreen suspends admission while retaining identity and ownership.
@@ -472,13 +461,8 @@ impl WindowStore {
                 return NativeDeparture::Closed(wid);
             }
         }
-        let remove_projection = window.and_then(|wid| self.record(wid)).is_some_and(|record| {
-            record.workspace.is_some()
-                && self.is_temporarily_unavailable(window.unwrap())
-                && self.native_space(window.unwrap()) == Some(reported_space)
-        });
         self.observe_native_space(wsid, reported_space, false);
-        NativeDeparture::Hidden { window, remove_projection }
+        NativeDeparture::Hidden(window)
     }
 
     /// Bind a positive AX observation to its stable native identity. Persistent
@@ -525,21 +509,17 @@ impl WindowStore {
         wid
     }
 
-    /// Enforce the minimized invariant even if the AX flag was already set.
-    /// Every known identity requests projection repair; the projection reports
-    /// whether removal actually changed geometry, so correct duplicates are cheap.
-    pub(crate) fn observe_minimized(&mut self, wid: WindowId) -> bool {
-        let Some(window) = self.window_mut(wid) else {
-            return false;
-        };
-        window.info.is_minimized = true;
-        window.is_manageable = false;
+    pub(crate) fn set_minimized_visibility(&mut self, wid: WindowId, minimized: bool) {
         if let Some(wsid) = self.record(wid).and_then(WindowRecord::window_server_id) {
-            self.mark_window_hidden(wsid);
+            self.set_native_visibility(wsid, !minimized);
         }
-        self.set_visibility(wid, WindowVisibility::Minimized);
-        self.validate_ax_identity(wid);
-        true
+        if let Some(record) = self.windows.get_mut(&wid) {
+            record.visibility = if minimized {
+                WindowVisibility::Minimized
+            } else {
+                WindowVisibility::Visible
+            };
+        }
     }
 
     /// Hidden is visibility evidence, never destruction. Return the owning PID
@@ -558,16 +538,15 @@ impl WindowStore {
     }
 
     /// A current successful AX omission is destructive only with native negative evidence.
-    pub(crate) fn reconcile_app_inventory(
-        &mut self,
+    pub(crate) fn inventory_retirements(
+        &self,
         pid: i32,
-        observed: &[WindowId],
+        observed: impl IntoIterator<Item = WindowId>,
         inactive: &HashSet<WindowId>,
         mut observe: impl FnMut(WindowServerId, Option<WindowServerInfo>) -> InventoryWindowObservation,
-    ) -> Vec<(WindowId, Option<WindowServerId>)> {
-        let observed: HashSet<_> = observed.iter().copied().collect();
-        let retired: Vec<_> = self
-            .window_ids_for_pid(pid)
+    ) -> Vec<WindowId> {
+        let observed: HashSet<_> = observed.into_iter().collect();
+        self.window_ids_for_pid(pid)
             .filter_map(|wid| {
                 let record = self.record(wid)?;
                 if observed.contains(&wid)
@@ -595,13 +574,9 @@ impl WindowStore {
                             || info.frame.size.width.abs() < 2.0
                             || info.frame.size.height.abs() < 2.0
                     }))
-                .then_some((wid, Some(wsid)))
+                .then_some(wid)
             })
-            .collect();
-        for &(wid, _) in &retired {
-            self.remove_window(wid);
-        }
-        retired
+            .collect()
     }
 
     /// Apply native presence and visibility, returning only affected logical
@@ -677,7 +652,6 @@ impl WindowStore {
         if preserve_assignment || self.is_admitted(wid) {
             return None;
         }
-        self.remove_window_assignment(wid);
         Some((wid, None))
     }
 
@@ -1599,13 +1573,9 @@ impl WindowStore {
         self.window_server_space(self.record(window)?.window_server_id?)
     }
 
-    pub fn set_visibility(&mut self, window_id: WindowId, visibility: WindowVisibility) {
-        self.windows.entry(window_id).or_default().visibility = visibility;
-        self.app_windows.entry(window_id.pid).or_default().insert(window_id);
-    }
-
     pub(crate) fn can_place_window(&self, window: WindowId) -> bool {
-        self.native_fullscreen_record_for_window(window).is_none()
+        !self.is_temporarily_unavailable(window)
+            && self.native_fullscreen_record_for_window(window).is_none()
             && self.record(window).is_none_or(|record| {
                 !matches!(
                     record.visibility,
@@ -1939,18 +1909,18 @@ mod tests {
         store.assign_window_to_workspace(wid, home);
 
         for _ in 0..2 {
-            assert!(store.observe_minimized(wid));
-            assert!(!store.reconcile_admission(wid));
+            store.window_mut(wid).unwrap().info.is_minimized = true;
+            store.set_minimized_visibility(wid, true);
+            assert!(!store.is_admitted(wid));
             assert_eq!(store.workspace_for_window(wid), Some(home));
             assert_eq!(store.workspace_windows(home), vec![wid]);
             store.debug_assert_invariants();
         }
 
         store.insert_window(wid, admitted(wid, WindowServerId::new(1)));
-        assert!(store.reconcile_admission(wid));
+        assert!(store.is_admitted(wid));
         assert_eq!(store.workspace_for_window(wid), Some(home));
-        store.window_mut(wid).unwrap().manage_override = Some(false);
-        assert!(!store.reconcile_admission(wid));
+        store.remove_window(wid);
         assert_eq!(store.workspace_for_window(wid), None);
         assert!(store.workspace_windows(home).is_empty());
     }

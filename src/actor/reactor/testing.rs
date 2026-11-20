@@ -615,7 +615,6 @@ impl Apps {
             debug!(?request);
             match request {
                 Request::Terminate => break,
-                Request::WindowMaybeDestroyed(_) => {}
                 Request::RefreshWindowInventory(token) => {
                     if got_visible_windows {
                         continue;

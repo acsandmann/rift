@@ -620,7 +620,6 @@ pub enum Request {
     /// Carbon supplies the activation edge, while the app thread resolves the
     /// focused/main window and the quiet marker before notifying the reactor.
     ApplicationGloballyActivated(pid_t),
-    WindowMaybeDestroyed(WindowId),
     CloseWindow(Option<WindowServerId>),
 
     SetWindowFrames(
@@ -799,7 +798,6 @@ struct AppWindowState {
     pub elem: AXUIElement,
     notifications_registered: bool,
     last_seen_txid: TransactionId,
-    hidden_by_app: bool,
     window_server_id: Option<WindowServerId>,
     title: String,
     is_animating: bool,
@@ -1497,21 +1495,6 @@ impl State {
             Request::Terminate => {
                 return Ok(true);
             }
-            Request::WindowMaybeDestroyed(wid) => {
-                if wid.pid != self.pid {
-                    return Ok(false);
-                }
-
-                // If we don't know this window, nothing to verify.
-                if !self.windows.contains_key(&wid) {
-                    return Ok(false);
-                }
-
-                // Destruction is verified by the reactor's revisioned inventory
-                // coordinator. Do not enumerate AX windows independently here.
-                self.send_event(Event::WindowInventoryRefreshRequested(self.pid));
-                return Ok(false);
-            }
             Request::CloseWindow(window_server_id) => {
                 if let Some(wsid) = window_server_id
                     && let Err(err) = window_server::make_key_window(self.pid, wsid)
@@ -1876,29 +1859,18 @@ impl State {
                     mouse_state,
                 ));
             }
-            AxNotificationKind::WindowMiniaturized => {
+            AxNotificationKind::WindowMiniaturized | AxNotificationKind::WindowDeminiaturized => {
                 let Ok(wid) = self.wid_for_notification(&elem, hinted_wid) else {
                     return;
                 };
-                let Some(window) = self.windows.get_mut(&wid).filter(|window| window.elem == elem)
-                else {
-                    trace!(?wid, "Ignoring miniaturize for superseded AX element");
+                if !self.is_current_window_element(wid, &elem) {
                     return;
-                };
-                window.hidden_by_app = false;
-                self.send_event(Event::WindowMinimized(wid));
-            }
-            AxNotificationKind::WindowDeminiaturized => {
-                let Ok(wid) = self.wid_for_notification(&elem, hinted_wid) else {
-                    return;
-                };
-                let Some(window) = self.windows.get_mut(&wid).filter(|window| window.elem == elem)
-                else {
-                    trace!(?wid, "Ignoring deminiaturize for superseded AX element");
-                    return;
-                };
-                window.hidden_by_app = false;
-                self.send_event(Event::WindowDeminiaturized(wid));
+                }
+                if self.is_hidden || matches!(notif, AxNotificationKind::WindowMiniaturized) {
+                    self.send_event(Event::WindowMinimized(wid));
+                } else {
+                    self.send_event(Event::WindowDeminiaturized(wid));
+                }
             }
             AxNotificationKind::TitleChanged => {
                 let Ok(wid) = self.wid_for_notification(&elem, hinted_wid) else {
@@ -2260,48 +2232,28 @@ impl State {
 
         self.is_hidden = true;
         self.pending_activation.ax_deactivated();
-        let mut to_minimize = Vec::new();
-        for (wid, window) in self.windows.iter_mut() {
-            if window.hidden_by_app {
-                continue;
-            }
-            window.hidden_by_app = true;
-            to_minimize.push(*wid);
-        }
-
-        for wid in to_minimize {
+        for &wid in self.windows.keys() {
             self.send_event(Event::WindowMinimized(wid));
         }
     }
 
     fn on_application_shown(&mut self) {
-        if !self.is_hidden {
+        if !std::mem::take(&mut self.is_hidden) {
             return;
         }
-
-        self.is_hidden = false;
-        let mut to_restore = Vec::new();
-        for (wid, window) in self.windows.iter_mut() {
-            if !window.hidden_by_app {
-                continue;
-            }
-            window.hidden_by_app = false;
-            let minimized = match trace("minimized", &window.elem, || window.elem.minimized()) {
-                Ok(minimized) => minimized,
+        let mut refresh_inventory = false;
+        for (&wid, window) in &self.windows {
+            match trace("minimized", &window.elem, || window.elem.minimized()) {
+                Ok(false) => self.send_event(Event::WindowDeminiaturized(wid)),
+                Ok(true) => {}
                 Err(err) => {
                     debug!(?wid, ?err, "Failed to read minimized state after app shown");
-                    false
+                    refresh_inventory = true;
                 }
-            };
-            if minimized {
-                continue;
             }
-            let wid = *wid;
-            to_restore.push(wid);
         }
-
-        for wid in to_restore {
-            self.send_event(Event::WindowDeminiaturized(wid));
+        if refresh_inventory {
+            self.send_event(Event::WindowInventoryRefreshRequested(self.pid));
         }
         if let Some((quiet, window)) = self.pending_activation.shown() {
             self.finish_activation(quiet, window);
@@ -2377,13 +2329,11 @@ impl State {
         // those elements registered even when per-window AX notifications are
         // unavailable; app-level discovery remains the lifecycle fallback.
         let notifications_registered = self.register_window_notifications(&elem, wid);
-        let hidden_by_app = self.is_hidden;
 
         let old = self.windows.insert(wid, AppWindowState {
             elem: elem.clone(),
             notifications_registered,
             last_seen_txid: TransactionId::default(),
-            hidden_by_app,
             window_server_id: Some(window_server_id),
             title: info.title.clone(),
             is_animating: false,
@@ -2395,9 +2345,6 @@ impl State {
         });
         debug_assert!(old.is_none(), "Duplicate window id {wid:?}");
         self.elem_to_wid.insert(elem, wid);
-        if hidden_by_app {
-            self.send_event(Event::WindowMinimized(wid));
-        }
         Some((info, wid, server_info))
     }
 
@@ -2539,6 +2486,7 @@ impl State {
     }
 
     fn normalize_window_info(&self, elem: &AXUIElement, info: &mut WindowInfo) {
+        info.is_minimized |= self.is_hidden;
         // TODO: improve this heuristic using ideas from AeroSpace(maybe implement a similar testing architecture based on ax dumps)
         if (self.bundle_id.as_deref() == Some("com.googlecode.iterm2")
             || self.bundle_id.as_deref() == Some("com.apple.TextInputUI.xpc.CursorUIViewService"))

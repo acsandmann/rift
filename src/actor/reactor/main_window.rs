@@ -37,12 +37,6 @@ impl MainWindowTracker {
                 }
                 return None;
             }
-            &Event::WindowDestroyed(wid) => {
-                if self.window_server_focus == Some(wid) {
-                    self.window_server_focus = None;
-                }
-                return None;
-            }
             &Event::ApplicationActivated(pid, quiet) => {
                 let app = self.apps.get_mut(&pid)?;
                 app.is_frontmost = true;
@@ -96,6 +90,17 @@ impl MainWindowTracker {
             }
         }
         None
+    }
+
+    pub(super) fn retire_window(&mut self, wid: WindowId) {
+        if self.window_server_focus == Some(wid) {
+            self.window_server_focus = None;
+        }
+        if let Some(app) = self.apps.get_mut(&wid.pid)
+            && app.main_window == Some(wid)
+        {
+            app.main_window = None;
+        }
     }
 
     pub fn main_window(&self) -> Option<WindowId> {
@@ -171,7 +176,7 @@ mod tests {
             Quiet::No,
         ));
 
-        let _ = tracker.handle_event(&Event::WindowDestroyed(server_window));
+        tracker.retire_window(server_window);
         assert_eq!(tracker.main_window(), Some(ax_window));
     }
 

@@ -18,6 +18,7 @@ mod replay;
 pub mod transaction_manager;
 mod transient_focus;
 mod utils;
+mod window_lifecycle;
 
 #[cfg(test)]
 mod testing;
@@ -922,7 +923,7 @@ impl Reactor {
                 if let Some(wid) =
                     self.state.windows.observe_native_fullscreen(wsid, fullscreen, user, None)
                 {
-                    self.reconcile_layout_event(changes, LayoutEvent::WindowSuspended(wid));
+                    self.reconcile_window_membership(changes, wid, None);
                 }
                 continue;
             }
@@ -969,7 +970,7 @@ impl Reactor {
                         preserve_ordinal,
                     );
                 } else {
-                    self.reconcile_layout_event(changes, LayoutEvent::WindowRemoved(wid));
+                    self.reconcile_window_membership(changes, wid, None);
                 }
             }
         }
@@ -1417,14 +1418,6 @@ impl Reactor {
             event = Event::ApplicationThreadTerminated(*pid);
         }
         match &event {
-            Event::WindowDestroyed(wid) | Event::WindowInvalidated(wid, _) => {
-                self.cancel_window_presentations(vec![*wid]);
-            }
-            Event::WindowClosed(wsid) => {
-                if let Some(wid) = self.state.windows.tracked_window_id(*wsid) {
-                    self.cancel_window_presentations(vec![wid]);
-                }
-            }
             Event::ApplicationTerminated(pid) | Event::ApplicationThreadTerminated(pid) => {
                 let windows = self
                     .state
@@ -1722,7 +1715,7 @@ impl Reactor {
             }
             Event::WindowCreated(wid, mut window, ws_info, _) => {
                 self.replace_native_tab(wid, &mut window);
-                self.create_window(changes, wid, window, ws_info);
+                self.observe_created_window(changes, wid, window, ws_info);
                 self.reconcile_observed_focus(changes, raised_window);
                 return Ok(());
             }
@@ -1739,21 +1732,23 @@ impl Reactor {
                     return Ok(());
                 }
 
-                self.destroy_window(changes, wid);
+                if self.state.windows.suspend_fullscreen_ax_identity(wid) {
+                    self.reconcile_window_membership(changes, wid, None);
+                } else {
+                    self.retire_window(changes, wid);
+                }
                 self.reconcile_observed_focus(changes, raised_window);
                 return Ok(());
             }
             Event::WindowClosed(wsid) => {
                 let Some(wid) = self.state.windows.tracked_window_id(wsid) else {
-                    self.state.windows.mark_window_hidden(wsid);
+                    self.state.windows.remove_window_server_state(wsid);
                     return Ok(());
                 };
                 if self.retain_native_tab_slot_on_departure(wid) {
                     return Ok(());
                 }
-                // This is a native window close, unlike AX identity destruction.
-                self.state.windows.restore_window_from_native_fullscreen(wid);
-                self.destroy_window(changes, wid);
+                self.retire_window(changes, wid);
                 self.reconcile_observed_focus(changes, raised_window);
                 return Ok(());
             }
@@ -1768,21 +1763,8 @@ impl Reactor {
                 return Ok(());
             }
             Event::WindowInvalidated(wid, source) => {
-                // AX elements are routinely invalidated while the display/session is
-                // transitioning, and the notification establishing that transition can
-                // arrive later. Keep the logical window, workspace assignment, and layout
-                // node until WindowServer destruction or an authoritative inventory proves
-                // that the native window is gone. Suspend participation while the AX
-                // identity is invalid; a positive AX return can restore the retained slot.
-                trace!(
-                    ?wid,
-                    ?source,
-                    "Preserving logical window after AX element invalidation"
-                );
-                self.state.windows.invalidate_ax_identity(wid);
-                self.reconcile_layout_event(changes, LayoutEvent::WindowSuspended(wid));
-                changes.refresh_notifications |= should_update_notifications;
-                changes.inventory(wid.pid);
+                trace!(?wid, ?source, "AX identity invalidated");
+                self.invalidate_window_identity(changes, wid);
                 return Ok(());
             }
             Event::WindowServerDestroyed(wsid, sid, kind) => {
@@ -1833,7 +1815,7 @@ impl Reactor {
                     self.transient_focus.visibility(wsid, true);
                 }
                 if let Some(wid) = self.state.windows.tracked_window_id(wsid) {
-                    self.sync_native_admission(changes, wid);
+                    self.sync_native_transient(changes, wid);
                 }
                 if matches!(kind, SpaceEventKind::User)
                     && let Some(space) = resolved
@@ -1854,14 +1836,11 @@ impl Reactor {
                 return Ok(());
             }
             Event::WindowMinimized(wid) | Event::WindowDeminiaturized(wid) => {
-                let was_unavailable = self.state.windows.is_temporarily_unavailable(wid);
-                self.reconcile_window_visibility(
+                self.observe_window_minimization(
                     changes,
                     wid,
-                    matches!(event, Event::WindowDeminiaturized(_)),
+                    matches!(event, Event::WindowMinimized(_)),
                 );
-                changes.overview_changed |=
-                    was_unavailable != self.state.windows.is_temporarily_unavailable(wid);
                 return Ok(());
             }
             Event::WindowFrameWriteFailed(wid, txid) => {
@@ -2825,51 +2804,6 @@ impl Reactor {
         }
     }
 
-    fn finalize_created_window(&mut self, changes: &mut Changes, window: WindowId) {
-        self.sync_native_admission(changes, window);
-        if self.state.windows.native_fullscreen_record_for_window(window).is_some() {
-            self.restore_native_fullscreen(changes, None, window, None);
-            return;
-        }
-        // Restored windows retain their logical owner even when macOS restores
-        // them on the current display or their last frame is parked offscreen.
-        let assigned_space = self.assigned_space_for_window_id(window);
-        let active_space = assigned_space.or_else(|| {
-            self.state.windows.window(window).and_then(|state| {
-                self.best_space_for_window(&state.frame_monotonic, state.info.sys_id)
-                    .filter(|space| self.is_space_active(*space))
-                    .or_else(|| {
-                        state
-                            .info
-                            .sys_id
-                            .is_none()
-                            .then(|| self.workspace_command_space())
-                            .flatten()
-                    })
-            })
-        });
-        if let Some(space) = active_space {
-            if let Some(state) = self.state.windows.window(window)
-                && let Some(id) = state.info.sys_id
-            {
-                self.transient_focus.ax(id, window.pid, &state.info, space);
-            }
-
-            if let Some(app_info) =
-                self.app_manager.apps.get(&window.pid).map(|app| app.info.clone())
-            {
-                self.process_windows_for_app_rules(changes, [window], app_info, false);
-            }
-            if self.state.windows.is_admitted(window) {
-                let space = self.assigned_space_for_window_id(window).unwrap_or(space);
-                self.reconcile_layout_event(changes, LayoutEvent::WindowAdded(space, window));
-                if assigned_space.is_none() && !self.is_dragging_window(window) {
-                    self.place_new_window_on_pointer_display(changes, window, space);
-                }
-            }
-        }
-    }
-
     fn write_window_frame(
         &mut self,
         window: WindowId,
@@ -3207,18 +3141,8 @@ impl Reactor {
         ws_info: impl IntoIterator<Item = WindowServerInfo>,
     ) {
         for info in ws_info {
-            if let Some(wid) = self.state.windows.observe_native_window(info)
-                && utils::refresh_heuristic(&mut self.state, wid)
-                    .is_some_and(|transition| transition.was_admitted && !transition.is_admitted)
-            {
-                self.reconcile_layout_event(
-                    changes,
-                    if self.state.windows.is_temporarily_unavailable(wid) {
-                        LayoutEvent::WindowSuspended(wid)
-                    } else {
-                        LayoutEvent::WindowRemoved(wid)
-                    },
-                );
+            if let Some(wid) = self.state.windows.observe_native_window(info) {
+                self.refresh_native_window_admission(changes, wid);
             }
         }
     }
@@ -3303,70 +3227,6 @@ impl Reactor {
                 record.current_window_id,
                 None,
             );
-        }
-    }
-
-    /// Leave fullscreen with the logical workspace intact; placement follows its
-    /// current owner through the transfer lifecycle (deferred while dormant), never
-    /// the Space macOS returned the window to.
-    fn restore_native_fullscreen(
-        &mut self,
-        changes: &mut Changes,
-        wsid: Option<WindowServerId>,
-        window: WindowId,
-        observed: Option<SpaceId>,
-    ) {
-        if let Some(space) = observed {
-            self.state.windows.note_fullscreen_exit(window, space);
-        }
-        let Some(restored) = self.state.windows.restore_native_identity(wsid, window) else {
-            return;
-        };
-        if let Some(previous) = restored.removed_window {
-            self.reconcile_layout_event(changes, LayoutEvent::WindowRemoved(previous));
-        }
-        let Some(window) = restored.window else {
-            self.reconcile_layout_event(
-                changes,
-                LayoutEvent::WindowSuspended(restored.record.current_window_id),
-            );
-            return;
-        };
-        // Readiness is checked without rejecting logical ownership. A temporary
-        // admission failure keeps both the lifecycle and its preserved layout slot.
-        let native = observed.or(match restored.record.transition {
-            NativeFullscreenTransition::ExitObserved(space) => space,
-            _ => None,
-        });
-        let engine = &mut self.layout_manager.layout_engine;
-        let Some((workspace, target)) = (self.state.windows.workspace_for_window(window))
-            .or(restored.record.workspace)
-            .and_then(|id| Some((id, engine.workspaces().workspace_space(id)?)))
-        else {
-            let Some(space) = native else { return };
-            self.state.windows.restore_window_from_native_fullscreen(window);
-            self.reassign_window_to_authoritative_space(changes, window, space, false);
-            return;
-        };
-        engine.workspaces_mut().assign_window_to_workspace(
-            &mut self.state.windows,
-            target,
-            window,
-            workspace,
-        );
-        // Ownership is recovered before releasing suspension to the existing
-        // placement/projection paths. History never confirms physical placement.
-        self.state.windows.restore_window_from_native_fullscreen(window);
-        let available = self.is_space_active(target);
-        if native != Some(target) {
-            self.request_window_transfer(changes, window, target, None);
-        }
-        // Rejoin the tree even while the owner is dormant; arrange only a visible one.
-        self.reconcile_layout_event(changes, LayoutEvent::WindowAdded(target, window));
-        if available {
-            self.refocus_manager.refocus_state = RefocusState::Pending(target);
-            changes.arrange(Some(target), Presentation::Animated);
-            changes.refresh_ffm = true;
         }
     }
 
@@ -4404,9 +4264,9 @@ impl Reactor {
             })
             .collect();
         // A returned native identity protects its previous AX key until rekeying.
-        let mut observed = known_visible.clone();
-        observed.extend(new.iter().filter_map(|(_, info)| {
-            info.sys_id.and_then(|wsid| self.state.windows.tracked_window_id(wsid))
+        let observed = known_visible.iter().copied().chain(new.iter().flat_map(|(wid, info)| {
+            std::iter::once(*wid)
+                .chain(info.sys_id.and_then(|wsid| self.state.windows.tracked_window_id(wsid)))
         }));
         let retired = if matches!(
             self.refocus_manager.stale_cleanup_state,
@@ -4416,9 +4276,9 @@ impl Reactor {
         {
             Vec::new()
         } else {
-            self.state.windows.reconcile_app_inventory(
+            self.state.windows.inventory_retirements(
                 pid,
-                &observed,
+                observed,
                 &inactive_windows,
                 |wsid, cached_info| crate::model::window_store::InventoryWindowObservation {
                     info: cached_info.or_else(|| window_server::get_window(wsid)),
@@ -4427,8 +4287,8 @@ impl Reactor {
                 },
             )
         };
-        for window in retired {
-            self.retire_window(changes, window);
+        for wid in retired {
+            self.retire_window(changes, wid);
         }
         for (wid, info) in &new {
             if let Some(id) = info.sys_id
@@ -4438,12 +4298,7 @@ impl Reactor {
                 self.transient_focus.ax(id, wid.pid, info, space);
             }
         }
-        let new_window_ids = self.reconcile_window_list(changes, new);
-        for id in native_spaces.keys() {
-            if let Some(wid) = self.state.windows.tracked_window_id(*id) {
-                self.sync_native_admission(changes, wid);
-            }
-        }
+        let new_window_ids = self.observe_ax_inventory(changes, new);
         for (wsid, space) in fullscreen_observations {
             if self.is_fullscreen_space(space) {
                 let user = self
@@ -4454,7 +4309,7 @@ impl Reactor {
                 if let Some(window) =
                     self.state.windows.observe_native_fullscreen(wsid, space, user, Some(pid))
                 {
-                    self.reconcile_layout_event(changes, LayoutEvent::WindowSuspended(window));
+                    self.reconcile_window_membership(changes, window, None);
                 }
             } else if let Some(window) = self.state.windows.tracked_window_id(wsid) {
                 self.state
@@ -4680,107 +4535,6 @@ impl Reactor {
             .hidden_assigned_space_for_frame(Some(wsid), &target_frame)
             .or_else(|| self.best_space_for_frame(&target_frame))?;
         (target_space == assigned_space).then_some(target_space)
-    }
-
-    fn reconcile_native_presence(
-        &mut self,
-        changes: &mut Changes,
-        wsid: WindowServerId,
-        space: SpaceId,
-        window: WindowId,
-    ) {
-        if self.state.windows.native_fullscreen_record_for_window_server_id(wsid).is_some()
-            || self.state.windows.native_fullscreen_record_for_window(window).is_some()
-        {
-            self.restore_native_fullscreen(changes, Some(wsid), window, Some(space));
-            return;
-        }
-        // Appearance can restore participation, but is not an authoritative move.
-        let owner = self.assigned_space_for_window_id(window).unwrap_or(space);
-        if self.is_space_active(owner) && self.state.windows.is_visible_admitted(window) {
-            self.reconcile_layout_event(changes, LayoutEvent::WindowAdded(owner, window));
-        }
-    }
-
-    fn reassign_window_to_authoritative_space(
-        &mut self,
-        changes: &mut Changes,
-        wid: WindowId,
-        space: SpaceId,
-        preserve_workspace_ordinal: bool,
-    ) {
-        // A claim holds the destination; release replays this reconciliation.
-        if self.is_dragging_window(wid)
-            || self.state.windows.is_claimed(wid)
-            || self
-                .state
-                .windows
-                .record(wid)
-                .and_then(|record| record.pending_transfer())
-                .is_some()
-        {
-            return;
-        }
-        if !self.state.windows.reconcile_admission(wid) {
-            self.reconcile_layout_event(
-                changes,
-                if self.state.windows.is_temporarily_unavailable(wid) {
-                    LayoutEvent::WindowSuspended(wid)
-                } else {
-                    LayoutEvent::WindowRemoved(wid)
-                },
-            );
-            return;
-        }
-        if self.assigned_space_for_window_id(wid) != Some(space) {
-            let departed_from = self.state.windows.workspace_for_window(wid);
-            let engine = &mut self.layout_manager.layout_engine;
-            // A window a departure moved off this display goes back where it was.
-            let returning = engine.eviction_ordinal(&self.state.windows, wid, space);
-            // Resolve the destination before touching the source: a global-mode
-            // Space can own no workspace, and then the current owner is kept.
-            engine.workspaces_mut().ensure_space_initialized(space);
-            let workspaces = engine.workspaces();
-            let remembered =
-                returning.and_then(|ordinal| workspaces.workspaces_on(space).nth(ordinal));
-            let destination = if remembered.is_some() {
-                remembered
-            } else if preserve_workspace_ordinal {
-                workspaces.workspace_at_window_ordinal(&self.state.windows, space, wid)
-            } else {
-                engine.ensure_active_workspace_info(space).map(|(id, _)| id)
-            };
-            let Some(workspace) = destination else {
-                debug!(
-                    ?wid,
-                    ?space,
-                    "Native Space has no destination workspace; keeping owner"
-                );
-                return;
-            };
-            self.reconcile_layout_event(changes, LayoutEvent::WindowRemovedPreserveFloating(wid));
-            let engine = &mut self.layout_manager.layout_engine;
-            if !engine.workspaces_mut().assign_window_to_workspace(
-                &mut self.state.windows,
-                space,
-                wid,
-                workspace,
-            ) {
-                return;
-            }
-            if returning.is_some() {
-                engine.take_eviction(wid);
-            }
-            if remembered.is_none()
-                && preserve_workspace_ordinal
-                && let Some(from) = departed_from
-            {
-                engine.note_eviction(&self.state.windows, wid, from);
-            }
-        }
-        if self.is_space_active(space) && self.state.windows.is_admitted(wid) {
-            self.reconcile_layout_event(changes, LayoutEvent::WindowAdded(space, wid));
-        }
     }
 
     fn reconcile_windows_in_authoritative_active_snapshot(
@@ -5074,6 +4828,10 @@ impl Reactor {
             _ => None,
         };
         let removal = matches!(event, LayoutEvent::WindowRemoved(_));
+        let removes_assignment = matches!(
+            event, LayoutEvent::WindowRemoved(wid)
+                if self.state.windows.workspace_for_window(wid).is_some()
+        );
         let focus_desktop = matches!(
             event, LayoutEvent::WindowRemoved(wid)
                 if self.layout_manager.layout_engine.focused_window() == Some(wid)
@@ -5123,7 +4881,10 @@ impl Reactor {
         } else if let Some(space) = event_space {
             changes.space(space).tabs_changed = true;
         }
-        changes.refresh_menu |= membership_event && response.changed;
+        if removes_assignment && let Some(space) = event_space {
+            changes.membership_for(Some(space));
+        }
+        changes.refresh_menu |= removes_assignment || (membership_event && response.changed);
         if response.focus_window.is_some() || !response.raise_windows.is_empty() {
             self.reconcile_layout_response(changes, response, None);
         }
@@ -5208,22 +4969,6 @@ impl Reactor {
             screen.frame,
             screen.display_uuid_opt(),
         );
-    }
-
-    fn sync_native_admission(&mut self, changes: &mut Changes, wid: WindowId) {
-        let Some(window) = self.state.windows.window_mut(wid) else {
-            return;
-        };
-        let was_admitted = window.is_admitted();
-        window.native_transient = window.info.sys_id.is_some_and(|id| {
-            self.transient_focus
-                .windows
-                .get(&id)
-                .is_some_and(|t| t.native && t.pid == wid.pid)
-        }) && !crate::sys::app::is_ibkr_desktop_dialog(&window.info);
-        if was_admitted && !window.is_admitted() {
-            self.reconcile_layout_event(changes, LayoutEvent::WindowSuspended(wid));
-        }
     }
 
     fn observe_transient_lifecycle(&mut self, event: &Event) {
@@ -5399,9 +5144,8 @@ impl Reactor {
                 .windows
                 .window(wid)
                 .is_some_and(|window| window.manage_override == Some(false));
-            let (effects, removal) = window_discovery::assign_window(
-                &mut self.state,
-                &mut self.layout_manager,
+            let effects = self.assign_observed_window(
+                changes,
                 wid,
                 crate::model::virtual_workspace::WorkspaceContext {
                     space,
@@ -5410,9 +5154,6 @@ impl Reactor {
                 Some(&app_info),
                 reapply_effects,
             );
-            if let Some(event) = removal {
-                self.reconcile_layout_event(changes, event);
-            }
             if let Some(effects) = effects
                 && (reapply_effects
                     || was_ignored
