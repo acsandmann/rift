@@ -16,8 +16,7 @@ use crate::layout_engine::floating::FloatingFullscreenKind;
 use crate::layout_engine::systems::{
     Focus, GroupEdit, LayoutEdit, WindowChange, WindowLayoutConstraints, WindowQuery,
 };
-use crate::model::app_rules::{AppRuleOutcome, AppRuleResize, AppRuleWorkspaceFocus};
-use crate::model::broadcast::{BroadcastEvent, BroadcastSender, protocol_workspace_id};
+use crate::model::app_rules::{AppRuleFrame, AppRuleOutcome, AppRuleResize, AppRuleWorkspaceFocus};
 use crate::model::virtual_workspace::{VirtualWorkspaceId, WorkspaceContext, WorkspaceStore};
 use crate::model::{
     AppRuleEffects, AppRuleEngine, AppRuleResult, FloatingPositionStore, WindowRuleContext,
@@ -119,8 +118,6 @@ pub enum LayoutEvent {
     #[cfg(test)]
     #[allow(private_interfaces)]
     TestWindowsObserved(SpaceId, Vec<WindowLayoutInfo>, Option<AppInfo>),
-    /// The complete cross-space discovery batch for one application has been applied.
-    WindowDiscoveryCompleted(pid_t, Option<String>, Vec<SpaceId>),
     AppClosed(pid_t),
     WindowAdded(SpaceId, WindowId),
     WindowRemoved(WindowId),
@@ -164,6 +161,9 @@ pub struct EventResponse {
     /// Logical relocations needing native placement before arrangement.
     #[serde(default)]
     pub transferred_windows: Vec<WindowId>,
+    /// Space edited by a command whose target may differ from the command display.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub layout_space: Option<SpaceId>,
 }
 
 #[must_use]
@@ -240,7 +240,6 @@ pub struct LayoutEngine {
     window_layout_constraints: LayoutConstraints,
     workspaces: WorkspaceStore,
     layout_settings: LayoutSettings,
-    broadcast_tx: Option<BroadcastSender>,
     space_display_map: HashMap<SpaceId, Option<String>>,
     display_last_space: HashMap<String, SpaceId>,
     persistence: PersistenceState,
@@ -310,10 +309,9 @@ impl LayoutEngine {
         let Some(source) = windows.workspace_for_window(drop.window) else {
             return false;
         };
-        let Some(workspace) = self.workspaces.workspaces.get(source) else {
+        if !self.workspaces.workspaces.contains_key(source) {
             return false;
-        };
-        let source_space = workspace.space;
+        }
         let destination = drop.workspace;
         let Some(space) = self.workspaces.workspaces.get(destination).map(|ws| ws.space) else {
             return false;
@@ -413,7 +411,6 @@ impl LayoutEngine {
             self.store_floating_position(destination, drop.window, frame);
         }
         self.workspaces.set_last_focused_window(space, destination, Some(drop.window));
-        self.broadcast_relocation(windows, source_space, space);
         true
     }
 
@@ -826,6 +823,18 @@ impl LayoutEngine {
             .unwrap_or_default()
     }
 
+    pub(crate) fn focus_changes_geometry(&self, space: SpaceId) -> bool {
+        self.workspaces
+            .active_layout_for_space(space)
+            .is_some_and(|(workspace, layout)| {
+                let system = &self.workspaces[workspace].layout_system;
+                matches!(
+                    system,
+                    LayoutSystemKind::Scrolling(_) | LayoutSystemKind::Floating(_)
+                ) || system.parent_of_selection_is_stacked(layout)
+            })
+    }
+
     pub fn layout_specific_animate_settings(&self, space: SpaceId) -> Option<bool> {
         if let Some(ws_id) = self.workspaces.active_workspace(space) {
             match &self.workspaces[ws_id].layout_system {
@@ -928,8 +937,6 @@ impl LayoutEngine {
             return EventResponse::default();
         }
         self.update_active_floating_windows(window_store, space);
-        self.broadcast_workspace_changed(space);
-        self.broadcast_windows_changed(window_store, space);
 
         EventResponse {
             changed: true,
@@ -1523,9 +1530,6 @@ impl LayoutEngine {
         }
         self.window_layout_constraints.remove(&wid);
 
-        if let Some(space) = removal {
-            self.broadcast_windows_changed(window_store, space);
-        }
         removal.is_some()
     }
 
@@ -1697,12 +1701,12 @@ impl LayoutEngine {
         Some((workspace_id, self.workspaces[workspace_id].name.clone()))
     }
 
-    pub fn update_space_display(&mut self, space: SpaceId, display_uuid: Option<String>) {
-        // Runs on every arrangement; an unchanged mapping is a no-op.
+    pub fn update_space_display(&mut self, space: SpaceId, display_uuid: Option<&str>) {
+        // An unchanged topology mapping is a no-op.
         if display_uuid.is_none() && !self.space_display_map.contains_key(&space) {
             return;
         }
-        if let Some(uuid) = display_uuid.as_deref()
+        if let Some(uuid) = display_uuid
             && self.display_uuid_for_space(space) == Some(uuid)
             && self.display_last_space.get(uuid) == Some(&space)
             && !self
@@ -1721,14 +1725,14 @@ impl LayoutEngine {
                 .filter(|workspace| workspace.space == space)
             {
                 if workspace.preferred_display.is_none() {
-                    workspace.preferred_display = Some(uuid.clone());
+                    workspace.preferred_display = Some(uuid.to_owned());
                     workspace.home_space = Some(space);
                 }
             }
-            self.space_display_map.insert(space, Some(uuid.clone()));
+            self.space_display_map.insert(space, Some(uuid.to_owned()));
             // An unresolved saved Space still needs this display's evidence.
-            if !self.saved_space_is_unresolved(self.display_last_space.get(&uuid).copied()) {
-                self.display_last_space.insert(uuid, space);
+            if !self.saved_space_is_unresolved(self.display_last_space.get(uuid).copied()) {
+                self.display_last_space.insert(uuid.to_owned(), space);
             }
         } else {
             self.space_display_map.remove(&space);
@@ -1800,7 +1804,6 @@ impl LayoutEngine {
     pub fn new(
         virtual_workspace_config: &crate::common::config::VirtualWorkspaceSettings,
         layout_settings: &LayoutSettings,
-        broadcast_tx: Option<BroadcastSender>,
     ) -> Self {
         let workspaces = WorkspaceStore::new_with_config(virtual_workspace_config, layout_settings);
 
@@ -1812,7 +1815,6 @@ impl LayoutEngine {
             window_layout_constraints: LayoutConstraints::default(),
             workspaces,
             layout_settings: layout_settings.clone(),
-            broadcast_tx,
             space_display_map: HashMap::default(),
             display_last_space: HashMap::default(),
             persistence: PersistenceState::default(),
@@ -1828,12 +1830,9 @@ impl LayoutEngine {
         window: WindowId,
         space: SpaceId,
         was_floating: bool,
-        result: AppRuleResult,
+        effects: AppRuleEffects,
         app_rule_outcome: &mut AppRuleOutcome,
     ) -> Option<(WindowId, VirtualWorkspaceId)> {
-        let AppRuleResult::Managed(effects) = result else {
-            return None;
-        };
         let should_float = effects.should_float(was_floating);
         if should_float {
             self.floating.add_floating(window);
@@ -1842,11 +1841,10 @@ impl LayoutEngine {
             self.floating.remove_floating(window);
         }
 
-        if let Some(placement) = effects.floating_placement(window, space) {
-            app_rule_outcome.push_placement(placement);
-        } else if let Some(resize) = effects.tiled_resize(window, space, was_floating) {
-            app_rule_outcome.push_resize(resize);
-        }
+        app_rule_outcome.frame =
+            effects.floating_placement(window, space).map(AppRuleFrame::Place).or_else(|| {
+                effects.tiled_resize(window, space, was_floating).map(AppRuleFrame::Resize)
+            });
 
         effects.focus.then_some((window, effects.workspace_id))
     }
@@ -1906,7 +1904,7 @@ impl LayoutEngine {
     }
 
     /// Lifecycle additions restore participation, never logical ownership.
-    pub(crate) fn normalize_event(&self, windows: &WindowStore, event: LayoutEvent) -> LayoutEvent {
+    fn normalize_event(&self, windows: &WindowStore, event: LayoutEvent) -> LayoutEvent {
         match event {
             LayoutEvent::WindowAdded(space, window) => LayoutEvent::WindowAdded(
                 windows
@@ -1995,7 +1993,7 @@ impl LayoutEngine {
                     let next = self.handle_event_inner(
                         window_store,
                         LayoutEvent::WindowObserved(space, ResolvedWindow { info, effects }),
-                        app_rule_outcome,
+                        &mut AppRuleOutcome::default(),
                     );
                     response.changed |= next.changed;
                     response.raise_windows.extend(next.raise_windows);
@@ -2034,7 +2032,7 @@ impl LayoutEngine {
                     wid,
                     space,
                     was_floating,
-                    AppRuleResult::Managed(effects),
+                    effects,
                     app_rule_outcome,
                 );
 
@@ -2108,56 +2106,31 @@ impl LayoutEngine {
                 }
                 membership_changed |=
                     self.projected_space_in(target_workspace, wid) != projected_space_before;
-                if membership_changed {
-                    self.broadcast_windows_changed(window_store, space);
-                }
 
                 if let Some((window, workspace)) = focus_request {
                     if self.workspaces.active_workspace(space) != Some(workspace) {
-                        app_rule_outcome.set_workspace_focus(AppRuleWorkspaceFocus {
-                            window,
-                            space,
-                            workspace,
-                        });
-                        return EventResponse::default();
+                        app_rule_outcome.workspace_focus =
+                            Some(AppRuleWorkspaceFocus { window, space, workspace });
+                        return EventResponse {
+                            changed: membership_changed,
+                            ..EventResponse::default()
+                        };
                     }
                     self.commit_workspace_focus(window_store, space, Some(window));
                     return EventResponse {
-                        changed: app_rule_outcome.has_resizes() || membership_changed,
+                        changed: membership_changed,
                         raise_windows: vec![window],
                         focus_window: Some(window),
 
                         ..EventResponse::default()
                     };
                 }
-                if app_rule_outcome.has_resizes() || membership_changed {
+                if membership_changed {
                     return EventResponse {
                         changed: true,
                         ..EventResponse::default()
                     };
                 }
-            }
-            LayoutEvent::WindowDiscoveryCompleted(pid, app_id, discovered_spaces) => {
-                let ignored = self.discard_unmatched_candidates_for_app(
-                    pid,
-                    app_id.as_deref(),
-                    &discovered_spaces,
-                );
-                if ignored > 0 {
-                    tracing::info!(
-                        pid,
-                        native_spaces = discovered_spaces.len(),
-                        windows_ignored = ignored,
-                        "Ignored unmatched persisted windows after application discovery"
-                    );
-                    for space in discovered_spaces {
-                        self.broadcast_windows_changed(window_store, space);
-                    }
-                }
-                return EventResponse {
-                    changed: ignored > 0,
-                    ..EventResponse::default()
-                };
             }
             LayoutEvent::AppClosed(pid) => {
                 for (system, _) in self.native_layouts.values_mut() {
@@ -2192,9 +2165,10 @@ impl LayoutEngine {
             }
             LayoutEvent::WindowAdded(space, wid) => {
                 self.debug_tree(space);
-                if self.add_window_to_layout(window_store, space, wid) {
-                    self.broadcast_windows_changed(window_store, space);
-                }
+                return EventResponse {
+                    changed: self.add_window_to_layout(window_store, space, wid),
+                    ..EventResponse::default()
+                };
             }
             LayoutEvent::WindowRemoved(wid) => {
                 self.forget_native_layout_for_window_id(wid);
@@ -2651,6 +2625,10 @@ impl LayoutEngine {
                         has_display_neighbor: adjacent.is_some(),
                     })
                     .changed();
+                let mut response = EventResponse {
+                    changed,
+                    ..EventResponse::default()
+                };
                 if !changed && let Some((space, target_workspace, _)) = adjacent {
                     let mut windows = self.workspaces[workspace_id]
                         .layout_system
@@ -2663,16 +2641,18 @@ impl LayoutEngine {
                         windows.reverse();
                     }
                     for wid in windows {
-                        self.relocate_window_to_workspace(
+                        if self.relocate_window_to_workspace(
                             window_store,
                             workspace_id,
                             (space, target_workspace),
                             wid,
                             WindowRelocation::Directional(direction),
-                        );
+                        ) {
+                            response.transferred_windows.push(wid);
+                        }
                     }
                 }
-                EventResponse::default()
+                response
             }
             LayoutCommand::ToggleFullscreen | LayoutCommand::ToggleFullscreenWithinGaps => {
                 let within_gaps = matches!(command, LayoutCommand::ToggleFullscreenWithinGaps);
@@ -3232,9 +3212,10 @@ impl LayoutEngine {
                             ..Default::default()
                         }
                     };
+                    response.changed = true;
+                    response.layout_space = Some(op_space);
                     if target_space != op_space {
                         response.transferred_windows.push(focused_window);
-                        self.broadcast_relocation(window_store, op_space, target_space);
                     }
                     return response;
                 }
@@ -3245,9 +3226,9 @@ impl LayoutEngine {
                     if is_floating {
                         self.floating.add_active(op_space, focused_window.pid, focused_window);
                     }
-                    self.broadcast_windows_changed(window_store, op_space);
                     return EventResponse {
                         changed: true,
+                        layout_space: Some(op_space),
                         focus_window: Some(focused_window),
                         raise_windows: vec![],
 
@@ -3260,9 +3241,9 @@ impl LayoutEngine {
                     let remaining_windows =
                         self.workspaces.windows_in_active_workspace(window_store, op_space);
                     if let Some(&new_focus) = remaining_windows.first() {
-                        self.broadcast_windows_changed(window_store, op_space);
                         return EventResponse {
                             changed: true,
+                            layout_space: Some(op_space),
                             focus_window: Some(new_focus),
                             raise_windows: vec![],
 
@@ -3277,16 +3258,15 @@ impl LayoutEngine {
                     Some(focused_window),
                 );
 
-                self.broadcast_windows_changed(window_store, op_space);
                 EventResponse {
                     changed: true,
+                    layout_space: Some(op_space),
                     ..EventResponse::default()
                 }
             }
             LayoutCommand::CreateWorkspace => match self.workspaces.create_workspace(space, None) {
                 Ok(_workspace_id) => {
                     self.sync_scrolling_widths_for_space(space);
-                    self.broadcast_workspace_changed(space);
                     EventResponse {
                         changed: true,
                         ..EventResponse::default()
@@ -3324,11 +3304,10 @@ impl LayoutEngine {
                 } else {
                     Vec::new()
                 };
-                self.broadcast_workspace_changed(space);
-                self.broadcast_windows_changed(window_store, space);
 
                 EventResponse {
                     changed: true,
+                    layout_space: Some(space),
                     raise_windows,
                     focus_window: if is_active_workspace {
                         self.focused_window
@@ -3361,6 +3340,26 @@ impl LayoutEngine {
                 .and_then(|window| window.info.sys_id)
                 .and_then(crate::sys::window_server::window_tags);
         }
+        let mut decision = {
+            let window = window_store.window(window_id).map(|window| &window.info);
+            let context = WindowRuleContext {
+                window_title: context
+                    .window_title
+                    .or_else(|| window.map(|info| info.title.as_str())),
+                ax_role: context
+                    .ax_role
+                    .or_else(|| window.and_then(|info| info.ax_role.as_deref())),
+                ax_subrole: context
+                    .ax_subrole
+                    .or_else(|| window.and_then(|info| info.ax_subrole.as_deref())),
+                ..context
+            };
+            if reapply_workspace_rule {
+                self.app_rules.evaluate_for_title_change(context)
+            } else {
+                self.app_rules.evaluate(context)
+            }
+        };
         let workspace_context = workspace_context.into();
         let space = workspace_context.space;
         let observation =
@@ -3380,11 +3379,6 @@ impl LayoutEngine {
                 context.app_bundle_id,
             )
         });
-        let mut decision = if reapply_workspace_rule {
-            self.app_rules.evaluate_for_title_change(context)
-        } else {
-            self.app_rules.evaluate(context)
-        };
         // A persistence match is an explicit restoration of the user's previous
         // workspace. App rules still control admission and other effects, but
         // their default placement must not relocate the window during restore.
@@ -3474,7 +3468,6 @@ impl LayoutEngine {
         self.workspaces
             .set_last_focused_window(target_space, target_workspace_id, Some(window_id));
         self.focused_window = Some(window_id);
-        self.broadcast_relocation(window_store, source_space, target_space);
 
         EventResponse {
             changed: true,
@@ -3526,8 +3519,6 @@ impl LayoutEngine {
             let changed = self.workspaces.active_workspace(target_space) != Some(destination);
             self.workspaces.set_active_workspace(target_space, destination);
             self.update_active_floating_windows(window_store, target_space);
-            self.broadcast_workspace_changed(target_space);
-            self.broadcast_relocation(window_store, source_space, target_space);
             return EventResponse {
                 changed: changed || !moved.is_empty(),
                 workspace_space: Some(target_space),
@@ -3580,10 +3571,8 @@ impl LayoutEngine {
             self.ensure_workspace_layouts(source, source_size);
         }
         if reason == crate::model::virtual_workspace::WorkspaceTransferReason::Explicit {
-            self.update_space_display(
-                source,
-                self.space_display_map.get(&source).cloned().flatten(),
-            );
+            let display = self.display_uuid_for_space(source).map(str::to_owned);
+            self.update_space_display(source, display.as_deref());
         }
         self.sync_scrolling_widths_for_space(target);
         self.workspaces[id].ensure_layout_for_size(size);
@@ -3595,10 +3584,6 @@ impl LayoutEngine {
             }
         }
 
-        self.broadcast_workspace_changed(source);
-        self.broadcast_workspace_changed(target);
-        self.broadcast_windows_changed(windows, source);
-        self.broadcast_windows_changed(windows, target);
         EventResponse {
             changed: true,
             workspace_space: Some(target),
@@ -3841,55 +3826,6 @@ impl LayoutEngine {
             }
         }
     }
-
-    fn broadcast_workspace_changed(&self, space_id: SpaceId) {
-        if let Some(ref broadcast_tx) = self.broadcast_tx {
-            if let Some((active_workspace_id, active_workspace_name)) =
-                self.active_workspace_id_and_name(space_id)
-            {
-                let display_uuid = self.display_uuid_for_space(space_id).map(str::to_owned);
-                let _ = broadcast_tx.send(BroadcastEvent::WorkspaceChanged {
-                    workspace_id: protocol_workspace_id(active_workspace_id),
-                    workspace_name: active_workspace_name.clone(),
-                    space_id: space_id.get(),
-                    display_uuid,
-                });
-            }
-        }
-    }
-
-    fn broadcast_relocation(&self, windows: &WindowStore, source: SpaceId, destination: SpaceId) {
-        self.broadcast_windows_changed(windows, source);
-        if source != destination {
-            self.broadcast_windows_changed(windows, destination);
-        }
-    }
-
-    fn broadcast_windows_changed(&self, window_store: &WindowStore, space_id: SpaceId) {
-        if let Some(ref broadcast_tx) = self.broadcast_tx {
-            if let Some((workspace_id, workspace_name)) =
-                self.active_workspace_id_and_name(space_id)
-            {
-                let windows = self
-                    .workspaces
-                    .windows_in_active_workspace(window_store, space_id)
-                    .iter()
-                    .map(|window_id| window_id.to_debug_string())
-                    .collect();
-
-                let display_uuid = self.display_uuid_for_space(space_id).map(str::to_owned);
-                let event = BroadcastEvent::WindowsChanged {
-                    workspace_id: protocol_workspace_id(workspace_id),
-                    workspace_name,
-                    windows,
-                    space_id: space_id.get(),
-                    display_uuid,
-                };
-
-                let _ = broadcast_tx.send(event);
-            }
-        }
-    }
 }
 
 #[cfg(test)]
@@ -3914,8 +3850,7 @@ mod tests {
         ] {
             let mut settings = LayoutSettings::default();
             settings.mode = mode;
-            let mut engine =
-                LayoutEngine::new(&VirtualWorkspaceSettings::default(), &settings, None);
+            let mut engine = LayoutEngine::new(&VirtualWorkspaceSettings::default(), &settings);
             let mut store = WindowStore::default();
             let space = SpaceId::new(91);
             let _ = engine.handle_event(
@@ -3994,11 +3929,7 @@ mod tests {
     }
 
     fn test_engine() -> LayoutEngine {
-        LayoutEngine::new(
-            &VirtualWorkspaceSettings::default(),
-            &LayoutSettings::default(),
-            None,
-        )
+        LayoutEngine::new(&VirtualWorkspaceSettings::default(), &LayoutSettings::default())
     }
 
     fn window_layout_info(window_id: WindowId, current_size: CGSize) -> WindowLayoutInfo {
@@ -4208,8 +4139,7 @@ mod tests {
                     mode,
                     ..LayoutSettings::default()
                 };
-                let mut engine =
-                    LayoutEngine::new(&VirtualWorkspaceSettings::default(), &settings, None);
+                let mut engine = LayoutEngine::new(&VirtualWorkspaceSettings::default(), &settings);
                 let mut store = WindowStore::default();
                 let space = SpaceId::new(96);
                 let screen = CGRect::new(CGPoint::ZERO, CGSize::new(1200.0, 800.0));

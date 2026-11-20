@@ -811,6 +811,15 @@ impl Reactor {
         space_id_u64: Option<u64>,
         workspace_id: Option<usize>,
     ) -> Option<LayoutStateData> {
+        self.query_layout_state_with_frames(space_id_u64, workspace_id, None)
+    }
+
+    pub(super) fn query_layout_state_with_frames(
+        &self,
+        space_id_u64: Option<u64>,
+        workspace_id: Option<usize>,
+        committed_frames: Option<&[(WindowId, CGRect)]>,
+    ) -> Option<LayoutStateData> {
         let space_id = match space_id_u64 {
             Some(space_id) => SpaceId::new(space_id),
             None => self.default_query_space()?,
@@ -824,16 +833,22 @@ impl Reactor {
         let screen = self.space_state.screen_by_space(space_id)?;
         let display_uuid = screen.display_uuid_owned();
         let gaps = self.config.settings.layout.gaps.effective_for_display(display_uuid.as_deref());
-        let target_frames = self.layout_manager.layout_engine.calculate_workspace_layout(
-            space_id,
-            snapshot.workspace_id,
-            screen.frame,
-            &gaps,
-            self.config.settings.ui.stack_line.reserve(),
-        );
+        let calculated;
+        let target_frames = if let Some(frames) = committed_frames {
+            frames
+        } else {
+            calculated = self.layout_manager.layout_engine.calculate_workspace_layout(
+                space_id,
+                snapshot.workspace_id,
+                screen.frame,
+                &gaps,
+                self.config.settings.ui.stack_line.reserve(),
+            );
+            &calculated
+        };
         let target_frames: HashMap<WindowId, Rect> = target_frames
-            .into_iter()
-            .map(|(window, frame)| (window, protocol_rect(frame)))
+            .iter()
+            .map(|&(window, frame)| (window, protocol_rect(frame)))
             .collect();
         let tiling_area = crate::layout_engine::utils::compute_tiling_area(screen.frame, &gaps);
         attach_target_frames(&mut snapshot.container_tree, &target_frames);

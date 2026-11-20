@@ -61,14 +61,14 @@ fn fresh(
     settings: &VirtualWorkspaceSettings,
     spaces: &[(SpaceId, &str)],
 ) -> (LayoutEngine, WindowStore) {
-    let mut engine = LayoutEngine::new(settings, &LayoutSettings::default(), None);
+    let mut engine = LayoutEngine::new(settings, &LayoutSettings::default());
     let mut store = WindowStore::default();
     let all: Vec<_> = spaces.iter().map(|(space, _)| *space).collect();
     engine.workspaces.ensure_visible_spaces(&all, all.len(), |_| None);
     for (space, display) in spaces {
         let size = CGSize::new(1200.0, 800.0);
         let _ = engine.handle_event(&mut store, LayoutEvent::SpaceExposed(*space, size));
-        engine.update_space_display(*space, Some((*display).into()));
+        engine.update_space_display(*space, Some(*display));
     }
     (engine, store)
 }
@@ -101,7 +101,7 @@ fn session(settings: &VirtualWorkspaceSettings, spaces: &[(SpaceId, &str, &[Wind
 fn boot(settings: &VirtualWorkspaceSettings, saved: &str) -> (LayoutEngine, WindowStore) {
     let mut engine = LayoutEngine::deserialize_from_str(saved).unwrap();
     engine.await_topology();
-    engine.finish_loading(settings, &LayoutSettings::default(), None).unwrap();
+    engine.finish_loading(settings, &LayoutSettings::default()).unwrap();
     (engine, WindowStore::default())
 }
 
@@ -385,13 +385,13 @@ fn single_display_restore_keeps_the_surviving_desktops_catalog() {
     };
     let (old, current) = (SpaceId::new(801), SpaceId::new(802));
     for exposed in [true, false] {
-        let mut engine = LayoutEngine::new(&settings, &LayoutSettings::default(), None);
+        let mut engine = LayoutEngine::new(&settings, &LayoutSettings::default());
         engine.workspaces.ensure_visible_spaces(&[current], 1, |_| None);
         engine.workspaces.ensure_space_initialized(old);
         if exposed {
-            engine.update_space_display(old, Some("display".into()));
+            engine.update_space_display(old, Some("display"));
         }
-        engine.update_space_display(current, Some("display".into()));
+        engine.update_space_display(current, Some("display"));
         let expected = engine.workspaces.workspace_ids(current);
         let saved = engine.serialize_to_string(&WindowStore::default());
         let (mut engine, mut store) = boot(&settings, &saved);
