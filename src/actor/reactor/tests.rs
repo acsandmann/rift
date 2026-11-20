@@ -4454,7 +4454,7 @@ fn auto_workspace_switch_follows_activated_window_when_same_app_is_visible_elsew
     let retired = reactor.state.windows.inventory_retirements(
         activated.pid,
         [same_app_visible],
-        &HashSet::default(),
+        |_| false,
         |_, info| crate::model::window_store::InventoryWindowObservation {
             info,
             suitable: Some(true),
@@ -7247,6 +7247,7 @@ fn ax_destroyed_window_stops_consuming_space_until_positive_ax_return() {
         reactor.reconcile_discovered_windows(changes, window_discovery::EmitLayoutPayload {
             pid: window.pid,
             known_visible: &[],
+            resumed: &HashSet::default(),
             app_info: &None,
             window_spaces: [(window, (Some(space), Some(space)))].into_iter().collect(),
             active_spaces: vec![space],
@@ -7271,7 +7272,7 @@ fn ax_destroyed_window_stops_consuming_space_until_positive_ax_return() {
     let retired = reactor.state.windows.inventory_retirements(
         window.pid,
         [WindowId::new(1, 1), WindowId::new(1, 3)],
-        &HashSet::default(),
+        |_| false,
         |_, info| crate::model::window_store::InventoryWindowObservation {
             info,
             suitable: Some(true),
@@ -9222,11 +9223,7 @@ fn inventory_negatives_require_native_authority_even_when_hidden() {
                 let result = reactor.state.windows.inventory_retirements(
                     wid.pid,
                     [],
-                    &if inactive {
-                        [wid].into_iter().collect()
-                    } else {
-                        HashSet::default()
-                    },
+                    |_| inactive,
                     |_, _| InventoryWindowObservation {
                         info: None,
                         suitable,
@@ -9261,7 +9258,7 @@ fn inventory_observes_only_eligible_omitted_windows() {
     let retired = reactor.state.windows.inventory_retirements(
         1,
         [windows[0]],
-        &[windows[3]].into_iter().collect(),
+        |wid| wid == windows[3],
         |wsid, _| {
             observed.push(wsid);
             InventoryWindowObservation {
@@ -12677,8 +12674,13 @@ fn native_admission_veto_survives_manage_rule() {
     window.manage_override = Some(true);
     assert!(!window.is_admitted());
     assert!(reactor.test_workspace_for_window(space, wid).is_none());
+    reactor.handle_event(Event::WindowServerHidden(id));
+    assert!(reactor.test_workspace_for_window(space, wid).is_none());
     reactor.handle_event(Event::WindowServerAppeared(id, space, SpaceEventKind::User));
-    assert!(!reactor.state.windows.window(wid).unwrap().native_transient);
+    assert!(reactor.test_active_workspace_windows(space).contains(&wid));
+    let layouts = reactor.layout_calculations.len();
+    reactor.handle_event(Event::WindowServerAppeared(id, space, SpaceEventKind::User));
+    assert_eq!(reactor.layout_calculations.len(), layouts);
     apps.simulate_until_quiet(&mut reactor);
 }
 
@@ -12864,7 +12866,7 @@ fn native_fullscreen_restores_middle_window_exactly_across_notification_ordering
                 let retired = reactor.state.windows.inventory_retirements(
                     1,
                     [WindowId::new(1, 1), WindowId::new(1, 3)],
-                    &HashSet::default(),
+                    |_| false,
                     |_, info| InventoryWindowObservation {
                         info,
                         suitable: Some(true),

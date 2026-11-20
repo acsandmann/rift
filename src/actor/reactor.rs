@@ -1419,13 +1419,7 @@ impl Reactor {
         }
         match &event {
             Event::ApplicationTerminated(pid) | Event::ApplicationThreadTerminated(pid) => {
-                let windows = self
-                    .state
-                    .windows
-                    .iter_windows()
-                    .filter(|(wid, _)| wid.pid == *pid)
-                    .map(|(wid, _)| wid)
-                    .collect();
+                let windows = self.state.windows.window_ids_for_pid(*pid).collect();
                 self.cancel_window_presentations(windows);
             }
             Event::SpaceStateChanged(snapshot)
@@ -1556,19 +1550,8 @@ impl Reactor {
             Event::ApplicationThreadTerminated(pid) => {
                 self.forget_window_inventory(pid);
                 self.clear_menu_state_for_pid(pid);
-                let spaces = self
-                    .state
-                    .windows
-                    .window_ids_for_pid(pid)
-                    .filter_map(|window| self.assigned_space_for_window_id(window));
-                for space in spaces {
-                    changes.membership_for(Some(space));
-                    changes.arrange(Some(space), Presentation::Animated);
-                }
-                self.state.windows.remove_windows_for_app(pid);
+                self.retire_app_windows(changes, pid);
                 changes.refresh_menu |= self.app_manager.apps.remove(&pid).is_some();
-                self.reconcile_layout_event(changes, LayoutEvent::AppClosed(pid));
-                changes.refresh_notifications = true;
                 return Ok(());
             }
             Event::ApplicationActivated(pid, quiet) => {
@@ -1815,7 +1798,7 @@ impl Reactor {
                     self.transient_focus.visibility(wsid, true);
                 }
                 if let Some(wid) = self.state.windows.tracked_window_id(wsid) {
-                    self.sync_native_transient(changes, wid);
+                    self.reconcile_native_admission(changes, wid, false);
                 }
                 if matches!(kind, SpaceEventKind::User)
                     && let Some(space) = resolved
@@ -3142,7 +3125,7 @@ impl Reactor {
     ) {
         for info in ws_info {
             if let Some(wid) = self.state.windows.observe_native_window(info) {
-                self.refresh_native_window_admission(changes, wid);
+                self.reconcile_native_admission(changes, wid, true);
             }
         }
     }
@@ -4280,25 +4263,6 @@ impl Reactor {
         }) {
             self.request_space_snapshot();
         }
-        let inactive_windows = self
-            .state
-            .windows
-            .window_ids_for_pid(pid)
-            .filter(|wid| {
-                let native = self
-                    .state
-                    .windows
-                    .record(*wid)
-                    .and_then(|record| record.window_server_id())
-                    .and_then(|wsid| native_spaces[&wsid]);
-                native
-                    .or_else(|| self.assigned_space_for_window_id(*wid))
-                    .is_some_and(|space| !self.is_space_active(space))
-                    // Rift parks windows on non-active workspaces just offscreen.
-                    // An app inventory that omits one is not evidence that the window is gone.
-                    || self.hidden_assigned_space_for_window_id(*wid).is_some()
-            })
-            .collect();
         // A returned native identity protects its previous AX key until rekeying.
         let observed = known_visible.iter().copied().chain(new.iter().flat_map(|(wid, info)| {
             std::iter::once(*wid)
@@ -4315,7 +4279,16 @@ impl Reactor {
             self.state.windows.inventory_retirements(
                 pid,
                 observed,
-                &inactive_windows,
+                |wid| {
+                    self.state
+                        .windows
+                        .record(wid)
+                        .and_then(|record| record.window_server_id())
+                        .and_then(|wsid| native_spaces[&wsid])
+                        .or_else(|| self.assigned_space_for_window_id(wid))
+                        .is_some_and(|space| !self.is_space_active(space))
+                        || self.hidden_assigned_space_for_window_id(wid).is_some()
+                },
                 |wsid, cached_info| crate::model::window_store::InventoryWindowObservation {
                     info: cached_info.or_else(|| window_server::get_window(wsid)),
                     suitable: window_server::app_window_suitability(wsid),
@@ -4326,15 +4299,23 @@ impl Reactor {
         for wid in retired {
             self.retire_window(changes, wid);
         }
-        for (wid, info) in &new {
+        let mut new_window_ids = Vec::new();
+        let mut resumed = HashSet::default();
+        for (wid, info) in new {
             if let Some(id) = info.sys_id
                 && let Some(space) =
                     native_spaces[&id].or_else(|| self.best_space_for_frame(&info.frame))
             {
-                self.transient_focus.ax(id, wid.pid, info, space);
+                self.transient_focus.ax(id, wid.pid, &info, space);
+            }
+            let (new, returned) = self.observe_ax_window(changes, wid, info);
+            if new {
+                new_window_ids.push(wid);
+            }
+            if returned {
+                resumed.insert(wid);
             }
         }
-        let new_window_ids = self.observe_ax_inventory(changes, new);
         for (wsid, space) in fullscreen_observations {
             if self.is_fullscreen_space(space) {
                 let user = self
@@ -4364,7 +4345,6 @@ impl Reactor {
             .windows
             .window_ids_for_pid(pid)
             .filter(|wid| self.state.windows.contains_window(*wid))
-            .chain(known_visible.iter().copied().filter(|wid| wid.pid == pid))
             .map(|wid| {
                 let native = self
                     .state
@@ -4391,6 +4371,7 @@ impl Reactor {
         self.reconcile_discovered_windows(changes, window_discovery::EmitLayoutPayload {
             pid,
             known_visible: &known_visible,
+            resumed: &resumed,
             app_info: &app_info,
             window_spaces,
             active_spaces,
@@ -4806,11 +4787,13 @@ impl Reactor {
         {
             return;
         }
-        if let LayoutEvent::WindowSuspended(window) = event
-            && self.is_dragging_window(window)
-        {
-            self.drag_manager.forget_window(window);
-        }
+        let suspended = match event {
+            LayoutEvent::WindowSuspended(window) => {
+                self.drag_manager.forget_window(window);
+                Some(window)
+            }
+            _ => None,
+        };
         let transfer = if let LayoutEvent::WindowObserved(source, resolved) = &event {
             let window = resolved.info.window_id;
             let target =
@@ -4881,6 +4864,9 @@ impl Reactor {
         let layout_outcome =
             self.layout_manager.layout_engine.handle_event(&mut self.state.windows, event);
         let response = layout_outcome.response;
+        if let Some(window) = suspended.filter(|_| response.changed) {
+            self.cancel_window_presentations(vec![window]);
+        }
         if let Some((window, target)) = transfer {
             self.request_window_transfer(changes, window, target, None);
         }

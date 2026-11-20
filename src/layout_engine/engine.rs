@@ -1482,9 +1482,10 @@ impl LayoutEngine {
         {
             let projected = workspace
                 .active_layout()
-                .is_some_and(|layout| workspace.layout_system.contains_window(layout, wid))
+                .is_some_and(|layout| workspace.layout_system.contains_window(layout, wid));
+            let changed = (workspace.layout_system.set_window_participation(wid, false)
+                && projected)
                 || self.floating.is_active(workspace.space, wid);
-            let changed = workspace.layout_system.set_window_participation(wid, false) && projected;
             self.floating.remove_active_for_window(wid);
             if self.focused_window == Some(wid) {
                 self.focused_window = None;
@@ -1545,6 +1546,9 @@ impl LayoutEngine {
                 .active_layout()
                 .is_some_and(|layout| workspace.layout_system.contains_window(layout, wid));
             workspace.layout_system.update(WindowChange::Remove(wid));
+            if workspace.last_focused() == Some(wid) {
+                workspace.set_last_focused(None);
+            }
             return (projected || self.floating.is_active(workspace.space, wid))
                 .then_some(workspace.space);
         }
@@ -1555,6 +1559,9 @@ impl LayoutEngine {
         // every tree when its authoritative assignment is unavailable.
         for workspace in self.workspaces.workspaces.values_mut() {
             workspace.layout_system.update(WindowChange::RemoveAndRebalance(wid));
+            if workspace.last_focused() == Some(wid) {
+                workspace.set_last_focused(None);
+            }
         }
         active_space
     }
@@ -2150,6 +2157,9 @@ impl LayoutEngine {
                 }
                 for (_, ws) in self.workspaces.workspaces.iter_mut() {
                     ws.layout_system.update(WindowChange::CloseApp(pid));
+                    if ws.last_focused().is_some_and(|wid| wid.pid == pid) {
+                        ws.set_last_focused(None);
+                    }
                 }
                 self.evicted.retain(|wid, _| wid.pid != pid);
                 self.prune_native_layouts();

@@ -92,14 +92,14 @@ impl MainWindowTracker {
         None
     }
 
-    pub(super) fn retire_window(&mut self, wid: WindowId) {
+    pub(super) fn replace_window(&mut self, wid: WindowId, replacement: Option<WindowId>) {
         if self.window_server_focus == Some(wid) {
-            self.window_server_focus = None;
+            self.window_server_focus = replacement;
         }
         if let Some(app) = self.apps.get_mut(&wid.pid)
             && app.main_window == Some(wid)
         {
-            app.main_window = None;
+            app.main_window = replacement;
         }
     }
 
@@ -176,7 +176,7 @@ mod tests {
             Quiet::No,
         ));
 
-        tracker.retire_window(server_window);
+        tracker.replace_window(server_window, None);
         assert_eq!(tracker.main_window(), Some(ax_window));
     }
 

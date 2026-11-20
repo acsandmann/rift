@@ -542,7 +542,7 @@ impl WindowStore {
         &self,
         pid: i32,
         observed: impl IntoIterator<Item = WindowId>,
-        inactive: &HashSet<WindowId>,
+        mut inactive: impl FnMut(WindowId) -> bool,
         mut observe: impl FnMut(WindowServerId, Option<WindowServerInfo>) -> InventoryWindowObservation,
     ) -> Vec<WindowId> {
         let observed: HashSet<_> = observed.into_iter().collect();
@@ -550,9 +550,9 @@ impl WindowStore {
             .filter_map(|wid| {
                 let record = self.record(wid)?;
                 if observed.contains(&wid)
-                    || inactive.contains(&wid)
                     || record.state.as_ref()?.info.is_minimized
                     || self.native_fullscreen_record_for_window(wid).is_some()
+                    || inactive(wid)
                 {
                     return None;
                 }
@@ -1462,9 +1462,7 @@ impl WindowStore {
     }
 
     pub fn remove_windows_for_app(&mut self, pid: i32) {
-        let window_ids: Vec<_> =
-            self.app_windows.get(&pid).into_iter().flatten().copied().collect();
-        for window_id in window_ids {
+        for window_id in self.app_windows.remove(&pid).into_iter().flatten() {
             self.remove_window(window_id);
         }
 

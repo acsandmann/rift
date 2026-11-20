@@ -299,16 +299,33 @@ fn claim_follows_ax_rekey_and_release_accepts_the_original_id() {
 }
 
 #[test]
-fn destroying_a_claimed_window_ends_its_claim() {
-    let (mut apps, mut reactor, space) = settled(2);
-    reactor.claim_window(wid(1), OWNER, NONE).unwrap();
-    reactor.handle_event(Event::WindowDestroyed(wid(1)));
-    apps.simulate_until_quiet(&mut reactor);
-    assert!(reactor.state.windows.owner_claims(OWNER).is_empty());
-    assert_eq!(reactor.release_window(wid(1), OWNER), Err("Window not found"));
-    assert_eq!(layout_updates(&mut reactor, |r| r.release_claims(OWNER)), 0);
-    assert_eq!(tiled(&mut reactor, space), vec![wid(2)]);
-    reactor.state.windows.debug_assert_invariants();
+fn destroying_a_claimed_window_removes_its_preserved_layout() {
+    for floating in [false, true] {
+        let (mut reactor, window, space) = if floating {
+            let (reactor, window, space, _, _) = reactor_with_floating_window();
+            (reactor, window, space)
+        } else {
+            let (_, reactor, space) = settled(2);
+            (reactor, wid(1), space)
+        };
+        let workspace = reactor.state.windows.workspace_for_window(window).unwrap();
+        reactor.claim_window(window, OWNER, NONE).unwrap();
+        reactor.handle_event(Event::WindowClosed(reactor.test_window_server_id(window)));
+        reactor.release_claims(OWNER);
+
+        assert!(reactor.state.windows.record(window).is_none());
+        assert!(reactor.state.windows.owner_claims(OWNER).is_empty());
+        let engine = &mut reactor.layout_manager.layout_engine;
+        assert!(!engine.is_window_floating(window));
+        assert_eq!(engine.get_floating_position(workspace, window), None);
+        assert!(
+            !engine.workspaces_mut()[workspace]
+                .layout_system
+                .set_window_participation(window, true),
+            "a retired tiled slot cannot be reactivated"
+        );
+        assert!(!reactor.test_active_workspace_windows(space).contains(&window));
+    }
 }
 
 #[test]

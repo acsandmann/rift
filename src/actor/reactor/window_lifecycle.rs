@@ -1,7 +1,7 @@
 use tracing::{debug, warn};
 
 use super::{Changes, Presentation, Reactor, RefocusState, utils};
-use crate::actor::app::{AppInfo, WindowId, WindowInfo};
+use crate::actor::app::{AppInfo, WindowId, WindowInfo, pid_t};
 use crate::layout_engine::LayoutEvent;
 use crate::model::virtual_workspace::WorkspaceContext;
 use crate::model::window_store::NativeFullscreenTransition;
@@ -78,22 +78,74 @@ impl Reactor {
             return;
         };
         let wsid = record.window_server_id();
-        self.cancel_window_presentations(vec![wid]);
-        self.drag_manager.forget_window(wid);
-        // The layout still has the workspace index and focus history here.
+        // A claim may have changed destinations while its slot stayed in the old tree.
+        // With no active assignment the layout removes all retained projections.
+        if let Some(space) = self
+            .state
+            .windows
+            .remove_claim(wid)
+            .and_then(|claim| claim.workspace())
+            .and_then(|workspace| {
+                self.layout_manager.layout_engine.workspaces().workspace_space(workspace)
+            })
+        {
+            changes.membership_for(Some(space));
+            changes.refresh_menu = true;
+        }
+        self.discard_window_activity(wid, wsid);
         self.reconcile_layout_event(changes, LayoutEvent::WindowRemoved(wid));
         self.state.windows.restore_window_from_native_fullscreen(wid);
         self.state.windows.remove_window(wid);
-        self.main_window_tracker.retire_window(wid);
-        if let Some(wsid) = wsid {
+        self.main_window_tracker.replace_window(wid, None);
+        changes.refresh_notifications |= wsid.is_some();
+    }
+
+    fn discard_window_activity(&mut self, wid: WindowId, obsolete_native: Option<WindowServerId>) {
+        self.cancel_window_presentations(vec![wid]);
+        self.drag_manager.forget_window(wid);
+        if let Some(wsid) = obsolete_native {
+            self.transient_focus.windows.remove(&wsid);
             self.transaction_manager.remove_for_window(wsid);
-            changes.refresh_notifications = true;
         }
+    }
+
+    pub(super) fn replace_window_identity(
+        &mut self,
+        old: WindowId,
+        replacement: WindowId,
+        obsolete_native: Option<WindowServerId>,
+    ) {
+        self.discard_window_activity(old, obsolete_native);
+        if obsolete_native.is_none()
+            && let Some(id) =
+                self.state.windows.record(replacement).and_then(|r| r.window_server_id())
+        {
+            self.transaction_manager.clear_target_for_window(id);
+        }
+        self.layout_manager
+            .layout_engine
+            .transfer_persistent_window_identity(old, replacement);
+        self.main_window_tracker.replace_window(old, Some(replacement));
+    }
+
+    pub(super) fn retire_app_windows(&mut self, changes: &mut Changes, pid: pid_t) {
+        for wid in self.state.windows.window_ids_for_pid(pid) {
+            if let Some(space) = self.assigned_space_for_window_id(wid) {
+                changes.membership_for(Some(space));
+                changes.arrange(Some(space), Presentation::Animated);
+            }
+            if let Some(id) = self.state.windows.record(wid).and_then(|r| r.window_server_id()) {
+                self.transaction_manager.remove_for_window(id);
+            }
+            self.drag_manager.forget_window(wid);
+        }
+        self.state.windows.remove_windows_for_app(pid);
+        self.reconcile_layout_event(changes, LayoutEvent::AppClosed(pid));
+        changes.refresh_notifications = true;
     }
 
     pub(super) fn invalidate_window_identity(&mut self, changes: &mut Changes, wid: WindowId) {
         if self.state.windows.invalidate_ax_identity(wid) {
-            self.cancel_window_presentations(vec![wid]);
             self.reconcile_window_membership(changes, wid, None);
             changes.refresh_notifications = true;
         }
@@ -110,35 +162,26 @@ impl Reactor {
         if let Some(native) = native {
             self.state.windows.track_window_server_info(native);
         }
-        self.observe_ax_window(changes, wid, info, true);
+        self.observe_ax_window(changes, wid, info);
+        self.admit_ax_window(changes, wid);
         changes.refresh_notifications = true;
     }
 
-    pub(super) fn observe_ax_inventory(
-        &mut self,
-        changes: &mut Changes,
-        observed: Vec<(WindowId, WindowInfo)>,
-    ) -> Vec<WindowId> {
-        observed
-            .into_iter()
-            .filter_map(|(wid, info)| {
-                self.observe_ax_window(changes, wid, info, false).then_some(wid)
-            })
-            .collect()
-    }
-
-    fn observe_ax_window(
+    /// Update facts once. Inventory projects returns together with its other observations.
+    pub(super) fn observe_ax_window(
         &mut self,
         changes: &mut Changes,
         wid: WindowId,
         mut info: WindowInfo,
-        created: bool,
-    ) -> bool {
+    ) -> (bool, bool) {
+        if let Some(old) = self.state.windows.record(wid).and_then(|r| r.window_server_id())
+            && Some(old) != info.sys_id
+        {
+            self.discard_window_activity(wid, Some(old));
+        }
         let previous = self.state.windows.reconcile_ax_identity(wid, info.sys_id);
         if let Some(previous) = previous {
-            self.layout_manager
-                .layout_engine
-                .transfer_persistent_window_identity(previous, wid);
+            self.replace_window_identity(previous, wid, None);
         }
         let was_admitted = self.state.windows.is_admitted(wid);
         let ax_returned = self.state.windows.validate_ax_identity(wid);
@@ -167,17 +210,10 @@ impl Reactor {
         if minimized || restored {
             self.state.windows.set_minimized_visibility(wid, minimized);
         }
-        self.refresh_admission_facts(wid);
+        self.refresh_admission_facts(wid, true);
         let admitted = self.state.windows.is_admitted(wid);
         if minimized || (was_admitted && !admitted) {
             self.reconcile_window_membership(changes, wid, None);
-        } else if created
-            || restored
-            || ax_returned
-            || previous.is_some()
-            || (!new && admitted && !was_admitted)
-        {
-            self.admit_ax_window(changes, wid);
         }
         if admitted
             && geometry_changed
@@ -187,7 +223,14 @@ impl Reactor {
         {
             changes.arrange(Some(space), Presentation::Animated);
         }
-        new
+        (
+            new,
+            !minimized
+                && (restored
+                    || ax_returned
+                    || previous.is_some()
+                    || (!new && admitted && !was_admitted)),
+        )
     }
 
     pub(super) fn observe_window_minimization(
@@ -206,7 +249,7 @@ impl Reactor {
         }
         window.info.is_minimized = minimized;
         self.state.windows.set_minimized_visibility(wid, minimized);
-        self.refresh_admission_facts(wid);
+        self.refresh_admission_facts(wid, true);
         if minimized {
             self.reconcile_window_membership(changes, wid, None);
         } else {
@@ -217,20 +260,15 @@ impl Reactor {
             was_unavailable != self.state.windows.is_temporarily_unavailable(wid);
     }
 
-    fn refresh_admission_facts(&mut self, wid: WindowId) {
-        let Some(window) = self.state.windows.window(wid) else {
-            return;
-        };
-        let manageable = utils::compute_window_info_manageability(&window.info, |id| {
-            self.state.windows.get_window_server_info(id)
-        });
-        self.state.windows.window_mut(wid).unwrap().is_manageable = manageable;
-        self.update_native_transient(wid);
-    }
-
-    fn update_native_transient(&mut self, wid: WindowId) {
-        let Some(window) = self.state.windows.window_mut(wid) else {
-            return;
+    fn refresh_admission_facts(&mut self, wid: WindowId, refresh_heuristic: bool) {
+        let windows = &mut self.state.windows;
+        let Some(window) = windows.window(wid) else { return };
+        let manageable = if refresh_heuristic {
+            utils::compute_window_info_manageability(&window.info, |id| {
+                windows.get_window_server_info(id)
+            })
+        } else {
+            window.is_manageable
         };
         let transient = window.info.sys_id.is_some_and(|id| {
             self.transient_focus
@@ -238,26 +276,30 @@ impl Reactor {
                 .get(&id)
                 .is_some_and(|t| t.native && t.pid == wid.pid)
         }) && !crate::sys::app::is_ibkr_desktop_dialog(&window.info);
+        let window = windows.window_mut(wid).unwrap();
         window.native_transient = transient;
+        window.is_manageable = manageable;
     }
 
-    pub(super) fn sync_native_transient(&mut self, changes: &mut Changes, wid: WindowId) {
+    /// A classification change can suspend a window immediately. Readmission also
+    /// needs positive user-Space presence, supplied here or by native appearance.
+    pub(super) fn reconcile_native_admission(
+        &mut self,
+        changes: &mut Changes,
+        wid: WindowId,
+        refresh_heuristic: bool,
+    ) {
         let was_admitted = self.state.windows.is_admitted(wid);
-        self.update_native_transient(wid);
-        if was_admitted && !self.state.windows.is_admitted(wid) {
-            self.reconcile_window_membership(changes, wid, None);
-        }
-    }
-
-    pub(super) fn refresh_native_window_admission(&mut self, changes: &mut Changes, wid: WindowId) {
-        let was_admitted = self.state.windows.is_admitted(wid);
-        self.refresh_admission_facts(wid);
-        match (was_admitted, self.state.windows.is_admitted(wid)) {
-            (true, false) => self.reconcile_window_membership(changes, wid, None),
-            (false, true) if self.state.windows.is_visible_admitted(wid) => {
-                self.admit_ax_window(changes, wid);
+        self.refresh_admission_facts(wid, refresh_heuristic);
+        if was_admitted {
+            if !self.state.windows.is_admitted(wid) {
+                self.reconcile_window_membership(changes, wid, None);
             }
-            _ => {}
+        } else if refresh_heuristic
+            && self.state.windows.is_visible_admitted(wid)
+            && let Some(space) = self.state.windows.native_space(wid)
+        {
+            self.admit_native_presence(changes, wid, space);
         }
     }
 
@@ -273,38 +315,29 @@ impl Reactor {
         // them on the current display or their last frame is parked offscreen.
         let assigned_space = self.assigned_space_for_window_id(window);
         let active_space = assigned_space.or_else(|| {
-            self.state.windows.window(window).and_then(|state| {
-                self.best_space_for_window(&state.frame_monotonic, state.info.sys_id)
-                    .filter(|space| self.is_space_active(*space))
-                    .or_else(|| {
-                        state
-                            .info
-                            .sys_id
-                            .is_none()
-                            .then(|| self.workspace_command_space())
-                            .flatten()
-                    })
-            })
+            let state = self.state.windows.window(window)?;
+            self.best_space_for_window(&state.frame_monotonic, state.info.sys_id)
+                .filter(|space| self.is_space_active(*space))
+                .or_else(|| {
+                    state.info.sys_id.is_none().then(|| self.workspace_command_space()).flatten()
+                })
         });
-        if let Some(space) = active_space {
-            if let Some(state) = self.state.windows.window(window)
-                && let Some(id) = state.info.sys_id
-            {
-                self.transient_focus.ax(id, window.pid, &state.info, space);
-            }
-
-            if let Some(app_info) =
-                self.app_manager.apps.get(&window.pid).map(|app| app.info.clone())
-            {
-                self.process_windows_for_app_rules(changes, [window], app_info, false);
-            }
-            if self.state.windows.is_admitted(window) {
-                let space = self.assigned_space_for_window_id(window).unwrap_or(space);
-                self.reconcile_window_membership(changes, window, Some(space));
-                if assigned_space.is_none() && !self.is_dragging_window(window) {
-                    self.place_new_window_on_pointer_display(changes, window, space);
-                }
-            }
+        let Some(space) = active_space else { return };
+        if let Some(state) = self.state.windows.window(window)
+            && let Some(id) = state.info.sys_id
+        {
+            self.transient_focus.ax(id, window.pid, &state.info, space);
+        }
+        if let Some(app) = self.app_manager.apps.get(&window.pid) {
+            self.process_windows_for_app_rules(changes, [window], app.info.clone(), false);
+        }
+        let space = self.assigned_space_for_window_id(window).unwrap_or(space);
+        self.reconcile_window_membership(changes, window, Some(space));
+        if assigned_space.is_none()
+            && self.state.windows.is_admitted(window)
+            && !self.is_dragging_window(window)
+        {
+            self.place_new_window_on_pointer_display(changes, window, space);
         }
     }
 
@@ -382,6 +415,10 @@ impl Reactor {
             self.restore_native_fullscreen(changes, Some(wsid), window, Some(space));
             return;
         }
+        self.admit_native_presence(changes, window, space);
+    }
+
+    fn admit_native_presence(&mut self, changes: &mut Changes, window: WindowId, space: SpaceId) {
         // Appearance can restore participation, but is not an authoritative move.
         let owner = self.assigned_space_for_window_id(window).unwrap_or(space);
         if self.is_space_active(owner) && self.state.windows.is_visible_admitted(window) {
