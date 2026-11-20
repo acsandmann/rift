@@ -697,6 +697,7 @@ impl Apps {
                         None,
                     ));
                 }
+                Request::RaiseStackWindow { .. } => {}
                 Request::Raise(..) => todo!(),
                 Request::CloseWindow(..) => todo!(),
             }
