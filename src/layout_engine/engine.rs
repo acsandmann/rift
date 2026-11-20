@@ -1495,16 +1495,6 @@ impl LayoutEngine {
         false
     }
 
-    pub(crate) fn detach_window_from_workspace(
-        &mut self,
-        windows: &mut WindowStore,
-        window: WindowId,
-    ) {
-        self.remove_window_internal(windows, window, true);
-        self.workspaces.remove_window(windows, window);
-        self.floating_positions.remove_window(window);
-    }
-
     fn remove_window_internal(
         &mut self,
         window_store: &mut WindowStore,
@@ -3548,13 +3538,6 @@ impl LayoutEngine {
             display.as_deref(),
             crate::model::virtual_workspace::WorkspaceTransferReason::Explicit,
         )
-    }
-
-    /// Whether an app rule names the workspace for a window with this context.
-    pub fn app_rule_names_workspace(&self, context: crate::model::WindowRuleContext<'_>) -> bool {
-        self.app_rules
-            .evaluate(context)
-            .is_some_and(|decision| decision.workspace.is_some())
     }
 
     pub(crate) fn transfer_workspace(

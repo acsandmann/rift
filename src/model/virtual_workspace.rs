@@ -42,14 +42,19 @@ pub(crate) struct WorkspaceTarget {
 
 /// Start with contiguous blocks, then balance any uneven loads the pins forced
 /// into separate blocks. Pins are hard constraints throughout.
-fn distribute(displays: usize, pins: Vec<Option<usize>>, occupied: &[usize]) -> Vec<usize> {
+fn distribute(displays: usize, pins: Vec<Option<usize>>) -> Vec<usize> {
+    if pins.iter().all(Option::is_none) {
+        let (share, extra) = (pins.len() / displays, pins.len() % displays);
+        return (0..displays)
+            .flat_map(|owner| std::iter::repeat_n(owner, share + usize::from(owner < extra)))
+            .collect();
+    }
     let mut pinned = vec![0; displays];
     pins.iter().flatten().for_each(|&d| pinned[d] += 1);
-    let mut bare: Vec<_> = (0..displays).filter(|&d| pinned[d] == 0).collect();
-    // When there are too few workspaces for every display, preserve occupied displays first.
-    bare.sort_by_key(|&display| occupied.get(display).copied().unwrap_or_default() == 0);
-    bare.truncate(pins.iter().filter(|pin| pin.is_none()).count());
-    bare.sort_unstable();
+    let bare: Vec<_> = (0..displays)
+        .filter(|&d| pinned[d] == 0)
+        .take(pins.iter().filter(|pin| pin.is_none()).count())
+        .collect();
 
     // (number of runs, balance penalty, owners); tuple ordering supplies a stable
     // physical left-to-right tie break without reordering workspace identities.
@@ -107,7 +112,7 @@ fn distribute(displays: usize, pins: Vec<Option<usize>>, occupied: &[usize]) -> 
             best
         }
     }
-    let mut owners = Allocator {
+    let owners = Allocator {
         pins: &pins,
         pinned: &pinned,
         bare: &bare,
@@ -117,13 +122,18 @@ fn distribute(displays: usize, pins: Vec<Option<usize>>, occupied: &[usize]) -> 
     .expect("pins and available unassigned workspaces admit a distribution")
     .2;
 
+    balance_owners(displays, &pins, owners)
+}
+
+/// Each move strictly reduces squared load and moves only an unpinned workspace.
+fn balance_owners(displays: usize, pins: &[Option<usize>], mut owners: Vec<usize>) -> Vec<usize> {
     let mut counts = vec![0; displays];
     for &owner in &owners {
         counts[owner] += 1;
     }
-    let mut movable = counts.clone();
-    for (movable, pinned) in movable.iter_mut().zip(pinned) {
-        *movable -= pinned;
+    let mut movable = vec![0; displays];
+    for (&owner, pin) in owners.iter().zip(pins) {
+        movable[owner] += usize::from(pin.is_none());
     }
     loop {
         let Some(target) = (0..displays).min_by_key(|&display| counts[display]) else {
@@ -576,16 +586,14 @@ impl WorkspaceStore {
         if displays.len() < 2 {
             return Vec::new();
         }
-        let mut current_counts = vec![0; displays.len()];
         let mut visible = Vec::new();
-        let pins = self
+        let pins: Vec<_> = self
             .catalog()
             .enumerate()
             .filter_map(|(index, id)| {
                 let workspace = &self[id];
                 let owner = displays.iter().position(|&space| space == workspace.space)?;
                 visible.push((id, owner));
-                current_counts[owner] += 1;
                 let fixed = restored.contains(&id)
                     || workspace.display_manually_selected
                     || workspace.rule_overridden
@@ -596,15 +604,10 @@ impl WorkspaceStore {
                 Some(fixed.then_some(owner))
             })
             .collect();
-        let allocation = distribute(displays.len(), pins, &current_counts);
-        let mut target_counts = vec![0; displays.len()];
-        for &owner in &allocation {
-            target_counts[owner] += 1;
-        }
-        let imbalance = |counts: &[usize]| counts.iter().map(|count| count * count).sum::<usize>();
-        if imbalance(&target_counts) >= imbalance(&current_counts) {
-            return Vec::new();
-        }
+        // Start from current ownership so an improved load does not reshuffle
+        // workspaces just to recreate the initial contiguous distribution.
+        let owners = visible.iter().map(|&(_, owner)| owner).collect();
+        let allocation = balance_owners(displays.len(), &pins, owners);
         visible
             .into_iter()
             .zip(allocation)
@@ -1005,7 +1008,7 @@ impl WorkspaceStore {
                     spaces.iter().position(|candidate| *candidate == space)
                 })
                 .collect();
-            for (index, owner) in distribute(spaces.len(), pins, &[]).into_iter().enumerate() {
+            for (index, owner) in distribute(spaces.len(), pins).into_iter().enumerate() {
                 let space = spaces[owner];
                 let id = self.append_default_workspace(space);
                 if index == self.settings.default_workspace
@@ -1210,13 +1213,6 @@ impl WorkspaceStore {
         space: SpaceId,
         name: Option<String>,
     ) -> Result<VirtualWorkspaceId, WorkspaceError> {
-        if self.effective_mode() == WorkspaceMode::Global
-            && self.scope_ids(space).count() >= MAX_WORKSPACES
-        {
-            return Err(WorkspaceError::InconsistentState(
-                "Maximum global workspace limit reached".into(),
-            ));
-        }
         if self.effective_mode() == WorkspaceMode::PerDisplay {
             self.ensure_space_initialized(space);
         }
@@ -1242,8 +1238,7 @@ impl WorkspaceStore {
                 .expect("a bounded catalog always has an available generated name")
         };
 
-        let idx = self.scope_ids(space).count();
-        let mode = self.resolve_layout_mode_for_workspace(idx, &name);
+        let mode = self.resolve_layout_mode_for_workspace(count, &name);
 
         let id = self.insert_workspace(space, name, mode);
         self.repair_activation(space);
@@ -1689,6 +1684,7 @@ impl WorkspaceStore {
         let focus = focus && (workspace_changed || was_rule_floating != floating);
         Ok(AppRuleResult::Managed(AppRuleEffects {
             source_workspace: prior_assignment,
+            names_workspace: workspace.is_some(),
             workspace_id,
             floating,
             position,
@@ -2042,7 +2038,7 @@ mod tests {
                 pins[workspace - 1] = Some(display);
             }
             assert_eq!(
-                distribute(displays, pins, &[]),
+                distribute(displays, pins),
                 expected,
                 "{displays} displays {pinned:?}"
             );

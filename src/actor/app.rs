@@ -1866,11 +1866,17 @@ impl State {
                 if !self.is_current_window_element(wid, &elem) {
                     return;
                 }
-                if self.is_hidden || matches!(notif, AxNotificationKind::WindowMiniaturized) {
-                    self.send_event(Event::WindowMinimized(wid));
+                // A queued notification may predate a newer inventory observation.
+                let minimized = if self.is_hidden {
+                    Ok(true)
                 } else {
-                    self.send_event(Event::WindowDeminiaturized(wid));
-                }
+                    trace("minimized", &elem, || elem.minimized())
+                };
+                self.send_event(match minimized {
+                    Ok(true) => Event::WindowMinimized(wid),
+                    Ok(false) => Event::WindowDeminiaturized(wid),
+                    Err(_) => Event::WindowInventoryRefreshRequested(self.pid),
+                });
             }
             AxNotificationKind::TitleChanged => {
                 let Ok(wid) = self.wid_for_notification(&elem, hinted_wid) else {

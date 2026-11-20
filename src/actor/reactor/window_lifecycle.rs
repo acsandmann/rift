@@ -37,9 +37,6 @@ impl Reactor {
             }
             Err(error) => {
                 warn!(?wid, ?error, "Failed to assign window to workspace");
-                if let Some(window) = self.state.windows.window_mut(wid) {
-                    window.manage_override = None;
-                }
                 None
             }
         }
@@ -288,19 +285,17 @@ impl Reactor {
         changes: &mut Changes,
         wid: WindowId,
         refresh_heuristic: bool,
-    ) {
+        presence: Option<SpaceId>,
+    ) -> bool {
         let was_admitted = self.state.windows.is_admitted(wid);
         self.refresh_admission_facts(wid, refresh_heuristic);
-        if was_admitted {
-            if !self.state.windows.is_admitted(wid) {
-                self.reconcile_window_membership(changes, wid, None);
-            }
-        } else if refresh_heuristic
-            && self.state.windows.is_visible_admitted(wid)
-            && let Some(space) = self.state.windows.native_space(wid)
-        {
+        let admitted = self.state.windows.is_admitted(wid);
+        if was_admitted && !admitted {
+            self.reconcile_window_membership(changes, wid, None);
+        } else if !was_admitted && let Some(space) = presence {
             self.admit_native_presence(changes, wid, space);
         }
+        !was_admitted && admitted
     }
 
     fn admit_ax_window(&mut self, changes: &mut Changes, window: WindowId) {
@@ -328,16 +323,33 @@ impl Reactor {
         {
             self.transient_focus.ax(id, window.pid, &state.info, space);
         }
-        if let Some(app) = self.app_manager.apps.get(&window.pid) {
-            self.process_windows_for_app_rules(changes, [window], app.info.clone(), false);
-        }
-        let space = self.assigned_space_for_window_id(window).unwrap_or(space);
-        self.reconcile_window_membership(changes, window, Some(space));
-        if assigned_space.is_none()
-            && self.state.windows.is_admitted(window)
+        let app = self.app_manager.apps.get(&window.pid).map(|app| app.info.clone());
+        let visible: Vec<_> = self.iter_active_spaces().collect();
+        let Some(effects) = self.assign_observed_window(
+            changes,
+            window,
+            WorkspaceContext { space, visible: &visible },
+            app.as_ref(),
+            false,
+        ) else {
+            return;
+        };
+        let Some(state) = self.state.windows.window(window) else {
+            return;
+        };
+        self.reconcile_layout_event(
+            changes,
+            LayoutEvent::WindowObserved(space, crate::layout_engine::ResolvedWindow {
+                info: state.layout_info(window),
+                effects,
+            }),
+        );
+        if effects.source_workspace.is_none()
+            && !effects.names_workspace
             && !self.is_dragging_window(window)
+            && let Some(owner) = self.assigned_space_for_window_id(window)
         {
-            self.place_new_window_on_pointer_display(changes, window, space);
+            self.place_new_window_on_pointer_display(changes, window, owner);
         }
     }
 
