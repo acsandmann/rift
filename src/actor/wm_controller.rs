@@ -5,6 +5,7 @@
 use std::borrow::Cow;
 use std::collections::HashMap;
 use std::path::PathBuf;
+use std::time::{Duration, Instant};
 
 use dispatchr::queue;
 use dispatchr::time::Time;
@@ -48,11 +49,16 @@ use crate::{layout_engine as layout, sys};
 #[derive(Debug)]
 pub enum WmEvent {
     DiscoverRunningApps,
+    /// Match the actors to the running apps (`AppLifecycle::sync`): an app's retry fell due.
+    SyncApps,
     AppEventsRegistered,
     AppLaunch(pid_t, AppInfo, AppDiscoverySource),
     AppGloballyActivated(pid_t),
     AppGloballyDeactivated(pid_t),
     AppTerminated(pid_t),
+    /// An app terminated whose pid could not be read: each tracked app that is
+    /// no longer running is treated as terminated.
+    AppsMayHaveTerminated,
     AppExited(pid_t, AppThreadHandle),
     SpaceStateUpdated(ForwardedSpaceState, CoordinateConverter),
     PowerStateChanged(bool),
@@ -197,11 +203,43 @@ pub struct WmController {
     receiver: Receiver,
     sender: Sender,
     apps: AppLifecycle,
+    /// Whether `DiscoverRunningApps` has run: `sync_apps` attaches nothing
+    /// before it, since rift's app events must be registered first.
+    discovered: bool,
+    /// When `sync_apps` last ran.
+    synced_at: Option<Instant>,
 }
 
 // Reserve before spawning; retain the reservation until AX resources are dropped.
 #[derive(Default)]
-struct AppLifecycle(HashMap<pid_t, (AppThreadHandle, AppPhase)>);
+struct AppLifecycle {
+    actors: HashMap<pid_t, (AppThreadHandle, AppPhase)>,
+    /// Running apps whose actor gave up, and when to try each again.
+    retries: HashMap<pid_t, Retry>,
+}
+
+/// An app that refused AX requests while its actor started.
+#[derive(Clone, Copy, Debug)]
+struct Retry {
+    failures: u32,
+    at: Instant,
+}
+
+/// The wait before attaching an app again after its first failure; it doubles
+/// with each failure in a row, up to `RETRY_LONGEST`.
+const RETRY_FIRST: Duration = Duration::from_secs(2);
+const RETRY_LONGEST: Duration = Duration::from_secs(300);
+/// `sync_apps` runs at most this often, except when a retry falls due or an
+/// app may have terminated.
+const SYNC_INTERVAL: Duration = Duration::from_secs(1);
+
+/// What `AppLifecycle::sync` found to do.
+struct AppSync<T> {
+    /// Running apps with no actor to attach.
+    attach: Vec<(pid_t, T)>,
+    /// Actors whose app no longer runs, to terminate.
+    ended: Vec<pid_t>,
+}
 
 enum AppPhase {
     Active, // Includes initialization.
@@ -215,7 +253,7 @@ impl AppLifecycle {
         info: AppInfo,
         source: AppDiscoverySource,
     ) -> Option<(AppThreadHandle, actor::Receiver<Request>)> {
-        if let Some((_, phase)) = self.0.get_mut(&pid) {
+        if let Some((_, phase)) = self.actors.get_mut(&pid) {
             if let AppPhase::Stopping(relaunch) = phase {
                 let source = if relaunch
                     .as_ref()
@@ -230,12 +268,24 @@ impl AppLifecycle {
             return None;
         }
         let (handle, rx) = AppThreadHandle::channel();
-        self.0.insert(pid, (handle.clone(), AppPhase::Active));
+        self.actors.insert(pid, (handle.clone(), AppPhase::Active));
         Some((handle, rx))
     }
 
+    /// The active apps for which `running` is false.
+    fn ended(&self, running: impl Fn(pid_t) -> bool) -> Vec<pid_t> {
+        let mut pids: Vec<pid_t> = self
+            .actors
+            .iter()
+            .filter(|(pid, (_, phase))| matches!(phase, AppPhase::Active) && !running(**pid))
+            .map(|(pid, _)| *pid)
+            .collect();
+        pids.sort_unstable();
+        pids
+    }
+
     fn terminate(&mut self, pid: pid_t) {
-        if let Some((handle, phase)) = self.0.get_mut(&pid) {
+        if let Some((handle, phase)) = self.actors.get_mut(&pid) {
             *phase = AppPhase::Stopping(None);
             _ = handle.send(Request::Terminate);
         }
@@ -246,13 +296,67 @@ impl AppLifecycle {
         pid: pid_t,
         handle: &AppThreadHandle,
     ) -> Option<Option<(AppInfo, AppDiscoverySource)>> {
-        if !self.0.get(&pid)?.0.same_actor(handle) {
+        if !self.actors.get(&pid)?.0.same_actor(handle) {
             return None;
         }
-        Some(match self.0.remove(&pid)?.1 {
+        if handle.is_attached() {
+            // It attached; a later failure is a first failure.
+            self.retries.remove(&pid);
+        }
+        Some(match self.actors.remove(&pid)?.1 {
             AppPhase::Stopping(info) => info,
             _ => None,
         })
+    }
+
+    fn is_attached(&self, pid: pid_t) -> bool { self.actors.contains_key(&pid) }
+
+    /// Whether `handle` is `pid`'s actor and was not asked to stop: when it
+    /// exits, it gave up on its own.
+    fn is_active(&self, pid: pid_t, handle: &AppThreadHandle) -> bool {
+        self.actors
+            .get(&pid)
+            .is_some_and(|(h, phase)| h.same_actor(handle) && matches!(phase, AppPhase::Active))
+    }
+
+    /// Note that `pid`'s actor gave up at `now` while the app ran on, and
+    /// return how long to wait before attaching it again.
+    fn attach_failed(&mut self, pid: pid_t, now: Instant) -> Duration {
+        let failures = self.retries.get(&pid).map_or(0, |retry| retry.failures) + 1;
+        let delay = RETRY_FIRST.saturating_mul(1 << (failures - 1).min(16)).min(RETRY_LONGEST);
+        self.retries.insert(pid, Retry { failures, at: now + delay });
+        delay
+    }
+
+    /// Match the actors to the running apps. Rift learns of apps from one-time
+    /// events (a launch, a termination, a window appearing), and an app that
+    /// misses one stays as it was: an app whose actor gave up while the app
+    /// was busy keeps its windows wherever the last rift left them, unmanaged.
+    /// Comparing what runs with what is attached finds it, whatever was missed.
+    ///
+    /// `attachable` are the running apps an actor may attach to; those with
+    /// none are attached, apart from rift itself and apps whose retry is not
+    /// due at `now`. Actors whose process is not `running` have ended.
+    fn sync<T>(
+        &mut self,
+        attachable: Vec<(pid_t, T)>,
+        running: impl Fn(pid_t) -> bool,
+        own: pid_t,
+        now: Instant,
+    ) -> AppSync<T> {
+        self.retries.retain(|pid, _| running(*pid));
+        let attach = attachable
+            .into_iter()
+            .filter(|(pid, _)| {
+                *pid != own
+                    && !self.is_attached(*pid)
+                    && self.retries.get(pid).is_none_or(|retry| retry.at <= now)
+            })
+            .collect();
+        AppSync {
+            attach,
+            ended: self.ended(running),
+        }
     }
 }
 
@@ -282,6 +386,8 @@ impl WmController {
             receiver,
             sender: sender.clone(),
             apps: AppLifecycle::default(),
+            discovered: false,
+            synced_at: None,
         };
         (this, sender)
     }
@@ -300,6 +406,13 @@ impl WmController {
 
         use self::WmCommand::*;
         use self::WmEvent::*;
+
+        // Apps come and go, or the user turns to another app or Space: the
+        // moments to check that every running app has its actor.
+        let sync = matches!(
+            &event,
+            SpaceStateUpdated(..) | AppGloballyActivated(_) | AppGloballyDeactivated(_)
+        );
 
         match event {
             OverviewActivationTarget(target) => {
@@ -346,7 +459,9 @@ impl WmController {
                 for (pid, info) in sys::app::running_apps(None) {
                     self.new_app(pid, info, AppDiscoverySource::Process);
                 }
+                self.discovered = true;
             }
+            SyncApps => self.sync_apps(true),
             AppLaunch(pid, info, source) => {
                 self.new_app(pid, info, source);
             }
@@ -362,11 +477,21 @@ impl WmController {
                 sys::app::remove_application_observer(pid);
                 self.apps.terminate(pid);
             }
+            AppsMayHaveTerminated => self.sync_apps(true),
             AppExited(pid, handle) => {
+                let gave_up = self.apps.is_active(pid, &handle);
                 if let Some(relaunch) = self.apps.exited(pid, &handle) {
                     self.events_tx.send(Event::AppActorExited(pid, handle));
                     if let Some((info, source)) = relaunch {
                         self.new_app(pid, info, source);
+                    } else if gave_up && sys::app::is_running(pid) {
+                        let delay = self.apps.attach_failed(pid, Instant::now());
+                        warn!(pid, ?delay, "Could not attach a running app; trying again");
+                        queue::main().after_f_s(
+                            Time::new_after(Time::NOW, delay.as_nanos() as i64),
+                            (self.sender.clone(), WmEvent::SyncApps),
+                            |(sender, event)| sender.send(event),
+                        );
                     }
                 }
             }
@@ -492,11 +617,44 @@ impl WmController {
                 }
             }
         }
+        if sync {
+            self.sync_apps(false);
+        }
+    }
+
+    /// Match the actors to the running apps (`AppLifecycle::sync`). `now`
+    /// runs it whenever called; otherwise at most once per `SYNC_INTERVAL`.
+    fn sync_apps(&mut self, now: bool) {
+        let at = Instant::now();
+        if !now
+            && self
+                .synced_at
+                .is_some_and(|last| at.saturating_duration_since(last) < SYNC_INTERVAL)
+        {
+            return;
+        }
+        self.synced_at = Some(at);
+        let attachable = if self.discovered {
+            sys::app::regular_apps().collect()
+        } else {
+            Vec::new()
+        };
+        let own = std::process::id() as pid_t;
+        let sync = self.apps.sync(attachable, sys::app::is_running, own, at);
+        for pid in sync.ended {
+            debug!(?pid, "App no longer running; terminating its actor");
+            sys::app::remove_application_observer(pid);
+            self.apps.terminate(pid);
+        }
+        for (pid, info) in sync.attach {
+            info!(pid, bundle = ?info.bundle_id, "Attaching a running app that has no actor");
+            self.new_app(pid, info, AppDiscoverySource::Process);
+        }
     }
 
     /// Attaching fails while an app refuses AX requests; retry when the user activates it.
     fn retry_unattached_app(&mut self, pid: pid_t) {
-        if self.apps.0.contains_key(&pid) {
+        if self.apps.is_attached(pid) {
             return;
         }
         let Some(running_app) = NSRunningApplication::with_process_id(pid) else {
@@ -650,6 +808,114 @@ mod app_lifecycle_tests {
         ] {
             assert_eq!(should_spawn_app(policy, source), expected);
         }
+    }
+
+    #[test]
+    fn only_active_apps_that_stopped_running_have_ended() {
+        let mut apps = AppLifecycle::default();
+        let info = || AppInfo {
+            bundle_id: None,
+            localized_name: None,
+        };
+        for pid in [1, 2, 3] {
+            let _ = apps.reserve(pid, info(), AppDiscoverySource::Process);
+        }
+        apps.terminate(3);
+        assert_eq!(apps.ended(|pid| pid == 1), vec![2], "3 is stopping already");
+        assert!(apps.ended(|_| true).is_empty());
+    }
+
+    fn info() -> AppInfo {
+        AppInfo {
+            bundle_id: None,
+            localized_name: None,
+        }
+    }
+
+    /// What `sync` attaches when `running` run, all of them attachable.
+    fn attach(apps: &mut AppLifecycle, running: &[pid_t], own: pid_t, now: Instant) -> Vec<pid_t> {
+        let attachable = running.iter().map(|&pid| (pid, ())).collect();
+        let sync = apps.sync(attachable, |pid| running.contains(&pid), own, now);
+        sync.attach.into_iter().map(|(pid, _)| pid).collect()
+    }
+
+    /// An app whose actor gave up while the app kept running is attached
+    /// again without being activated.
+    #[test]
+    fn an_app_that_could_not_be_attached_is_attached_again_without_activation() {
+        let own = 1;
+        let mut apps = AppLifecycle::default();
+        let start = Instant::now();
+
+        let (handle, _rx) = apps.reserve(42, info(), AppDiscoverySource::Process).unwrap();
+        assert!(
+            apps.is_active(42, &handle),
+            "it gave up; it was not asked to stop"
+        );
+        assert!(apps.exited(42, &handle).is_some());
+        let first = apps.attach_failed(42, start);
+
+        assert!(
+            attach(&mut apps, &[own, 42], own, start + first / 2).is_empty(),
+            "not before its retry is due"
+        );
+        assert_eq!(attach(&mut apps, &[own, 42], own, start + first), vec![42]);
+
+        // Still busy: it waits longer before the next attempt.
+        let retried = start + first;
+        let (handle, _rx) = apps.reserve(42, info(), AppDiscoverySource::Process).unwrap();
+        assert!(apps.exited(42, &handle).is_some());
+        let second = apps.attach_failed(42, retried);
+        assert!(second > first);
+        assert!(attach(&mut apps, &[42], own, retried + first).is_empty());
+
+        // Attached at last: nothing more to do for it.
+        let (handle, _rx) = apps.reserve(42, info(), AppDiscoverySource::Process).unwrap();
+        handle.mark_attached();
+        assert!(attach(&mut apps, &[42], own, retried + second).is_empty());
+
+        // Should that actor end while the app runs, it starts over from the first wait.
+        assert!(apps.exited(42, &handle).is_some());
+        assert_eq!(apps.attach_failed(42, retried + second), first);
+    }
+
+    #[test]
+    fn running_apps_with_no_actor_are_attached() {
+        let own = 1;
+        let mut apps = AppLifecycle::default();
+        let now = Instant::now();
+        // 7's launch was missed; 8 has its actor; rift itself is never attached.
+        let _ = apps.reserve(8, info(), AppDiscoverySource::Process);
+        assert_eq!(attach(&mut apps, &[own, 7, 8], own, now), vec![7]);
+
+        // An app asked to stop did not fail to attach.
+        let (handle, _rx) = apps.reserve(9, info(), AppDiscoverySource::Process).unwrap();
+        apps.terminate(9);
+        assert!(!apps.is_active(9, &handle));
+
+        // A failed app that quit is forgotten, so its pid starts fresh if reused.
+        let (handle, _rx) = apps.reserve(10, info(), AppDiscoverySource::Process).unwrap();
+        assert!(apps.exited(10, &handle).is_some());
+        apps.attach_failed(10, now);
+        assert!(attach(&mut apps, &[], own, now).is_empty());
+        assert_eq!(attach(&mut apps, &[10], own, now), vec![10]);
+    }
+
+    #[test]
+    fn sync_ends_actors_whose_app_quit_and_attaches_only_what_may_be() {
+        let own = 1;
+        let mut apps = AppLifecycle::default();
+        let now = Instant::now();
+        let _ = apps.reserve(2, info(), AppDiscoverySource::Process);
+        let _ = apps.reserve(3, info(), AppDiscoverySource::WindowServer);
+        // 2 quit; 3 runs though not attachable (an accessory app found by its
+        // window); 4 runs and may be attached.
+        let sync = apps.sync(vec![(4, ())], |pid| pid == 3 || pid == 4, own, now);
+        assert_eq!(sync.ended, vec![2]);
+        assert_eq!(
+            sync.attach.into_iter().map(|(pid, _)| pid).collect::<Vec<_>>(),
+            vec![4]
+        );
     }
 
     #[test]
