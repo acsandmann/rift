@@ -194,6 +194,9 @@ pub struct VirtualWorkspace {
     pub preferred_display: Option<String>,
     #[serde(default)]
     pub home_space: Option<SpaceId>,
+    /// Explicit display moves keep their destination during automatic balancing.
+    #[serde(default)]
+    pub(crate) display_manually_selected: bool,
     /// An explicit move away from a display rule suspends that rule until the
     /// workspace returns to the rule's display or the rule is (re)activated.
     #[serde(default)]
@@ -219,6 +222,7 @@ impl VirtualWorkspace {
             space,
             preferred_display: None,
             home_space: None,
+            display_manually_selected: false,
             rule_overridden: false,
             last_focused: None,
             layout_system,
@@ -563,13 +567,13 @@ impl WorkspaceStore {
         self.order.iter().copied()
     }
 
-    /// Balance the visible catalog when displays arrive. Keep workspaces already
-    /// restored to those displays and respect display rules, including offline pins.
-    pub(crate) fn plan_display_arrival(
+    /// Balance visible workspaces around explicit placements and display rules.
+    pub(crate) fn plan_display_balance(
         &self,
-        displays: &[(SpaceId, bool)],
+        displays: &[SpaceId],
+        restored: &HashSet<VirtualWorkspaceId>,
     ) -> Vec<(VirtualWorkspaceId, SpaceId)> {
-        if displays.len() < 2 || !displays.iter().any(|&(_, arrived)| arrived) {
+        if displays.len() < 2 {
             return Vec::new();
         }
         let mut current_counts = vec![0; displays.len()];
@@ -579,10 +583,12 @@ impl WorkspaceStore {
             .enumerate()
             .filter_map(|(index, id)| {
                 let workspace = &self[id];
-                let owner = displays.iter().position(|&(space, _)| space == workspace.space)?;
+                let owner = displays.iter().position(|&space| space == workspace.space)?;
                 visible.push((id, owner));
                 current_counts[owner] += 1;
-                let fixed = displays[owner].1
+                let fixed = restored.contains(&id)
+                    || workspace.display_manually_selected
+                    || workspace.rule_overridden
                     || workspace.home_space.is_some_and(|home| home != workspace.space)
                     || self
                         .matching_rules(index, &workspace.name)
@@ -603,7 +609,7 @@ impl WorkspaceStore {
             .into_iter()
             .zip(allocation)
             .filter_map(|((id, source), target)| {
-                (source != target).then_some((id, displays[target].0))
+                (source != target).then_some((id, displays[target]))
             })
             .collect()
     }
@@ -632,8 +638,10 @@ impl WorkspaceStore {
                 return false;
             }
             let workspace = &mut self[id];
-            let changed = workspace.home_space != Some(target)
+            let changed = !workspace.display_manually_selected
+                || workspace.home_space != Some(target)
                 || workspace.preferred_display.as_deref() != display;
+            workspace.display_manually_selected = true;
             workspace.home_space = Some(target);
             workspace.preferred_display = display.map(str::to_owned);
             return changed;
@@ -655,6 +663,7 @@ impl WorkspaceStore {
         workspace.space = target;
         // Remembered presentation becomes active again only when ownership returns.
         if reason == WorkspaceTransferReason::Explicit {
+            self[id].display_manually_selected = true;
             self.set_active_workspace(target, id);
         } else if self.active_workspace(target).is_none()
             || self

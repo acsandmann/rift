@@ -10618,6 +10618,9 @@ fn shared_destroyed_desktop_evacuates_even_when_its_display_stays_connected() {
         display: Some(vec!["test-display-1".into()]),
     }];
     reactor.handle_event(Event::ConfigUpdated(config));
+    let balanced = reactor.layout_manager.layout_engine.workspaces();
+    assert_eq!(balanced.workspace_ids(a), [ids[1], ids[3]]);
+    assert_eq!(balanced.workspace_ids(b), [ids[0], ids[2]]);
     let mut survivor = reactor.space_state.screens[1].clone();
     // Clamshell transition from the log: the LG stays connected but borrows the
     // built-in desktop, and its original native desktop is destroyed.
@@ -10654,7 +10657,7 @@ fn shared_destroyed_desktop_evacuates_even_when_its_display_stays_connected() {
     reactor.handle_event(Event::SpaceStateChanged(snapshot));
     apps.simulate_until_quiet(&mut reactor);
     let workspaces = reactor.layout_manager.layout_engine.workspaces();
-    for &id in &[ids[0], ids[2], ids[3]] {
+    for &id in &[ids[0], ids[2]] {
         assert_eq!(
             workspaces[id].space, replacement,
             "{id:?} returns to its home display"
@@ -10662,7 +10665,8 @@ fn shared_destroyed_desktop_evacuates_even_when_its_display_stays_connected() {
     }
     assert_eq!(workspaces.active_workspace(replacement), Some(ids[0]));
     assert_eq!(
-        workspaces[ids[1]].space, a,
+        workspaces.workspace_ids(a),
+        [ids[1], ids[3]],
         "the built-in desktop is dormant, not destroyed"
     );
     assert_eq!(workspaces.catalog().count(), 4);
@@ -11534,6 +11538,62 @@ fn connecting_displays_balances_the_existing_global_catalog() {
 }
 
 #[test]
+fn display_rules_balance_an_existing_eight_to_two_split() {
+    use crate::common::config::WorkspaceLayoutRule;
+
+    let (lg, other) = (SpaceId::new(1), SpaceId::new(2));
+    let mut screens =
+        make_screen_snapshots(vec![shared_left(), shared_right()], vec![Some(lg), Some(other)]);
+    screens[0].name = Some("LG UltraFine".into());
+    let topology = || Event::SpaceStateChanged(forwarded_space_state(screens.clone()));
+    let names = ["B", "C", "E", "T", "X", "S", "M", "N", "G", "V"];
+    let pinned = |workspace, display: &str| WorkspaceLayoutRule {
+        workspace,
+        layout: None,
+        display: Some(vec![display.into()]),
+    };
+    let mut initial = shared_settings();
+    initial.default_workspace_count = names.len();
+    initial.workspace_names = names.map(str::to_owned).to_vec();
+    let desired = vec![
+        pinned(WorkspaceSelector::Name("N".into()), "LG UltraFine"),
+        pinned(WorkspaceSelector::Index(0), &screens[0].display_uuid),
+        pinned(WorkspaceSelector::Index(5), &screens[1].display_uuid),
+        pinned(WorkspaceSelector::Index(1), &screens[1].display_uuid),
+    ];
+    initial.workspace_rules = desired.clone();
+    initial.workspace_rules.extend(
+        [2, 3, 4, 6, 8, 9]
+            .map(|index| pinned(WorkspaceSelector::Index(index), &screens[0].display_uuid)),
+    );
+    for restart in [false, true] {
+        let mut reactor = test_reactor_with_workspace_settings(&initial);
+        reactor.config.virtual_workspaces = initial.clone();
+        reactor.handle_event(topology());
+        let engine = &reactor.layout_manager.layout_engine;
+        assert_eq!(engine.workspaces().workspace_ids(lg).len(), 8);
+        let original: Vec<_> = engine.workspaces().catalog().collect();
+        let mut config = reactor.config.clone();
+        config.virtual_workspaces.workspace_rules = desired.clone();
+        if restart {
+            let saved = engine.serialize_to_string(&reactor.state.windows);
+            reactor = test_reactor_with_workspace_settings(&config.virtual_workspaces);
+            reactor.layout_manager.layout_engine =
+                LayoutEngine::deserialize_from_str(&saved).unwrap();
+        }
+        reactor.handle_event(Event::ConfigUpdated(config));
+        reactor.handle_event(topology());
+        let store = reactor.layout_manager.layout_engine.workspaces();
+        assert_eq!(store.catalog().collect::<Vec<_>>(), original);
+        assert_eq!(store.workspace_ids(lg).len(), 5, "restart: {restart}");
+        assert_eq!(store.workspace_ids(other).len(), 5);
+        for (index, owner) in [(0, lg), (1, other), (5, other), (7, lg)] {
+            assert_eq!(store[original[index]].space, owner);
+        }
+    }
+}
+
+#[test]
 fn connecting_display_applies_named_pin_after_disambiguating_native_workspaces() {
     let mut settings = shared_settings();
     settings.default_workspace_count = 1;
@@ -11636,7 +11696,7 @@ fn named_pin_reload_moves_immediately_without_creating_workspaces() {
                 reactor.layout_manager.layout_engine.workspaces()[ids[1]].space,
                 target
             );
-            // Repeated exposure must leave the vacated display empty.
+            // Repeated exposure must retain the workspace moved to balance the displays.
             reactor.handle_event(space_state_event_with(
                 vec![shared_left(), shared_right()],
                 vec![Some(a), Some(b)],
@@ -11644,7 +11704,7 @@ fn named_pin_reload_moves_immediately_without_creating_workspaces() {
             ));
             if target == a {
                 let workspaces = reactor.layout_manager.layout_engine.workspaces_mut();
-                assert_eq!(workspaces.active_workspace(b), None);
+                assert_eq!(workspaces.active_workspace(b), Some(ids[0]));
                 if create_scratch {
                     workspaces.create_workspace(b, Some("scratch".into())).unwrap();
                 }

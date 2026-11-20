@@ -2334,23 +2334,31 @@ impl Reactor {
                     );
                     return Ok(());
                 }
-                // Namespace migration preserves ownership; only pins that became
-                // effective (including on entering global mode) relocate.
+                // Apply changed pins before balancing their remaining workspaces.
                 let pins = |engine: &LayoutEngine| -> Vec<_> {
                     let pins = engine.workspaces().rule_displays();
                     pins.map(|(id, display)| (id, display.to_owned())).collect()
                 };
                 let before = pins(&self.layout_manager.layout_engine);
                 self.apply_config(changes, new_cfg)?;
-                let activated: HashSet<_> = pins(&self.layout_manager.layout_engine)
-                    .into_iter()
-                    .filter(|pin| !before.contains(pin))
-                    .map(|(id, _)| id)
-                    .collect();
-                if !activated.is_empty() {
+                let after = pins(&self.layout_manager.layout_engine);
+                if before != after {
+                    let workspaces = self.layout_manager.layout_engine.workspaces();
+                    let visible_pin_changed = before.iter().chain(&after).any(|pin| {
+                        before.contains(pin) != after.contains(pin)
+                            && workspaces
+                                .workspace_space(pin.0)
+                                .is_some_and(|space| self.active_spaces.contains(&space))
+                    });
+                    let activated: HashSet<_> = after
+                        .into_iter()
+                        .filter(|pin| !before.contains(pin))
+                        .map(|(id, _)| id)
+                        .collect();
                     let workspaces = self.layout_manager.layout_engine.workspaces_mut();
                     for &id in &activated {
                         workspaces[id].rule_overridden = false;
+                        workspaces[id].display_manually_selected = false;
                     }
                     self.reconcile_workspace_placements(
                         changes,
@@ -2361,6 +2369,9 @@ impl Reactor {
                         &[],
                         &[],
                     );
+                    if visible_pin_changed && !self.refreshes_blocked() {
+                        self.balance_display_workspaces(changes, &[], &HashSet::default());
+                    }
                 }
                 return Ok(());
             }
@@ -3909,8 +3920,20 @@ impl Reactor {
                 })
                 .collect()
         };
+        // A native desktop switch on a connected display keeps its own catalog.
+        let display_available =
+            self.space_state.screens.iter().filter(|screen| live(screen)).any(|screen| {
+                !previous_screens.iter().any(|old| {
+                    old.display_uuid == screen.display_uuid
+                        && (old.space.is_some()
+                            || screen
+                                .space
+                                .is_some_and(|space| self.last_screen_frames.contains_key(&space)))
+                })
+            });
         // Commit ownership and remembered presentation together, then dispatch
         // native effects through the same boundary as commands and app rules.
+        let mut restored = HashSet::default();
         for (id, rehome, placement) in placements {
             if let Some(target) = rehome {
                 let workspaces = self.layout_manager.layout_engine.workspaces_mut();
@@ -3933,32 +3956,14 @@ impl Reactor {
                 }
             }
             let Some((target, reason)) = placement else { continue };
+            if reason == WorkspaceTransferReason::Restoration {
+                restored.insert(id);
+            }
             let target = self.space_state.screens[target].space.unwrap();
             self.place_workspace(changes, id, target, previous_screens, reason);
         }
-        if pins_only.is_none() && self.space_state.screens.len() > 1 {
-            let displays: Vec<_> = self
-                .screens_in_physical_order()
-                .into_iter()
-                .filter_map(|screen| {
-                    let space = screen.space.filter(|space| self.active_spaces.contains(space))?;
-                    // A native desktop switch on a connected display keeps its own catalog.
-                    let arrived = !previous_screens
-                        .iter()
-                        .any(|old| old.display_uuid == screen.display_uuid && old.space.is_some());
-                    Some((space, arrived))
-                })
-                .collect();
-            let workspaces = self.layout_manager.layout_engine.workspaces();
-            for (id, target) in workspaces.plan_display_arrival(&displays) {
-                self.place_workspace(
-                    changes,
-                    id,
-                    target,
-                    previous_screens,
-                    WorkspaceTransferReason::DisplayArrival,
-                );
-            }
+        if pins_only.is_none() && display_available {
+            self.balance_display_workspaces(changes, previous_screens, &restored);
         }
         // The topology handler exposes displays after restoration.
         // A config-only pin change has no topology finalization, so expose it here.
@@ -3999,6 +4004,29 @@ impl Reactor {
                 // Unknown membership preserves intent without issuing a speculative write.
                 self.state.windows.request_transfer(window, frame, target, false);
             }
+        }
+    }
+
+    fn balance_display_workspaces(
+        &mut self,
+        changes: &mut Changes,
+        previous_screens: &[ScreenInfo],
+        restored: &HashSet<crate::model::VirtualWorkspaceId>,
+    ) {
+        let displays: Vec<_> = self
+            .screens_in_physical_order()
+            .into_iter()
+            .filter_map(|screen| screen.space.filter(|space| self.active_spaces.contains(space)))
+            .collect();
+        let workspaces = self.layout_manager.layout_engine.workspaces();
+        for (id, target) in workspaces.plan_display_balance(&displays, restored) {
+            self.place_workspace(
+                changes,
+                id,
+                target,
+                previous_screens,
+                crate::model::virtual_workspace::WorkspaceTransferReason::DisplayArrival,
+            );
         }
     }
 
