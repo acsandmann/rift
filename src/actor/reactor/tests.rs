@@ -2510,47 +2510,59 @@ fn layout_events_defer_arrangement_during_drag_except_removal() {
 }
 
 #[test]
-fn unrelated_removal_does_not_flush_layouts_deferred_by_drag() {
-    let (mut apps, mut reactor) = test_context();
-    let spaces = [1, 2, 3].map(SpaceId::new);
-    let frames =
-        [0., 1000., 2000.].map(|x| CGRect::new(CGPoint::new(x, 0.), CGSize::new(1000., 800.)));
-    reactor.handle_event(space_state_event(frames.to_vec(), spaces.map(Some).to_vec()));
-    let windows = frames
-        .into_iter()
-        .enumerate()
-        .map(|(i, frame)| {
-            let mut window = make_window(i + 1);
-            window.frame.origin = frame.origin;
-            window
-        })
-        .collect();
-    apps.make_app_and_settle(&mut reactor, 1, windows);
-    let window = WindowId::new(1, 1);
-    reactor.drag_manager.actor.begin_native(
-        crate::actor::drag::DragSource {
-            window,
-            origin_frame: frames[0],
-            last_frame: frames[0],
-            origin_space: Some(spaces[0]),
-            current_space: Some(spaces[0]),
-            tiled: true,
-        },
-        Default::default(),
-    );
+fn drag_time_removal_consumes_only_covered_deferred_work() {
+    for (removed, force) in [(1, false), (2, false), (1, true)] {
+        let (mut apps, mut reactor) = test_context();
+        let spaces = [1, 2, 3].map(SpaceId::new);
+        let frames =
+            [0., 1000., 2000.].map(|x| CGRect::new(CGPoint::new(x, 0.), CGSize::new(1000., 800.)));
+        reactor.handle_event(space_state_event(frames.to_vec(), spaces.map(Some).to_vec()));
+        let windows = frames
+            .into_iter()
+            .enumerate()
+            .map(|(i, frame)| {
+                let mut window = make_window(i + 1);
+                window.frame.origin = frame.origin;
+                window
+            })
+            .collect();
+        apps.make_app_and_settle(&mut reactor, 1, windows);
+        let window = WindowId::new(1, 1);
+        reactor.drag_manager.actor.begin_native(
+            crate::actor::drag::DragSource {
+                window,
+                origin_frame: frames[0],
+                last_frame: frames[0],
+                origin_space: Some(spaces[0]),
+                current_space: Some(spaces[0]),
+                tiled: true,
+            },
+            Default::default(),
+        );
 
-    let before = reactor.layout_calculations.len();
-    let mut window = make_window(4);
-    window.frame.origin = frames[1].origin;
-    reactor.handle_event(Event::WindowCreated(WindowId::new(1, 4), window, None, None));
-    assert_eq!(reactor.layout_calculations.len(), before);
-    reactor.handle_event(Event::WindowDestroyed(WindowId::new(1, 3)));
-    assert!(reactor.is_in_drag());
-    assert_eq!(&reactor.layout_calculations[before..], &spaces[2..]);
+        let before = reactor.layout_calculations.len();
+        let mut window = make_window(4);
+        window.frame.origin = frames[1].origin;
+        reactor.handle_event(Event::WindowCreated(WindowId::new(1, 4), window, None, None));
+        if force {
+            let mut changes = Changes::default();
+            changes.arrange(Some(spaces[1]), Presentation::Force);
+            reactor.finish(changes, None, None);
+        }
+        assert_eq!(reactor.layout_calculations.len(), before);
+        reactor.handle_event(Event::WindowDestroyed(WindowId::new(1, removed as u32 + 1)));
+        assert!(reactor.is_in_drag());
+        assert_eq!(&reactor.layout_calculations[before..], &[spaces[removed]]);
 
-    reactor.handle_event(Event::DragCancel);
-    assert_eq!(&reactor.layout_calculations[before + 1..], &spaces[..2]);
-    assert!(!reactor.is_in_drag());
+        reactor.handle_event(Event::DragCancel);
+        let expected = if removed == 1 && !force {
+            &spaces[..1]
+        } else {
+            &spaces[..2]
+        };
+        assert_eq!(&reactor.layout_calculations[before + 1..], expected);
+        assert!(!reactor.is_in_drag());
+    }
 }
 
 #[test]

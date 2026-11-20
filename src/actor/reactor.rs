@@ -3036,6 +3036,21 @@ impl Reactor {
             changes.defer_drag_layouts(|space, policy, changed| {
                 self.drag_manager.defer_layout(space, policy, changed)
             });
+            if !blocked && changes.has_layouts() {
+                // A permitted commit covers earlier work for this space at the same
+                // or a weaker presentation policy. Keep global requests deferred.
+                self.drag_manager.deferred_layouts.retain(|&(scope, policy, changed)| {
+                    let Some(space) = scope else { return true };
+                    if changes.for_space(space).presentation < Some(policy)
+                        || !self.active_spaces.contains(&space)
+                        || self.space_state.screen_by_space(space).is_none()
+                    {
+                        return true;
+                    }
+                    changes.space(space).layout_changed |= changed;
+                    false
+                });
+            }
         } else if !blocked {
             for (space, policy, changed) in self.drag_manager.deferred_layouts.drain(..) {
                 changes.arrange(space, policy);
