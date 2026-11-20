@@ -3180,6 +3180,13 @@ impl Reactor {
                     self.publish_space_changes(space, change);
                 }
             }
+            for &(space, change) in changes.spaces() {
+                if (change.workspace_changed || change.windows_changed)
+                    && self.space_state.screen_by_space(space).is_none()
+                {
+                    self.publish_space_changes(space, change);
+                }
+            }
         }
         if let Some(space) = changes.selection_changed {
             self.broadcast_layout_state_changed(
@@ -3473,7 +3480,9 @@ impl Reactor {
         };
         let workspace_name = &engine.workspaces()[workspace].name;
         let workspace_id = protocol_workspace_id(workspace);
-        let display_uuid = self.display_uuid_for_space(space);
+        let display_uuid = self
+            .display_uuid_for_space(space)
+            .or_else(|| engine.display_uuid_for_space(space).map(str::to_owned));
         if change.workspace_changed {
             self.publish(BroadcastEvent::WorkspaceChanged {
                 workspace_id,
@@ -5007,30 +5016,6 @@ impl Reactor {
         _ = input_tx.send(crate::actor::input::Request::Warp(point));
     }
 
-    fn warp_mouse_to_space_center(&mut self, space: SpaceId) -> bool {
-        let Some(screen) = self.space_state.screen_by_space(space) else {
-            return false;
-        };
-        self.warp_mouse(screen.frame.mid());
-        true
-    }
-
-    fn try_focus_or_warp_without_raise(
-        &mut self,
-        warp_space: Option<SpaceId>,
-        focus_window: &mut Option<WindowId>,
-    ) -> bool {
-        if let Some(wid) = self.window_id_under_cursor() {
-            *focus_window = Some(wid);
-            return false;
-        }
-        if self.focus_untracked_window_under_cursor() {
-            return true;
-        }
-        self.config.settings.mouse_follows_focus
-            && warp_space.is_some_and(|space| self.warp_mouse_to_space_center(space))
-    }
-
     fn insert_app_handle_for_window(
         &self,
         app_handles: &mut HashMap<pid_t, AppThreadHandle>,
@@ -5683,10 +5668,25 @@ impl Reactor {
                 changes.fallback_focus = Some((space, focus_window));
             }
             self.stage_raise(changes, raise_windows, None, Quiet::Yes);
-        } else if let Some(window) = focus_window.filter(|&window| {
-            self.layout_focus_space(window).is_some()
-                || workspace_switch_space.is_some_and(|space| self.can_select_window(space, window))
-        }) {
+            return;
+        }
+        let focus_window = if let Some(space) = workspace_switch_space
+            && self.workspace_switch_manager.active_workspace_switch == Some(space)
+            && self.workspace_switch_manager.pending_workspace_switch_origin.is_some()
+        {
+            // The requested window may still be ordered out while the workspace
+            // is being unparked. It must already resolve to the destination Space.
+            focus_window
+                .filter(|&wid| self.is_workspace_focus_candidate(space, wid))
+                .or_else(|| self.visible_focus_candidate_in_active_workspace(space, None))
+        } else {
+            focus_window.filter(|&window| {
+                self.layout_focus_space(window).is_some()
+                    || workspace_switch_space
+                        .is_some_and(|space| self.can_select_window(space, window))
+            })
+        };
+        if let Some(window) = focus_window {
             if let Some(space) = workspace_switch_space {
                 self.layout_manager.layout_engine.commit_workspace_focus(
                     &mut self.state.windows,
@@ -5763,11 +5763,19 @@ impl Reactor {
                 }
                 return;
             }
-            self.try_focus_or_warp_without_raise(Some(space), &mut window);
+            if let Some(under_cursor) = self.window_id_under_cursor() {
+                window = Some(under_cursor).filter(|&wid| {
+                    self.state.windows.can_place_window(wid)
+                        && self.is_workspace_focus_candidate(space, wid)
+                });
+            } else if !self.focus_untracked_window_under_cursor()
+                && self.config.settings.mouse_follows_focus
+                && let Some(screen) = self.space_state.screen_by_space(space)
+            {
+                self.warp_mouse(screen.frame.mid());
+            }
         }
-        if let Some(window) =
-            window.filter(|&window| self.layout_focus_space(window) == Some(space))
-        {
+        if let Some(window) = window {
             if workspace_switch {
                 self.layout_manager.layout_engine.commit_workspace_focus(
                     &mut self.state.windows,
@@ -5963,19 +5971,9 @@ impl Reactor {
         space: SpaceId,
         preferred: Option<WindowId>,
     ) -> Option<WindowId> {
-        let is_visible_in_space = |wid: WindowId| {
-            let Some(window) = self.state.windows.window(wid) else {
-                return false;
-            };
-            window.info.sys_id.is_some()
-                && self.state.windows.can_place_window(wid)
-                && self.can_select_window(space, wid)
-                && self.best_space_for_window_id(wid) == Some(space)
-                && self.layout_manager.layout_engine.workspaces().is_window_in_active_workspace(
-                    &self.state.windows,
-                    space,
-                    wid,
-                )
+        let is_visible_in_space = |wid| {
+            self.state.windows.can_place_window(wid)
+                && self.is_workspace_focus_candidate(space, wid)
         };
 
         if let Some(wid) = preferred.filter(|wid| is_visible_in_space(*wid)) {
@@ -5994,6 +5992,21 @@ impl Reactor {
             .windows_in_active_workspace(&self.state.windows, space)
             .into_iter()
             .find(|wid| is_visible_in_space(*wid))
+    }
+
+    fn is_workspace_focus_candidate(&self, space: SpaceId, wid: WindowId) -> bool {
+        let windows = &self.state.windows;
+        windows.window(wid).is_some_and(|window| window.info.sys_id.is_some())
+            && windows.is_admitted(wid)
+            && !windows.is_temporarily_unavailable(wid)
+            && self.is_space_active(space)
+            && self
+                .layout_manager
+                .layout_engine
+                .workspaces()
+                .active_workspace(space)
+                .is_some_and(|workspace| windows.workspace_for_window(wid) == Some(workspace))
+            && self.best_space_for_window_id(wid) == Some(space)
     }
 
     fn request_refocus_if_hidden(&mut self, space: SpaceId, window_id: WindowId) {

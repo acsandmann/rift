@@ -89,6 +89,72 @@ fn window_added_at_its_target_publishes_membership_without_writing_a_frame() {
 }
 
 #[test]
+fn pinning_a_dormant_workspace_publishes_the_source_replacement() {
+    let (_, mut reactor, a, b) = two_displays(shared_settings());
+    let moved = reactor.layout_manager.layout_engine.workspaces().active_workspace(b).unwrap();
+    reactor
+        .layout_manager
+        .layout_engine
+        .workspaces_mut()
+        .create_workspace(b, Some("Dormant replacement".into()))
+        .unwrap();
+    let next = SpaceId::new(3);
+    reactor.handle_event(space_state_event_with(
+        vec![shared_left(), shared_right()],
+        vec![Some(a), Some(next)],
+        |snapshot| {
+            snapshot.display_space_ids.insert("test-display-1".into(), vec![b, next]);
+            snapshot.membership_complete = true;
+        },
+    ));
+    assert!(reactor.space_state.screen_by_space(b).is_none());
+    let workspaces = reactor.layout_manager.layout_engine.workspaces();
+    assert_eq!(workspaces.active_workspace(b), Some(moved));
+    let mut config = reactor.config.clone();
+    config
+        .virtual_workspaces
+        .workspace_rules
+        .push(crate::common::config::WorkspaceLayoutRule {
+            workspace: WorkspaceSelector::Name(workspaces[moved].name.clone()),
+            layout: None,
+            display: Some(vec!["test-display-0".into()]),
+        });
+    let (tx, mut broadcasts) = actor::channel();
+    reactor.communication_manager.event_broadcaster = tx;
+
+    reactor.handle_event(Event::ConfigUpdated(config));
+
+    let workspaces = reactor.layout_manager.layout_engine.workspaces();
+    assert_eq!(workspaces[moved].space, a);
+    let replacement = workspaces.active_workspace(b).expect("source still owns a workspace");
+    assert_ne!(moved, replacement);
+    let mut source_events = Vec::new();
+    let mut destination_events = Vec::new();
+    while let Ok((_, event)) = broadcasts.try_recv() {
+        let (kind, space_id, workspace_id) = match event {
+            BroadcastEvent::WorkspaceChanged { space_id, workspace_id, .. } => {
+                ("workspace", space_id, workspace_id)
+            }
+            BroadcastEvent::WindowsChanged { space_id, workspace_id, .. } => {
+                ("windows", space_id, workspace_id)
+            }
+            _ => continue,
+        };
+        if space_id == b.get() {
+            source_events.push((kind, workspace_id));
+        } else if space_id == a.get() {
+            destination_events.push(kind);
+        }
+    }
+    let replacement = protocol_workspace_id(replacement);
+    assert_eq!(source_events, [
+        ("workspace", replacement),
+        ("windows", replacement)
+    ]);
+    assert_eq!(destination_events, ["workspace", "windows"]);
+}
+
+#[test]
 fn discovery_commits_three_affected_displays_and_delivers_one_focus() {
     let settings = crate::common::config::VirtualWorkspaceSettings {
         app_rules: vec![crate::common::config::AppWorkspaceRule {
@@ -126,7 +192,12 @@ fn discovery_commits_three_affected_displays_and_delivers_one_focus() {
             };
             (
                 WindowId::new(1, idx),
-                make_window_info(screen, None, title, Some("com.testapp1")),
+                make_window_info(
+                    screen,
+                    Some(WindowServerId::new(10000 + idx)),
+                    title,
+                    Some("com.testapp1"),
+                ),
             )
         })
         .collect();
@@ -4124,6 +4195,123 @@ fn refreshing_hidden_window_does_not_steal_focus_across_displays() {
             Some(WindowId::new(1, 1))
         );
     }
+}
+
+#[test]
+fn move_and_follow_focuses_the_survivor_on_the_native_destination() {
+    let (mut apps, mut reactor, a, b) = two_displays(shared_settings());
+    let moving = WindowId::new(1, 1);
+    let visible = WindowId::new(2, 1);
+    let mut destination_window = make_window(1);
+    destination_window.frame.origin.x += shared_right().origin.x;
+    apps.make_app_and_settle(&mut reactor, visible.pid, vec![destination_window]);
+    let target_name = "Follow destination".to_owned();
+    let target = reactor
+        .layout_manager
+        .layout_engine
+        .workspaces_mut()
+        .create_workspace(b, Some(target_name.clone()))
+        .unwrap();
+    let selector = WorkspaceSelector::Name(target_name);
+    reactor.handle_test_workspace_command(b, &LayoutCommand::MoveWindowToWorkspace {
+        workspace: selector.clone(),
+        follow: false,
+        window_id: Some(visible.idx.get()),
+    });
+    assert_eq!(reactor.state.windows.workspace_for_window(visible), Some(target));
+    reactor.mark_test_window_visible_in_space(reactor.test_window_server_id(moving), a);
+    reactor.mark_test_window_visible_in_space(reactor.test_window_server_id(visible), b);
+    let (tx, mut raises) = actor::channel();
+    reactor.communication_manager.raise_manager_tx = tx;
+
+    reactor.handle_test_layout_command(LayoutCommand::MoveWindowToWorkspace {
+        workspace: selector,
+        follow: true,
+        window_id: Some(moving.idx.get()),
+    });
+
+    assert_eq!(reactor.state.windows.workspace_for_window(moving), Some(target));
+    assert_eq!(
+        reactor.layout_manager.layout_engine.workspaces().active_workspace(b),
+        Some(target)
+    );
+    assert_eq!(
+        reactor.best_space_for_window_id(moving),
+        Some(a),
+        "native move is still pending"
+    );
+    let (_, raise_manager::Event::RaiseRequest(request)) = raises.try_recv().unwrap() else {
+        panic!("expected focus for the visible destination window");
+    };
+    assert_eq!(request.focus_window.map(|(window, _)| window), Some(visible));
+    assert_eq!(
+        reactor.layout_manager.layout_engine.focused_window(),
+        Some(visible)
+    );
+    assert!(raises.try_recv().is_err());
+}
+
+#[test]
+fn explicit_workspace_focus_supersedes_removal_refocus_through_native_ack() {
+    let (mut apps, mut reactor) = test_context_with_workspace_count(2);
+    let (a, b) = (SpaceId::new(1), SpaceId::new(2));
+    reactor.handle_event(space_state_event(vec![shared_left(), shared_right()], vec![
+        Some(a),
+        Some(b),
+    ]));
+    let [departing, survivor, selected] = [1, 2, 3].map(|idx| WindowId::new(1, idx));
+    let mut windows = make_windows(3);
+    windows[2].frame.origin.x += shared_right().origin.x;
+    make_active_app(&mut apps, &mut reactor, 1, windows, Some(departing));
+    for (window, space) in [(departing, a), (survivor, a), (selected, b)] {
+        reactor.mark_test_window_visible_in_space(reactor.test_window_server_id(window), space);
+    }
+    assert_eq!(
+        reactor.layout_manager.layout_engine.focused_window(),
+        Some(departing)
+    );
+    let (tx, mut raises) = actor::channel();
+    reactor.communication_manager.raise_manager_tx = tx;
+
+    reactor.commit_test(|reactor, changes| {
+        reactor.dispatch(Event::WindowDestroyed(departing), changes).unwrap();
+        reactor.dispatch_layout_command(
+            changes,
+            LayoutCommand::MoveWindowToWorkspace {
+                workspace: WorkspaceSelector::Index(1),
+                follow: true,
+                window_id: Some(selected.idx.get()),
+            },
+            Some(b),
+            false,
+        );
+    });
+
+    let (_, raise_manager::Event::RaiseRequest(request)) = raises.try_recv().unwrap() else {
+        panic!("expected explicit workspace focus");
+    };
+    assert_eq!(request.focus_window.map(|(window, _)| window), Some(selected));
+    assert!(raises.try_recv().is_err());
+
+    reactor.handle_event(Event::RaiseCompleted {
+        window_id: selected,
+        sequence_id: 42,
+    });
+    reactor.handle_event(Event::WindowServerFocusChanged(selected, b));
+
+    assert!(matches!(
+        raises.try_recv().unwrap().1,
+        raise_manager::Event::RaiseCompleted { window_id, sequence_id: 42 }
+            if window_id == selected
+    ));
+    assert!(
+        raises.try_recv().is_err(),
+        "native acknowledgement replayed the removal fallback"
+    );
+    assert_eq!(
+        reactor.layout_manager.layout_engine.focused_window(),
+        Some(selected)
+    );
 }
 
 #[test]
