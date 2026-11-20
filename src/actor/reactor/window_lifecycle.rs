@@ -93,6 +93,7 @@ impl Reactor {
         self.cancel_window_presentations(vec![wid]);
         self.discard_window_activity(wid, wsid);
         self.reconcile_layout_event(changes, LayoutEvent::WindowRemoved(wid));
+        self.layout_manager.layout_engine.retire_window(wid);
         self.state.windows.retire_window(wid);
         self.replace_window_references(wid, None);
         changes.refresh_notifications |= wsid.is_some();

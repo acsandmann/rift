@@ -621,6 +621,20 @@ fn it_sends_writes_when_stale_read_state_looks_same_as_written_state() {
 }
 
 #[test]
+fn a_destroyed_window_takes_its_size_constraints_with_it() {
+    let (mut apps, mut reactor) = test_context();
+    reactor.handle_event(space_state_event(
+        vec![CGRect::new(CGPoint::new(0., 0.), CGSize::new(1000., 1000.))],
+        vec![Some(SpaceId::new(1))],
+    ));
+    apps.make_app_and_settle(&mut reactor, 1, make_windows(2));
+    let wid = WindowId::new(1, 1);
+    assert!(reactor.layout_manager.layout_engine.has_window_constraints(wid));
+    reactor.handle_event(Event::WindowDestroyed(wid));
+    assert!(!reactor.layout_manager.layout_engine.has_window_constraints(wid));
+}
+
+#[test]
 fn it_manages_windows_on_enabled_spaces() {
     let (mut apps, mut reactor) = test_context();
     let full_screen = CGRect::new(CGPoint::new(0., 0.), CGSize::new(1000., 1000.));
