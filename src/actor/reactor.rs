@@ -23,33 +23,6 @@ mod utils;
 mod testing;
 
 #[cfg(test)]
-#[allow(non_snake_case)]
-mod SpaceEventHandler {
-    pub use super::events::space::WindowServerLifecyclePayload;
-
-    pub fn handle_window_server_destroyed(
-        reactor: &mut super::Reactor,
-        payload: WindowServerLifecyclePayload,
-    ) -> anyhow::Result<()> {
-        reactor.handle_event(super::Event::WindowServerDestroyed(
-            payload.window_server_id,
-            payload.space,
-            payload.kind,
-        ));
-        Ok(())
-    }
-
-    pub fn handle_window_server_appeared(
-        reactor: &mut super::Reactor,
-        window_server_id: crate::sys::window_server::WindowServerId,
-        space: crate::sys::screen::SpaceId,
-        kind: super::SpaceEventKind,
-    ) {
-        reactor.handle_event(super::Event::WindowServerAppeared(window_server_id, space, kind));
-    }
-}
-
-#[cfg(test)]
 mod tests;
 
 use std::cell::RefCell;
@@ -61,8 +34,8 @@ use std::time::{Duration, Instant};
 use animation::AnimationSender;
 use changes::{Changes, Presentation, SpaceChange};
 use events::{
-    command as command_workflow, drag as interaction_workflow, space as topology_workflow,
-    system as system_workflow, window as window_workflow,
+    drag as interaction_workflow, space as topology_workflow, system as system_workflow,
+    window as window_workflow,
 };
 use main_window::MainWindowTracker;
 use managers::LayoutManager;
@@ -1626,10 +1599,7 @@ impl Reactor {
                 }
                 return Ok(());
             }
-            Event::ApplicationDeactivated(pid) => {
-                self.clear_menu_state_for_pid(pid);
-            }
-            Event::ApplicationGloballyDeactivated(pid) => {
+            Event::ApplicationDeactivated(pid) | Event::ApplicationGloballyDeactivated(pid) => {
                 self.clear_menu_state_for_pid(pid);
             }
             Event::ApplicationGloballyActivated(pid) => {
@@ -1843,15 +1813,7 @@ impl Reactor {
                         .then(|| window_server::app_window_suitability(wsid))
                         .flatten(),
                 };
-                self.reconcile_native_departure(
-                    changes,
-                    topology_workflow::WindowServerLifecyclePayload {
-                        window_server_id: wsid,
-                        space: sid,
-                        kind,
-                    },
-                    observations,
-                );
+                self.reconcile_native_departure(changes, wsid, sid, kind, observations);
                 return Ok(());
             }
             Event::WindowServerAppeared(wsid, sid, kind) => {
@@ -1883,32 +1845,12 @@ impl Reactor {
                 let last_known_user_space = tracked_window
                     .and_then(|window| self.best_space_for_window_id(window))
                     .or_else(|| self.space_state.iter_known_spaces().next());
-                let window_server_info = queried.map(|(info, _)| info);
-                let owner_pid = window_server_info.as_ref().map(|info| info.pid);
-                let app_known =
-                    owner_pid.is_some_and(|pid| self.app_manager.apps.contains_key(&pid));
-                let running_app_info = owner_pid.filter(|_| !app_known).and_then(|pid| {
-                    objc2_app_kit::NSRunningApplication::runningApplicationWithProcessIdentifier(
-                        pid,
-                    )
-                    .map(|app| AppInfo::from(&*app))
-                });
                 let observations = topology_workflow::WindowServerAppearedObservations {
                     resolved_space: resolved,
                     last_known_user_space,
-                    window_server_info,
-                    app_known,
-                    running_app_info,
+                    window_server_info: queried.map(|(info, _)| info),
                 };
-                self.reconcile_native_appearance(
-                    changes,
-                    topology_workflow::WindowServerLifecyclePayload {
-                        window_server_id: wsid,
-                        space: sid,
-                        kind,
-                    },
-                    observations,
-                );
+                self.reconcile_native_appearance(changes, wsid, sid, kind, observations);
                 return Ok(());
             }
             Event::WindowMinimized(wid) | Event::WindowDeminiaturized(wid) => {
@@ -2476,21 +2418,27 @@ impl Reactor {
                 return Ok(());
             }
             Event::Command(Command::Reactor(ReactorCommand::SaveAndExit)) => {
-                let active_space = self.active_display_space();
-                return command_workflow::handle_command_reactor_save_and_exit(
-                    &self.state,
-                    &mut self.layout_manager,
-                    active_space,
-                );
+                if let Err(error) = self.layout_manager.layout_engine.save_current_layout(
+                    crate::common::config::restore_file(),
+                    &self.state.windows,
+                    self.active_display_space(),
+                ) {
+                    tracing::error!("Could not save master file: {error}");
+                    // Keep the live layout available for retry if the save fails.
+                    println!("Could not save master file; Rift is still running: {error}");
+                    return Ok(());
+                }
+                std::process::exit(0);
             }
             Event::Command(Command::Reactor(ReactorCommand::SaveLayout { path })) => {
-                let active_space = self.active_display_space();
-                return command_workflow::handle_command_reactor_save_layout(
-                    &self.state,
-                    &mut self.layout_manager,
-                    path,
-                    active_space,
-                );
+                self.layout_manager.layout_engine.save_current_layout(
+                    path.clone(),
+                    &self.state.windows,
+                    self.active_display_space(),
+                )?;
+                tracing::info!(path = %path.display(), "Saved layout");
+                println!("Saved layout to {}", path.display());
+                return Ok(());
             }
             Event::Command(Command::Reactor(ReactorCommand::RestoreLayout {
                 path,
@@ -3053,8 +3001,7 @@ impl Reactor {
             }
         } else if !blocked {
             for (space, policy, changed) in self.drag_manager.deferred_layouts.drain(..) {
-                changes.arrange(space, policy);
-                changes.scope(space).layout_changed |= changed;
+                changes.arrange(space, policy).layout_changed |= changed;
             }
         }
         let arrange = !blocked && changes.has_layouts();
@@ -5147,8 +5094,7 @@ impl Reactor {
             Some(AppRuleFrame::Place(placement)) => self.apply_app_rule_placement(placement),
             Some(AppRuleFrame::Resize(resize)) => {
                 self.apply_app_rule_resize(resize);
-                changes.space(resize.space).layout_changed = true;
-                changes.arrange(Some(resize.space), Presentation::Resize);
+                changes.arrange(Some(resize.space), Presentation::Resize).layout_changed = true;
             }
             None => {}
         }

@@ -115,12 +115,17 @@ impl Changes {
         &mut self.extra[index].1
     }
 
-    pub(super) fn arrange(&mut self, space: Option<SpaceId>, presentation: Presentation) {
+    pub(super) fn arrange(
+        &mut self,
+        space: Option<SpaceId>,
+        presentation: Presentation,
+    ) -> &mut SpaceChange {
         let change = self.scope(space);
         change.presentation = change.presentation.max(Some(presentation));
+        change
     }
 
-    pub(super) fn scope(&mut self, space: Option<SpaceId>) -> &mut SpaceChange {
+    fn scope(&mut self, space: Option<SpaceId>) -> &mut SpaceChange {
         match space {
             Some(space) => self.space(space),
             None => &mut self.all,
@@ -147,12 +152,8 @@ impl Changes {
     }
 
     pub(super) fn inventory(&mut self, pid: pid_t) {
-        match self.inventory {
-            None => self.inventory = Some(pid),
-            Some(first) if first != pid && !self.extra_inventory.contains(&pid) => {
-                self.extra_inventory.push(pid);
-            }
-            _ => {}
+        if *self.inventory.get_or_insert(pid) != pid && !self.extra_inventory.contains(&pid) {
+            self.extra_inventory.push(pid);
         }
     }
 
@@ -163,14 +164,15 @@ impl Changes {
         fallback: Option<CGRect>,
     ) {
         let transfer = (window, target, fallback);
-        if let Some(first) = self.tiled_transfer.as_mut().filter(|first| first.0 == window) {
-            *first = transfer;
-        } else if self.tiled_transfer.is_none() {
-            self.tiled_transfer = Some(transfer);
-        } else if let Some(previous) =
-            self.extra_transfers.iter_mut().find(|previous| previous.0 == window)
+        if let Some(previous) = self
+            .tiled_transfer
+            .iter_mut()
+            .chain(&mut self.extra_transfers)
+            .find(|previous| previous.0 == window)
         {
             *previous = transfer;
+        } else if self.tiled_transfer.is_none() {
+            self.tiled_transfer = Some(transfer);
         } else {
             self.extra_transfers.push(transfer);
         }

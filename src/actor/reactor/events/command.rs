@@ -1,8 +1,7 @@
-use tracing::{error, info, warn};
+use tracing::{info, warn};
 
 use super::super::*;
 use crate::actor::wm_controller::{WmCmd, WmCommand};
-use crate::common::config;
 use crate::layout_engine::LayoutCommand;
 use crate::model::space_activation::ToggleSpaceContext;
 
@@ -160,8 +159,7 @@ impl Reactor {
                 && response.changed
             {
                 if self.layout_manager.layout_engine.focus_changes_geometry(space) {
-                    changes.space(space).layout_changed = true;
-                    changes.arrange(Some(space), Presentation::Animated);
+                    changes.arrange(Some(space), Presentation::Animated).layout_changed = true;
                 } else {
                     changes.space(space).tabs_changed = true;
                 }
@@ -347,41 +345,4 @@ impl Reactor {
         }
         changes.mouse_warp = Some(warp);
     }
-}
-
-pub(in crate::actor::reactor) fn handle_command_reactor_save_and_exit(
-    state: &RiftState,
-    layout: &LayoutManager,
-    active_space: Option<SpaceId>,
-) -> anyhow::Result<()> {
-    if let Err(e) = save_layout(state, layout, config::restore_file(), active_space) {
-        error!("Could not save master file: {e}");
-        // A quit request is conditional on a durable master save. Keep Rift running when the
-        // snapshot cannot be committed so the user can fix the filesystem problem or retry
-        // without losing the only complete in-memory layout.
-        println!("Could not save master file; Rift is still running: {e}");
-        return Ok(());
-    }
-    std::process::exit(0);
-}
-
-fn save_layout(
-    state: &RiftState,
-    layout: &LayoutManager,
-    path: std::path::PathBuf,
-    active_space: Option<SpaceId>,
-) -> std::io::Result<()> {
-    layout.layout_engine.save_current_layout(path, &state.windows, active_space)
-}
-
-pub(in crate::actor::reactor) fn handle_command_reactor_save_layout(
-    state: &RiftState,
-    layout: &LayoutManager,
-    path: std::path::PathBuf,
-    active_space: Option<SpaceId>,
-) -> anyhow::Result<()> {
-    save_layout(state, layout, path.clone(), active_space)?;
-    info!(path = %path.display(), "Saved layout");
-    println!("Saved layout to {}", path.display());
-    Ok(())
 }

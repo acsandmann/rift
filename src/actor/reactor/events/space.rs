@@ -7,6 +7,7 @@ use crate::actor::spaces::ForwardedSpaceState;
 use crate::actor::wm_controller::WmEvent;
 use crate::common::collections::HashSet;
 use crate::model::space_activation::{SpaceActivationConfig, SpaceActivationPolicy};
+use crate::model::window_store::NativeDeparture;
 use crate::sys::app::AppInfo;
 use crate::sys::screen::SpaceId;
 use crate::sys::window_server::WindowServerId;
@@ -83,16 +84,6 @@ pub(crate) fn merge_space_deltas(
     newer
 }
 
-// spacewindowappeared/destroyed happen a lot when a display is connected/disconnected
-// since they are literally when a window enters or leaves a space and each display has its own space(s)
-// this is functionally a connection dropping to the window server
-#[derive(Debug, Clone, Copy)]
-pub struct WindowServerLifecyclePayload {
-    pub window_server_id: WindowServerId,
-    pub space: SpaceId,
-    pub kind: SpaceEventKind,
-}
-
 #[derive(Debug)]
 pub struct WindowServerDestroyedObservations {
     pub resolved_space: Option<SpaceId>,
@@ -105,22 +96,17 @@ pub struct WindowServerAppearedObservations {
     pub resolved_space: Option<SpaceId>,
     pub last_known_user_space: Option<SpaceId>,
     pub window_server_info: Option<crate::sys::window_server::WindowServerInfo>,
-    pub app_known: bool,
-    pub running_app_info: Option<AppInfo>,
 }
 
 impl Reactor {
     pub(in crate::actor::reactor) fn reconcile_native_departure(
         &mut self,
         changes: &mut Changes,
-        payload: WindowServerLifecyclePayload,
+        wsid: WindowServerId,
+        sid: SpaceId,
+        kind: SpaceEventKind,
         observations: WindowServerDestroyedObservations,
     ) {
-        let WindowServerLifecyclePayload {
-            window_server_id: wsid,
-            space: sid,
-            kind,
-        } = payload;
         let WindowServerDestroyedObservations {
             resolved_space,
             ordered_in,
@@ -132,9 +118,7 @@ impl Reactor {
             if let Some(wid) = self.state.windows.tracked_window_id(wsid) {
                 self.send_app_request(wid.pid, Request::WindowMaybeDestroyed(wid));
             }
-
-            return;
-        } else if matches!(kind, SpaceEventKind::User) {
+        } else {
             match self.state.windows.observe_native_departure(
                 wsid,
                 sid,
@@ -143,76 +127,67 @@ impl Reactor {
                 ordered_in,
                 suitable,
             ) {
-                crate::model::window_store::NativeDeparture::Moved(window, space) => {
-                    if let Some(wid) = window {
-                        self.reassign_window_to_authoritative_space(changes, wid, space, false);
-                    }
+                NativeDeparture::Moved(Some(wid), space) => {
+                    self.reassign_window_to_authoritative_space(changes, wid, space, false);
                 }
-                crate::model::window_store::NativeDeparture::Closed(wid) => {
+                NativeDeparture::Closed(wid) => {
                     self.destroy_window(changes, wid);
                 }
-                crate::model::window_store::NativeDeparture::Hidden {
-                    window,
+                NativeDeparture::Hidden {
+                    window: Some(wid),
                     remove_projection,
                 } => {
-                    if let Some(wid) = window {
-                        if remove_projection {
-                            self.reconcile_layout_event(changes, LayoutEvent::WindowSuspended(wid));
-                        }
-                        self.send_app_request(wid.pid, Request::WindowMaybeDestroyed(wid));
+                    if remove_projection {
+                        self.reconcile_layout_event(changes, LayoutEvent::WindowSuspended(wid));
                     }
+                    self.send_app_request(wid.pid, Request::WindowMaybeDestroyed(wid));
                 }
+                NativeDeparture::Moved(None, _) | NativeDeparture::Hidden { window: None, .. } => {}
             }
-            return;
         }
     }
 
     pub(in crate::actor::reactor) fn reconcile_native_appearance(
         &mut self,
         changes: &mut Changes,
-        payload: WindowServerLifecyclePayload,
+        wsid: WindowServerId,
+        sid: SpaceId,
+        kind: SpaceEventKind,
         observations: WindowServerAppearedObservations,
     ) {
-        let WindowServerLifecyclePayload {
-            window_server_id: wsid,
-            space: sid,
-            kind,
-        } = payload;
         let WindowServerAppearedObservations {
             resolved_space,
             last_known_user_space,
             window_server_info,
-            app_known,
-            running_app_info,
         } = observations;
-        if matches!(kind, SpaceEventKind::User) {
-            if let Some(resolved_space) = resolved_space {
-                if resolved_space != sid {
-                    self.state.windows.observe_native_space(
-                        wsid,
+        if matches!(kind, SpaceEventKind::User)
+            && let Some(resolved_space) = resolved_space
+        {
+            if resolved_space != sid {
+                self.state.windows.observe_native_space(
+                    wsid,
+                    resolved_space,
+                    self.active_spaces.contains(&resolved_space),
+                );
+                if let Some(wid) = self.state.windows.tracked_window_id(wsid) {
+                    self.reassign_window_to_authoritative_space(
+                        changes,
+                        wid,
                         resolved_space,
-                        self.active_spaces.contains(&resolved_space),
+                        false,
                     );
-                    if let Some(wid) = self.state.windows.tracked_window_id(wsid) {
-                        self.reassign_window_to_authoritative_space(
-                            changes,
-                            wid,
-                            resolved_space,
-                            false,
-                        );
-                    }
-                    debug!(
-                        ?wsid,
-                        reported_space = ?sid,
-                        resolved_space = ?resolved_space,
-                        "Resolved user-space appearance to stronger native membership"
-                    );
-                    return;
                 }
-
-                self.state.windows.observe_native_space(wsid, resolved_space, true);
-                self.state.windows.note_window_server_fullscreen_exit(wsid, resolved_space);
+                debug!(
+                    ?wsid,
+                    reported_space = ?sid,
+                    resolved_space = ?resolved_space,
+                    "Resolved user-space appearance to stronger native membership"
+                );
+                return;
             }
+
+            self.state.windows.observe_native_space(wsid, resolved_space, true);
+            self.state.windows.note_window_server_fullscreen_exit(wsid, resolved_space);
         }
 
         if self.state.windows.knows_window_server_id(wsid)
@@ -307,18 +282,20 @@ impl Reactor {
 
             self.update_partial_window_server_info(changes, [window_server_info]);
 
-            if !app_known {
-                if let Some(app_info) = running_app_info
-                    && let Some(wm) = &self.communication_manager.wm_sender
-                {
-                    wm.send(WmEvent::AppLaunch(
-                        window_server_info.pid,
-                        app_info,
-                        crate::actor::wm_controller::AppDiscoverySource::WindowServer,
-                    ));
-                }
-            } else {
-                changes.inventory(window_server_info.pid);
+            let pid = window_server_info.pid;
+            if self.app_manager.apps.contains_key(&pid) {
+                changes.inventory(pid);
+            } else if let Some(wm) = &self.communication_manager.wm_sender
+                && let Some(app) =
+                    objc2_app_kit::NSRunningApplication::runningApplicationWithProcessIdentifier(
+                        pid,
+                    )
+            {
+                wm.send(WmEvent::AppLaunch(
+                    pid,
+                    AppInfo::from(&*app),
+                    crate::actor::wm_controller::AppDiscoverySource::WindowServer,
+                ));
             }
         }
     }

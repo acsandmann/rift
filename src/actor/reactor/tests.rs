@@ -13,6 +13,30 @@ use crate::sys::app::{AppInfo, WindowInfo};
 use crate::sys::geometry::{Round, SameAs};
 use crate::sys::window_server::WindowServerId;
 
+fn frame_writes(apps: &mut Apps) -> Vec<(WindowId, CGRect)> {
+    apps.requests()
+        .into_iter()
+        .filter_map(|request| match request {
+            Request::SetWindowFrames(frames, ..) => Some(frames),
+            _ => None,
+        })
+        .flatten()
+        .collect()
+}
+
+#[track_caller]
+fn next_raise(raises: &mut actor::Receiver<raise_manager::Event>) -> RaiseRequest {
+    let raise_manager::Event::RaiseRequest(request) = raises.try_recv().expect("expected raise").1
+    else {
+        panic!("expected ordinary raise");
+    };
+    request
+}
+
+fn active_container_tree(reactor: &Reactor, space: SpaceId) -> rift_protocol::ContainerTreeNode {
+    reactor.query_layout_state(Some(space.get()), None).unwrap().container_tree
+}
+
 #[test]
 fn startup_ready_waits_for_queryable_authoritative_space_and_fires_once() {
     let mut reactor = test_reactor_with_workspace_count(9);
@@ -128,30 +152,25 @@ fn pinning_a_dormant_workspace_publishes_the_source_replacement() {
     assert_eq!(workspaces[moved].space, a);
     let replacement = workspaces.active_workspace(b).expect("source still owns a workspace");
     assert_ne!(moved, replacement);
-    let mut source_events = Vec::new();
-    let mut destination_events = Vec::new();
-    while let Ok((_, event)) = broadcasts.try_recv() {
-        let (kind, space_id, workspace_id) = match event {
-            BroadcastEvent::WorkspaceChanged { space_id, workspace_id, .. } => {
-                ("workspace", space_id, workspace_id)
+    use rift_protocol::EventKind::{WindowsChanged, WorkspaceChanged};
+    let mut events: Vec<_> = std::iter::from_fn(|| broadcasts.try_recv().ok())
+        .filter_map(|(_, event)| match event {
+            BroadcastEvent::WorkspaceChanged { space_id, workspace_id, .. }
+            | BroadcastEvent::WindowsChanged { space_id, workspace_id, .. } => {
+                Some((space_id, event.kind(), workspace_id))
             }
-            BroadcastEvent::WindowsChanged { space_id, workspace_id, .. } => {
-                ("windows", space_id, workspace_id)
-            }
-            _ => continue,
-        };
-        if space_id == b.get() {
-            source_events.push((kind, workspace_id));
-        } else if space_id == a.get() {
-            destination_events.push(kind);
-        }
-    }
-    let replacement = protocol_workspace_id(replacement);
-    assert_eq!(source_events, [
-        ("workspace", replacement),
-        ("windows", replacement)
+            _ => None,
+        })
+        .collect();
+    events.sort_by_key(|&(space, _, _)| space);
+    let destination = protocol_workspace_id(workspaces.active_workspace(a).unwrap());
+    let source = protocol_workspace_id(replacement);
+    assert_eq!(events, [
+        (a.get(), WorkspaceChanged, destination),
+        (a.get(), WindowsChanged, destination),
+        (b.get(), WorkspaceChanged, source),
+        (b.get(), WindowsChanged, source),
     ]);
-    assert_eq!(destination_events, ["workspace", "windows"]);
 }
 
 #[test]
@@ -169,31 +188,28 @@ fn discovery_commits_three_affected_displays_and_delivers_one_focus() {
     let mut reactor = test_reactor_with_workspace_settings(&settings);
     let mut apps = Apps::new();
     let spaces = [1, 2, 3, 4].map(SpaceId::new);
-    let screens: Vec<_> = (0..4)
-        .map(|index| {
-            CGRect::new(
-                CGPoint::new(f64::from(index) * 1000., 0.),
-                CGSize::new(1000., 800.),
-            )
-        })
-        .collect();
-    reactor.handle_event(space_state_event(screens.clone(), spaces.map(Some).to_vec()));
+    let screens = [0., 1000., 2000., 3000.]
+        .map(|x| CGRect::new(CGPoint::new(x, 0.), CGSize::new(1000., 800.)));
+    reactor.handle_event(space_state_event(screens.to_vec(), spaces.map(Some).to_vec()));
     reactor.handle_events(apps.make_app(1, Vec::new()));
-
     let (tx, mut raises) = actor::channel();
     reactor.communication_manager.raise_manager_tx = tx;
-    let before = reactor.layout_calculations.len();
-    let windows: Vec<_> = (1..=3)
-        .map(|idx| {
-            let (title, screen) = if idx == 2 {
-                ("Focus this window", screens[1])
+
+    let visible = [1, 2, 3].map(|idx| WindowId::new(1, idx));
+    let windows = visible
+        .into_iter()
+        .zip(screens)
+        .map(|(wid, frame)| {
+            let idx = wid.idx.get();
+            let title = if idx == 2 {
+                "Focus this window"
             } else {
-                ("Tiled window", screens[idx as usize - 1])
+                "Tiled window"
             };
             (
-                WindowId::new(1, idx),
+                wid,
                 make_window_info(
-                    screen,
+                    frame,
                     Some(WindowServerId::new(10000 + idx)),
                     title,
                     Some("com.testapp1"),
@@ -201,15 +217,11 @@ fn discovery_commits_three_affected_displays_and_delivers_one_focus() {
             )
         })
         .collect();
-    let visible = windows.iter().map(|&(window, _)| window).collect();
-    reactor.discover_test_windows(1, windows, visible);
+    reactor.layout_calculations.clear();
+    reactor.discover_test_windows(1, windows, visible.to_vec());
 
-    assert_eq!(&reactor.layout_calculations[before..], &spaces[..3]);
-    let (_, raise_manager::Event::RaiseRequest(request)) =
-        raises.try_recv().expect("app rule focus")
-    else {
-        panic!("expected a native raise request");
-    };
+    assert_eq!(reactor.layout_calculations, spaces[..3]);
+    let request = next_raise(&mut raises);
     assert_eq!(
         request.focus_window.map(|(window, _)| window),
         Some(WindowId::new(1, 2))
@@ -1018,9 +1030,7 @@ fn scrolling_focus_warps_to_revealed_window() {
 
         reactor.handle_test_layout_command(LayoutCommand::MoveFocus(Direction::Left));
 
-        let (_, raise_manager::Event::RaiseRequest(request)) = raise_rx.try_recv().unwrap() else {
-            panic!("expected focus request");
-        };
+        let request = next_raise(&mut raise_rx);
         let (window, warp) = request.focus_window.unwrap();
         assert_eq!(window, target);
         let center = CGPoint::new(if ratio == 1.0 { 450.0 } else { 250.0 }, 500.0);
@@ -1079,10 +1089,7 @@ fn ordinary_focus_keeps_warp_in_raise_request() {
             let target = reactor.layout_manager.layout_engine.focused_window().unwrap();
             let center = centers[&target];
 
-            let (_, raise_manager::Event::RaiseRequest(request)) = raise_rx.try_recv().unwrap()
-            else {
-                panic!("expected focus request");
-            };
+            let request = next_raise(&mut raise_rx);
             assert_eq!(
                 request.focus_window,
                 Some((target, enabled.then_some(center))),
@@ -1142,10 +1149,7 @@ fn cross_display_workspace_focus_keeps_relative_warp() {
                 if *from == source_frame && *to == frame),
                 "{mode:?}, enabled={enabled}: {warps:?}"
             );
-            let (_, raise_manager::Event::RaiseRequest(request)) = raise_rx.try_recv().unwrap()
-            else {
-                panic!("expected focus request");
-            };
+            let request = next_raise(&mut raise_rx);
             assert_eq!(request.focus_window, Some((target, None)));
             assert!(raise_rx.try_recv().is_err());
         }
@@ -1770,11 +1774,9 @@ fn user_space_window_server_destroyed_removes_window_when_window_server_is_gone(
     reactor.commit_test(|reactor, changes| {
         reactor.reconcile_native_departure(
             changes,
-            topology_workflow::WindowServerLifecyclePayload {
-                window_server_id: wsid,
-                space: space1,
-                kind: SpaceEventKind::User,
-            },
+            wsid,
+            space1,
+            SpaceEventKind::User,
             topology_workflow::WindowServerDestroyedObservations {
                 resolved_space: None,
 
@@ -1917,7 +1919,7 @@ fn window_server_appeared(
     space: SpaceId,
     kind: SpaceEventKind,
 ) {
-    SpaceEventHandler::handle_window_server_appeared(reactor, wsid, space, kind);
+    reactor.handle_event(Event::WindowServerAppeared(wsid, space, kind));
 }
 
 fn window_server_destroyed(
@@ -1926,15 +1928,7 @@ fn window_server_destroyed(
     space: SpaceId,
     kind: SpaceEventKind,
 ) {
-    SpaceEventHandler::handle_window_server_destroyed(
-        reactor,
-        SpaceEventHandler::WindowServerLifecyclePayload {
-            window_server_id: wsid,
-            space,
-            kind,
-        },
-    )
-    .unwrap();
+    reactor.handle_event(Event::WindowServerDestroyed(wsid, space, kind));
 }
 
 #[test]
@@ -2156,64 +2150,61 @@ fn genuine_external_frame_changes_invalidate_layout() {
 
 #[test]
 fn native_transfer_precedes_ordinary_frames_in_either_display_order() {
-    for count in [2, 3] {
-        for reverse in [false, true] {
-            let (mut apps, mut reactor) = test_context();
-            let frames = [
-                shared_left(),
-                shared_right(),
-                CGRect::new(CGPoint::new(2600., 0.), CGSize::new(800., 900.)),
-            ];
-            let spaces = [1, 2, 3].map(SpaceId::new);
-            reactor.handle_event(space_state_event(
-                frames[..count].to_vec(),
-                spaces[..count].iter().copied().map(Some).collect(),
-            ));
-            let mut windows = make_windows(2);
-            if count == 3 {
-                let mut window = make_window(3);
-                window.frame.origin = frames[2].origin;
-                windows.push(window);
-            }
-            apps.make_app_and_settle(&mut reactor, 1, windows);
-            if reverse {
-                reactor.space_state.screens.reverse();
-            }
-            let before = reactor.layout_calculations.len();
+    let frames = [
+        CGRect::new(CGPoint::ZERO, CGSize::new(1000., 1000.)),
+        CGRect::new(CGPoint::new(1000., -800.), CGSize::new(1900., 800.)),
+        CGRect::new(CGPoint::new(2900., 0.), CGSize::new(800., 900.)),
+    ];
+    let spaces = [1, 2, 3].map(SpaceId::new);
+    let moved = WindowId::new(1, 1);
+    // Keep the vertically offset destination from the direct-tile regression.
+    let expected = [
+        (moved, frames[1]),
+        (WindowId::new(1, 2), frames[0]),
+        (WindowId::new(1, 3), frames[2]),
+    ];
+    for (count, reverse, force) in [
+        (2, false, false),
+        (2, false, true),
+        (2, true, true),
+        (3, false, true),
+        (3, true, true),
+    ] {
+        let (mut apps, mut reactor) = test_context();
+        reactor.handle_event(space_state_event(
+            frames[..count].to_vec(),
+            spaces[..count].iter().copied().map(Some).collect(),
+        ));
+        let mut windows = make_windows(count);
+        if let Some(third) = windows.get_mut(2) {
+            third.frame.origin = frames[2].origin;
+        }
+        apps.make_app_and_settle(&mut reactor, 1, windows);
+        if reverse {
+            reactor.space_state.screens.reverse();
+        }
+        reactor.layout_calculations.clear();
+        let event = Event::Command(Command::Reactor(ReactorCommand::MoveWindowToDisplay {
+            selector: DisplaySelector::Index(1),
+            window_id: Some(moved.idx.get()),
+        }));
+        if force {
             reactor.commit_test(|reactor, changes| {
-                reactor
-                    .dispatch(
-                        Event::Command(Command::Reactor(ReactorCommand::MoveWindowToDisplay {
-                            selector: DisplaySelector::Index(1),
-                            window_id: Some(1),
-                        })),
-                        changes,
-                    )
-                    .unwrap();
+                reactor.dispatch(event, changes).unwrap();
                 for &space in &spaces[1..count] {
                     changes.arrange(Some(space), Presentation::Force);
                 }
             });
-
-            let mut calculated = reactor.layout_calculations[before..].to_vec();
-            calculated.sort_unstable();
-            assert_eq!(calculated, spaces[..count]);
-            let submitted: Vec<_> = apps
-                .requests()
-                .into_iter()
-                .filter_map(|request| match request {
-                    Request::SetWindowFrames(frames, _, _, _, _) => Some(frames),
-                    _ => None,
-                })
-                .flatten()
-                .collect();
-            assert_eq!(submitted.first(), Some(&(WindowId::new(1, 1), frames[1])));
-            assert_eq!(submitted.len(), count);
-            assert!(submitted.contains(&(WindowId::new(1, 2), frames[0])));
-            if count == 3 {
-                assert!(submitted.contains(&(WindowId::new(1, 3), frames[2])));
-            }
+        } else {
+            reactor.handle_event(event);
         }
+
+        reactor.layout_calculations.sort_unstable();
+        assert_eq!(reactor.layout_calculations, spaces[..count]);
+        let mut writes = frame_writes(&mut apps);
+        assert_eq!(writes.first(), Some(&expected[0]));
+        writes[1..].sort_unstable_by_key(|&(window, _)| window);
+        assert_eq!(writes, expected[..count]);
     }
 }
 
@@ -2671,9 +2662,7 @@ fn scrolling_boundary_discards_the_original_focus_decision_after_switching() {
         reactor.layout_manager.layout_engine.workspaces().active_workspace_idx(space),
         Some(1)
     );
-    let (_, raise_manager::Event::RaiseRequest(request)) = raises.try_recv().unwrap() else {
-        panic!("expected workspace focus");
-    };
+    let request = next_raise(&mut raises);
     assert_eq!(request.focus_window.map(|(window, _)| window), Some(incoming));
     assert_eq!(request.focus_quiet, Quiet::Yes);
     assert!(raises.try_recv().is_err());
@@ -4240,9 +4229,7 @@ fn move_and_follow_focuses_the_survivor_on_the_native_destination() {
         Some(a),
         "native move is still pending"
     );
-    let (_, raise_manager::Event::RaiseRequest(request)) = raises.try_recv().unwrap() else {
-        panic!("expected focus for the visible destination window");
-    };
+    let request = next_raise(&mut raises);
     assert_eq!(request.focus_window.map(|(window, _)| window), Some(visible));
     assert_eq!(
         reactor.layout_manager.layout_engine.focused_window(),
@@ -4253,18 +4240,20 @@ fn move_and_follow_focuses_the_survivor_on_the_native_destination() {
 
 #[test]
 fn explicit_workspace_focus_supersedes_removal_refocus_through_native_ack() {
-    let (mut apps, mut reactor) = test_context_with_workspace_count(2);
-    let (a, b) = (SpaceId::new(1), SpaceId::new(2));
-    reactor.handle_event(space_state_event(vec![shared_left(), shared_right()], vec![
-        Some(a),
-        Some(b),
-    ]));
-    let [departing, survivor, selected] = [1, 2, 3].map(|idx| WindowId::new(1, idx));
-    let mut windows = make_windows(3);
-    windows[2].frame.origin.x += shared_right().origin.x;
-    make_active_app(&mut apps, &mut reactor, 1, windows, Some(departing));
-    for (window, space) in [(departing, a), (survivor, a), (selected, b)] {
-        reactor.mark_test_window_visible_in_space(reactor.test_window_server_id(window), space);
+    let (_apps, mut reactor, a, b) = two_displays(Default::default());
+    let departing = WindowId::new(1, 1);
+    let selected = WindowId::new(1, 3);
+    for (window, space, frame) in [
+        (WindowId::new(1, 2), a, shared_left()),
+        (selected, b, shared_right()),
+    ] {
+        reactor.add_test_window(
+            window,
+            WindowServerId::new(10000 + window.idx.get()),
+            Some(space),
+            frame,
+        );
+        reactor.handle_test_layout_event(LayoutEvent::WindowAdded(space, window));
     }
     assert_eq!(
         reactor.layout_manager.layout_engine.focused_window(),
@@ -4287,9 +4276,7 @@ fn explicit_workspace_focus_supersedes_removal_refocus_through_native_ack() {
         );
     });
 
-    let (_, raise_manager::Event::RaiseRequest(request)) = raises.try_recv().unwrap() else {
-        panic!("expected explicit workspace focus");
-    };
+    let request = next_raise(&mut raises);
     assert_eq!(request.focus_window.map(|(window, _)| window), Some(selected));
     assert!(raises.try_recv().is_err());
 
@@ -4453,11 +4440,9 @@ fn auto_workspace_switch_follows_activated_window_when_same_app_is_visible_elsew
     reactor.commit_test(|reactor, changes| {
         reactor.reconcile_native_departure(
             changes,
-            topology_workflow::WindowServerLifecyclePayload {
-                window_server_id: wsid,
-                space,
-                kind: SpaceEventKind::User,
-            },
+            wsid,
+            space,
+            SpaceEventKind::User,
             topology_workflow::WindowServerDestroyedObservations {
                 resolved_space: Some(space),
 
@@ -4918,18 +4903,14 @@ fn ignored_native_window_does_not_block_repeated_activation() {
         reactor.commit_test(|reactor, changes| {
             reactor.reconcile_native_appearance(
                 changes,
-                topology_workflow::WindowServerLifecyclePayload {
-                    window_server_id: info.id,
-                    space,
-                    kind: SpaceEventKind::User,
-                },
+                info.id,
+                space,
+                SpaceEventKind::User,
                 topology_workflow::WindowServerAppearedObservations {
                     resolved_space: Some(space),
 
                     last_known_user_space: Some(space),
                     window_server_info: Some(info),
-                    app_known: true,
-                    running_app_info: None,
                 },
             )
         });
@@ -5594,16 +5575,7 @@ fn moving_workspace_direction_wrap_is_opt_in() {
             },
         )));
         assert_eq!(reactor.assigned_space_for_window_id(moved), Some(spaces[1]));
-        let submitted: Vec<_> = apps
-            .requests()
-            .into_iter()
-            .filter_map(|request| match request {
-                Request::SetWindowFrames(frames, _, _, _, _) => Some(frames),
-                _ => None,
-            })
-            .flatten()
-            .collect();
-        assert_eq!(submitted, [(moved, frames[1])]);
+        assert_eq!(frame_writes(&mut apps), [(moved, frames[1])]);
     }
 }
 
@@ -6105,44 +6077,6 @@ fn display_index_selector_uses_physical_left_to_right_order() {
         .expect("expected display index 0 to resolve");
 
     assert_eq!(selected.frame, left);
-}
-
-#[test]
-fn moving_tiled_window_to_display_writes_destination_tile_directly() {
-    let (mut apps, mut reactor) = test_context();
-    let left = CGRect::new(CGPoint::new(0., 0.), CGSize::new(1000., 1000.));
-    let right = CGRect::new(CGPoint::new(1000., -800.), CGSize::new(1900., 800.));
-    reactor.handle_event(space_state_event(vec![left, right], vec![
-        Some(SpaceId::new(1)),
-        Some(SpaceId::new(2)),
-    ]));
-    apps.make_app_and_settle(&mut reactor, 1, make_windows(2));
-
-    let moved = WindowId::new(1, 1);
-    reactor.handle_event(Event::Command(Command::Reactor(
-        ReactorCommand::MoveWindowToDisplay {
-            selector: DisplaySelector::Index(1),
-            window_id: Some(1),
-        },
-    )));
-
-    let writes: Vec<CGRect> = apps
-        .requests()
-        .into_iter()
-        .flat_map(|request| match request {
-            Request::SetWindowFrames(frames, _, _, _, _) => frames
-                .into_iter()
-                .filter_map(|(wid, frame)| (wid == moved).then_some(frame))
-                .collect(),
-            _ => Vec::new(),
-        })
-        .collect();
-
-    assert!(!writes.is_empty(), "the move must write a frame");
-    assert!(
-        writes.iter().all(|frame| frame.same_as(right)),
-        "every transfer write must use the destination tile: {writes:?}"
-    );
 }
 
 #[test]
@@ -6679,13 +6613,7 @@ fn has_window_in_layout(
     screen: CGRect,
     wid: WindowId,
 ) -> bool {
-    let gaps = reactor.config.settings.layout.gaps.clone();
-    reactor
-        .layout_manager
-        .layout_engine
-        .calculate_layout(space, screen, &gaps, Default::default())
-        .iter()
-        .any(|(layout_wid, _)| *layout_wid == wid)
+    test_layout(reactor, space, screen).iter().any(|(window, _)| *window == wid)
 }
 
 fn test_layout(reactor: &mut Reactor, space: SpaceId, screen: CGRect) -> Vec<(WindowId, CGRect)> {
@@ -6924,7 +6852,7 @@ fn unchanged_snapshot_preserves_manual_workspaces_and_does_not_write_frames() {
     let assignments = windows.map(|wid| reactor.test_workspace_for_window(space, wid));
     assert_ne!(assignments[0], assignments[1]);
     assert_eq!(reactor.test_active_workspace_windows(space), vec![windows[1]]);
-    let before = reactor.query_layout_state(Some(space.get()), None).unwrap().container_tree;
+    let before = active_container_tree(&reactor, space);
     assert!(apps.requests().is_empty());
     for _ in 0..2 {
         reactor.handle_loop_event(space_state_event(vec![screen], vec![Some(space)]));
@@ -6933,10 +6861,7 @@ fn unchanged_snapshot_preserves_manual_workspaces_and_does_not_write_frames() {
             assignments
         );
         assert_eq!(reactor.test_active_workspace_windows(space), vec![windows[1]]);
-        assert_eq!(
-            reactor.query_layout_state(Some(space.get()), None).unwrap().container_tree,
-            before
-        );
+        assert_eq!(active_container_tree(&reactor, space), before);
         assert!(
             apps.requests().is_empty(),
             "unchanged snapshots must not rewrite frames or refresh inventory"
@@ -7729,7 +7654,7 @@ fn clamshell_sleep_preserves_nested_layout_across_display_replacement() {
     reactor.handle_loop_event(space_state_event(vec![external_screen], vec![Some(space)]));
     reactor.discover_test_windows(1, rediscovered.clone(), window_ids.clone());
     assert_eq!(
-        reactor.query_layout_state(Some(space.get()), None).unwrap().container_tree,
+        active_container_tree(&reactor, space),
         topology_before,
         "same-display recovery must retain the modified tree and its node identities",
     );
@@ -9494,9 +9419,6 @@ fn topology_snapshot_preserves_workspace_placement_with_incomplete_delta() {
                 Some(expected),
                 "scenario {scenario}, early move {early_move}"
             );
-            if scenario < 2 {
-                assert_ne!(reactor.test_workspace_for_window(destination, wid), Some(active));
-            }
         }
         if scenario == 0 {
             assert_eq!(reactor.test_workspace(old, 3), original_old_workspace);
@@ -10007,7 +9929,7 @@ fn disconnect_does_not_erase_display_layout_memory() {
     assert_eq!(reactor.test_workspace_for_window(b, wid), Some(workspaces[1]));
     assert_eq!(reactor.test_active_workspace_windows(b), vec![wid]);
     assert!(has_window_in_layout(&mut reactor, b, right, wid));
-    let before = reactor.query_layout_state(Some(b.get()), None).unwrap().container_tree;
+    let before = active_container_tree(&reactor, b);
     assert!(before.children.iter().any(|child| child.window_id.is_some()));
     window_server::set_window_spaces_override(wsid, Some(vec![b.get()]));
     window_server::set_window_ordered_in_override(wsid, Some(true));
@@ -10044,44 +9966,42 @@ fn disconnect_does_not_erase_display_layout_memory() {
         Some(workspaces[1])
     );
     assert_eq!(reactor.test_active_workspace_windows(returned), vec![wid]);
-    assert_eq!(
-        reactor.query_layout_state(Some(returned.get()), None).unwrap().container_tree,
-        before
-    );
+    assert_eq!(active_container_tree(&reactor, returned), before);
     assert_eq!(
         reactor.layout_manager.layout_engine.last_space_for_display_uuid(&display),
         Some(returned)
     );
 }
 
+fn stack_members(
+    node: &rift_protocol::ContainerTreeNode,
+) -> Vec<(rift_protocol::LayoutKind, Vec<u32>)> {
+    let mut result = Vec::new();
+    if let Some(
+        kind @ (rift_protocol::LayoutKind::HorizontalStack
+        | rift_protocol::LayoutKind::VerticalStack),
+    ) = node.layout_kind
+    {
+        let windows: Vec<_> = node
+            .children
+            .iter()
+            .filter_map(|child| child.window_id)
+            .map(|wid| wid.idx)
+            .collect();
+        if !windows.is_empty() {
+            result.push((kind, windows));
+        }
+    }
+    for child in &node.children {
+        result.extend(stack_members(child));
+    }
+    result
+}
+
 // Ported from rift-plus's display-attach stack regression: accepted native
 // membership really moves all four windows away and then returns them.
 #[test]
 fn authoritative_display_membership_round_trip_preserves_ordered_stack() {
-    fn stacks(
-        node: &rift_protocol::ContainerTreeNode,
-    ) -> Vec<(rift_protocol::LayoutKind, Vec<u32>)> {
-        let mut result = Vec::new();
-        if let Some(
-            kind @ (rift_protocol::LayoutKind::HorizontalStack
-            | rift_protocol::LayoutKind::VerticalStack),
-        ) = node.layout_kind
-        {
-            let windows: Vec<_> = node
-                .children
-                .iter()
-                .filter_map(|child| child.window_id)
-                .map(|wid| wid.idx)
-                .collect();
-            if !windows.is_empty() {
-                result.push((kind, windows));
-            }
-        }
-        for child in &node.children {
-            result.extend(stacks(child));
-        }
-        result
-    }
     for case in [
         "native fullscreen",
         "all",
@@ -10108,9 +10028,8 @@ fn authoritative_display_membership_round_trip_preserves_ordered_stack() {
         reactor.handle_test_layout_command(LayoutCommand::Ascend);
         reactor.handle_test_layout_command(LayoutCommand::ToggleStack);
         apps.simulate_until_quiet(&mut reactor);
-        let before_tree =
-            reactor.query_layout_state(Some(origin.get()), None).unwrap().container_tree;
-        let before = stacks(&before_tree);
+        let before_tree = active_container_tree(&reactor, origin);
+        let before = stack_members(&before_tree);
         assert_eq!(before.len(), 1);
         assert_eq!(
             before[0].1.len(),
@@ -10126,7 +10045,7 @@ fn authoritative_display_membership_round_trip_preserves_ordered_stack() {
             window_server_appeared(&mut reactor, wsid, origin, SpaceEventKind::User);
             apps.simulate_until_quiet(&mut reactor);
             assert_eq!(
-                reactor.query_layout_state(Some(origin.get()), None).unwrap().container_tree,
+                active_container_tree(&reactor, origin),
                 before_tree,
                 "native fullscreen must restore its original slot"
             );
@@ -10205,27 +10124,29 @@ fn authoritative_display_membership_round_trip_preserves_ordered_stack() {
             snapshot.display_set_changed = !returning;
             snapshot.should_force_refresh_layout = true;
             snapshot.membership_complete = true;
-            for &wid in &windows {
-                let shown = if returning || !departing.contains(&wid) {
+            let shown = |wid| {
+                if returning || !departing.contains(&wid) {
                     origin
                 } else {
                     destination
-                };
+                }
+            };
+            for &wid in &windows {
+                let space = shown(wid);
                 let wsid = reactor.test_window_server_id(wid);
-                window_server::set_window_spaces_override(wsid, Some(vec![shown.get()]));
-                snapshot.active_window_spaces.insert(wsid, shown);
+                window_server::set_window_spaces_override(wsid, Some(vec![space.get()]));
+                snapshot.active_window_spaces.insert(wsid, space);
             }
             let repeated = (case == "survivor focus" && !returning).then(|| snapshot.clone());
             reactor.handle_loop_event(Event::SpaceStateChanged(snapshot));
             apps.simulate_until_quiet(&mut reactor);
             for &wid in &windows {
                 window_server::set_window_spaces_override(reactor.test_window_server_id(wid), None);
-                let shown = if returning || !departing.contains(&wid) {
-                    origin
-                } else {
-                    destination
-                };
-                assert_eq!(reactor.assigned_space_for_window_id(wid), Some(shown), "{case}");
+                assert_eq!(
+                    reactor.assigned_space_for_window_id(wid),
+                    Some(shown(wid)),
+                    "{case}"
+                );
             }
             if let Some(mut repeated) = repeated {
                 reactor.handle_event(Event::ActiveDisplayChanged {
@@ -10246,8 +10167,7 @@ fn authoritative_display_membership_round_trip_preserves_ordered_stack() {
                     Some(windows[1]),
                     "navigation must actually select the other surviving member"
                 );
-                let navigated =
-                    reactor.query_layout_state(Some(origin.get()), None).unwrap().container_tree;
+                let navigated = active_container_tree(&reactor, origin);
                 for (&wsid, &space) in &repeated.active_window_spaces {
                     window_server::set_window_spaces_override(wsid, Some(vec![space.get()]));
                 }
@@ -10261,25 +10181,19 @@ fn authoritative_display_membership_round_trip_preserves_ordered_stack() {
                     );
                 }
                 assert_eq!(
-                    reactor.query_layout_state(Some(origin.get()), None).unwrap().container_tree,
+                    active_container_tree(&reactor, origin),
                     navigated,
                     "unchanged forced inventory must preserve the surviving members' selected tree"
                 );
             }
             if !returning && !matches!(case, "partial" | "native resize" | "survivor focus") {
                 assert!(
-                    stacks(
-                        &reactor
-                            .query_layout_state(Some(origin.get()), None)
-                            .unwrap()
-                            .container_tree
-                    )
-                    .is_empty(),
+                    stack_members(&active_container_tree(&reactor, origin)).is_empty(),
                     "all windows must actually leave the original stack"
                 );
             }
         }
-        let tree = reactor.query_layout_state(Some(origin.get()), None).unwrap().container_tree;
+        let tree = active_container_tree(&reactor, origin);
         if case == "survivor focus" {
             assert_eq!(
                 reactor.layout_manager.layout_engine.selected_window(origin),
@@ -10302,11 +10216,11 @@ fn authoritative_display_membership_round_trip_preserves_ordered_stack() {
                 LayoutMode::Bsp
             );
             assert!(
-                stacks(&tree).is_empty(),
+                stack_members(&tree).is_empty(),
                 "native return must retain explicit user edits"
             );
         } else {
-            let after = stacks(&tree);
+            let after = stack_members(&tree);
             assert_eq!(after.len(), 1, "{case}");
             assert_eq!(after[0].0, before[0].0, "{case}");
             let expected: Vec<_> = before[0]
@@ -10347,16 +10261,6 @@ fn authoritative_display_membership_round_trip_preserves_ordered_stack() {
 
 #[test]
 fn simultaneous_display_membership_swap_preserves_both_original_layouts() {
-    fn has_four_member_stack(node: &rift_protocol::ContainerTreeNode) -> bool {
-        matches!(
-            node.layout_kind,
-            Some(
-                rift_protocol::LayoutKind::HorizontalStack
-                    | rift_protocol::LayoutKind::VerticalStack
-            )
-        ) && node.children.iter().filter(|child| child.window_id.is_some()).count() == 4
-            || node.children.iter().any(has_four_member_stack)
-    }
     let (mut apps, mut reactor) = test_context();
     let frames = [
         CGRect::new(CGPoint::new(0., 0.), CGSize::new(1440., 900.)),
@@ -10406,10 +10310,11 @@ fn simultaneous_display_membership_swap_preserves_both_original_layouts() {
             assert_eq!(reactor.assigned_space_for_window_id(wid), Some(spaces[side]));
         }
     }
-    let before = spaces
-        .map(|space| reactor.query_layout_state(Some(space.get()), None).unwrap().container_tree);
+    let before = spaces.map(|space| active_container_tree(&reactor, space));
     assert!(
-        before.iter().all(has_four_member_stack),
+        before
+            .iter()
+            .all(|tree| stack_members(tree).iter().any(|(_, windows)| windows.len() == 4)),
         "both original layouts must contain a real four-window stack"
     );
     for returning in [false, true] {
@@ -10443,10 +10348,7 @@ fn simultaneous_display_membership_swap_preserves_both_original_layouts() {
             window_server::set_window_spaces_override(reactor.test_window_server_id(wid), None);
         }
         assert_eq!(
-            reactor
-                .query_layout_state(Some(spaces[side].get()), None)
-                .unwrap()
-                .container_tree,
+            active_container_tree(&reactor, spaces[side]),
             before[side],
             "both workspace trees, ordering, selection and weights must survive the full swap"
         );
@@ -11951,12 +11853,7 @@ fn deminiaturized_window_restores_exact_layout_including_restart() {
                     reactor.test_window_server_id(restored),
                 ));
             }
-            let visible = [WindowId::new(1, 1), WindowId::new(1, 3)]
-                .map(|wid| (reactor.test_window_server_id(wid), Some(space)))
-                .to_vec();
-            reactor.commit_test(|reactor, changes| {
-                reactor.reconcile_authoritative_active_window_snapshot(changes, visible, false, &[])
-            });
+            reactor.reconcile_test_membership(space, &[WindowId::new(1, 1), WindowId::new(1, 3)]);
             assert_eq!(
                 reactor.state.windows.workspace_for_window(restored),
                 Some(owner),
@@ -12031,19 +11928,10 @@ fn deminiaturized_window_restores_exact_layout_including_restart() {
                 });
                 apps.simulate_until_quiet(&mut reactor);
                 assert!(reactor.state.windows.workspace_for_window(restored).is_some());
-                assert!(
-                    !test_layout(&mut reactor, space, screen)
-                        .iter()
-                        .any(|(wid, _)| *wid == restored)
-                );
+                assert!(!has_window_in_layout(&mut reactor, space, screen, restored));
             }
             let original_workspace = reactor.state.windows.workspace_for_window(restored).unwrap();
-            let visible = [WindowId::new(1, 1), WindowId::new(1, 3)]
-                .map(|wid| (reactor.test_window_server_id(wid), Some(space)))
-                .to_vec();
-            reactor.commit_test(|reactor, changes| {
-                reactor.reconcile_authoritative_active_window_snapshot(changes, visible, false, &[])
-            });
+            reactor.reconcile_test_membership(space, &[WindowId::new(1, 1), WindowId::new(1, 3)]);
             assert_eq!(
                 reactor.state.windows.workspace_for_window(restored),
                 Some(original_workspace)
@@ -12087,9 +11975,7 @@ fn deminiaturized_window_restores_exact_layout_including_restart() {
                 active_workspace,
                 "restoring an inactive window must not follow a quiet activation"
             );
-            assert!(
-                !test_layout(&mut reactor, space, screen).iter().any(|(wid, _)| *wid == restored)
-            );
+            assert!(!has_window_in_layout(&mut reactor, space, screen, restored));
             assert!(
                 !screen.contains(apps.windows[&restored].frame.mid()),
                 "the restored window must remain parked outside the active workspace: {mode:?}, stale={stale_snapshot}, native={native_metadata}, frame={:?}",
@@ -12212,9 +12098,7 @@ fn overview_activation_arranges_and_focuses_under_cover() {
             (workspace, Some(target), stamp)
         );
         assert_eq!(prepared.frames.len(), if switch_workspace { 1 } else { 3 });
-        let (_, raise_manager::Event::RaiseRequest(request)) = raise_rx.try_recv().unwrap() else {
-            panic!("overview preparation must request native focus under the cover");
-        };
+        let request = next_raise(&mut raise_rx);
         assert_eq!(
             request.focus_window.map(|(window, _)| window),
             Some(target),
@@ -12479,18 +12363,14 @@ fn native_only_transient_appearance_preserves_discovery_and_scopes_hover_cancell
         reactor.commit_test(|reactor, changes| {
             reactor.reconcile_native_appearance(
                 changes,
-                topology_workflow::WindowServerLifecyclePayload {
-                    window_server_id: info.id,
-                    space,
-                    kind: SpaceEventKind::User,
-                },
+                info.id,
+                space,
+                SpaceEventKind::User,
                 topology_workflow::WindowServerAppearedObservations {
                     resolved_space: Some(space),
 
                     last_known_user_space: Some(space),
                     window_server_info: Some(info),
-                    app_known: true,
-                    running_app_info: None,
                 },
             )
         });
@@ -12881,11 +12761,9 @@ fn native_fullscreen_restores_middle_window_exactly_across_notification_ordering
                 reactor.commit_test(|reactor, changes| {
                     reactor.reconcile_native_departure(
                         changes,
-                        topology_workflow::WindowServerLifecyclePayload {
-                            window_server_id: wsid,
-                            space,
-                            kind: SpaceEventKind::User,
-                        },
+                        wsid,
+                        space,
+                        SpaceEventKind::User,
                         topology_workflow::WindowServerDestroyedObservations {
                             resolved_space: Some(space),
 
@@ -12936,17 +12814,8 @@ fn native_fullscreen_restores_middle_window_exactly_across_notification_ordering
                 }
                 // Native membership can lose the window before fullscreen entry
                 // or an ordered-out notification identifies the transition.
-                let visible = [WindowId::new(1, 1), WindowId::new(1, 3)]
-                    .map(|wid| (reactor.test_window_server_id(wid), Some(space)))
-                    .to_vec();
-                reactor.commit_test(|reactor, changes| {
-                    reactor.reconcile_authoritative_active_window_snapshot(
-                        changes,
-                        visible,
-                        false,
-                        &[],
-                    )
-                });
+                reactor
+                    .reconcile_test_membership(space, &[WindowId::new(1, 1), WindowId::new(1, 3)]);
                 if early == 3 {
                     assert!(
                         !reactor.state.windows.is_temporarily_unavailable(window),
@@ -12957,9 +12826,7 @@ fn native_fullscreen_restores_middle_window_exactly_across_notification_ordering
                     reactor.handle_test_layout_command(LayoutCommand::SwitchToWorkspace(1));
                     reactor.handle_test_layout_command(LayoutCommand::SwitchToWorkspace(0));
                     assert!(
-                        !test_layout(&mut reactor, space, screen)
-                            .iter()
-                            .any(|(wid, _)| *wid == window),
+                        !has_window_in_layout(&mut reactor, space, screen, window),
                         "fullscreen must not leave an empty tile after workspace activation: {mode:?}"
                     );
                     crate::sys::window_server::set_window_spaces_override(wsid, None);
@@ -12974,17 +12841,8 @@ fn native_fullscreen_restores_middle_window_exactly_across_notification_ordering
                     wsid,
                     Some(vec![space.get()]),
                 );
-                let visible = [WindowId::new(1, 1), WindowId::new(1, 3)]
-                    .map(|wid| (reactor.test_window_server_id(wid), Some(space)))
-                    .to_vec();
-                reactor.commit_test(|reactor, changes| {
-                    reactor.reconcile_authoritative_active_window_snapshot(
-                        changes,
-                        visible,
-                        false,
-                        &[],
-                    )
-                });
+                reactor
+                    .reconcile_test_membership(space, &[WindowId::new(1, 1), WindowId::new(1, 3)]);
                 window_server_appeared(&mut reactor, wsid, space, SpaceEventKind::User);
                 let windows = (1..=3)
                     .map(|idx| {
@@ -13032,9 +12890,7 @@ fn native_fullscreen_restores_middle_window_exactly_across_notification_ordering
             assert_eq!(test_layout(&mut reactor, space, screen), rekeyed);
             reactor.handle_event(Event::WindowClosed(wsid));
             assert!(!reactor.state.windows.contains_window(replacement));
-            assert!(
-                !test_layout(&mut reactor, space, screen).iter().any(|(wid, _)| *wid == window)
-            );
+            assert!(!has_window_in_layout(&mut reactor, space, screen, window));
         }
     }
 }

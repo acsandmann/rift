@@ -136,6 +136,16 @@ impl Reactor {
         self.finish(changes, None, None);
     }
 
+    pub(super) fn reconcile_test_membership(&mut self, space: SpaceId, windows: &[WindowId]) {
+        let visible = windows
+            .iter()
+            .map(|&id| (self.test_window_server_id(id), Some(space)))
+            .collect();
+        self.commit_test(|reactor, changes| {
+            reactor.reconcile_authoritative_active_window_snapshot(changes, visible, false, &[])
+        });
+    }
+
     pub(super) fn handle_test_layout_event(&mut self, event: LayoutEvent) {
         self.commit_test(|reactor, changes| reactor.reconcile_layout_event(changes, event));
     }
