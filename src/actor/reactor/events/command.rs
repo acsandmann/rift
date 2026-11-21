@@ -155,6 +155,9 @@ impl Reactor {
             .focus_window
             .and_then(|window| self.assigned_space_for_window_id(window));
         if is_focus_command {
+            if let Some(space) = response.layout_space {
+                changes.arrange(Some(space), Presentation::Animated).layout_changed = true;
+            }
             if let Some(space) = focus_space.or(edit_space)
                 && response.changed
             {

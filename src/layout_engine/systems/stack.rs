@@ -277,6 +277,15 @@ impl StackLayoutSystem {
         }
     }
 
+    fn exit_fullscreen(&mut self, layout: LayoutId, window: WindowId) -> bool {
+        let stack = &mut self.layouts[layout];
+        let Some(m) = stack.members.iter_mut().find(|m| m.window == window) else {
+            return false;
+        };
+        super::exit_fullscreen_mode(&mut m.fullscreen, &mut m.within_gaps)
+            | super::exit_fullscreen_mode(&mut stack.fullscreen, &mut stack.within_gaps)
+    }
+
     pub(crate) fn collect_group_containers(
         &self,
         layout: LayoutId,
@@ -570,6 +579,9 @@ impl LayoutSystem for StackLayoutSystem {
 
             LayoutEdit::Fullscreen { within_gaps } => {
                 EditResult::Raise(self.toggle_fullscreen(layout, within_gaps))
+            }
+            LayoutEdit::ExitFullscreen(window) => {
+                EditResult::from(self.exit_fullscreen(layout, window))
             }
             LayoutEdit::Swap(a, b) => EditResult::from(self.swap_windows(layout, a, b)),
             LayoutEdit::ReorderTab { window, target } => {

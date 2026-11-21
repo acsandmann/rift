@@ -335,6 +335,20 @@ impl GroupLayouts {
         }
     }
 
+    pub(super) fn exit_fullscreen(&mut self, layout: LayoutId, window: WindowId) -> bool {
+        let mut next = self.window_node(layout, window);
+        let mut exited = false;
+        while let Some(node) = next {
+            let info = &mut self.tree.map[node].layout;
+            exited |= super::exit_fullscreen_mode(
+                &mut info.is_fullscreen,
+                &mut info.is_fullscreen_within_gaps,
+            );
+            next = node.parent(self.map());
+        }
+        exited
+    }
+
     pub(super) fn split_selection(&mut self, layout: LayoutId, kind: LayoutKind) -> EditResult {
         if !self.inactive.is_empty() && self.find_best_focus_target(self.root(layout)).is_none() {
             return EditResult::Unchanged;

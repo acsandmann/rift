@@ -1495,6 +1495,9 @@ impl LayoutSystem for BspLayoutSystem {
             LayoutEdit::Fullscreen { within_gaps } => {
                 EditResult::Raise(self.toggle_fullscreen(layout, within_gaps))
             }
+            LayoutEdit::ExitFullscreen(window) => {
+                EditResult::from(self.exit_fullscreen(layout, window))
+            }
             LayoutEdit::Swap(a, b) => EditResult::from(self.swap_windows(layout, a, b)),
             LayoutEdit::Drop { source, target, action } => {
                 EditResult::from(self.apply_target_drop(layout, source, target, action))
@@ -1805,6 +1808,21 @@ impl BspLayoutSystem {
         }
         super::toggle_fullscreen_mode(fullscreen, fullscreen_within_gaps, within_gaps);
         active.into_iter().collect()
+    }
+
+    fn exit_fullscreen(&mut self, layout: LayoutId, window: WindowId) -> bool {
+        let Some(leaf) = self.node_for_window_in_layout(layout, window) else {
+            return false;
+        };
+        let NodeKind::Leaf {
+            fullscreen,
+            fullscreen_within_gaps,
+            ..
+        } = self.kind_mut(leaf)
+        else {
+            return false;
+        };
+        super::exit_fullscreen_mode(fullscreen, fullscreen_within_gaps)
     }
 
     fn join_selection_with_direction(&mut self, layout: LayoutId, direction: Direction) -> bool {

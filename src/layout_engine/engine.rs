@@ -2585,7 +2585,10 @@ impl LayoutEngine {
                     "MoveFocus command received, direction: {:?}, is_floating: {}",
                     direction, is_floating
                 );
-                return self.move_focus_internal(
+                let previous = (self.layout_settings.exit_fullscreen_on_move_focus && !is_floating)
+                    .then(|| self.workspaces[workspace_id].layout_system.selected_window(layout))
+                    .flatten();
+                let mut response = self.move_focus_internal(
                     window_store,
                     space,
                     visible_spaces,
@@ -2593,6 +2596,16 @@ impl LayoutEngine {
                     direction,
                     is_floating,
                 );
+                if let Some(previous) = previous
+                    && response.focus_window.is_some_and(|window| window != previous)
+                    && self.workspaces[workspace_id]
+                        .layout_system
+                        .edit(layout, LayoutEdit::ExitFullscreen(previous))
+                        .changed()
+                {
+                    response.layout_space = Some(space);
+                }
+                response
             }
             LayoutCommand::Ascend | LayoutCommand::Descend => {
                 let focus = if matches!(command, LayoutCommand::Descend) {

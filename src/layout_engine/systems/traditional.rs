@@ -356,6 +356,9 @@ impl LayoutSystem for TraditionalLayoutSystem {
             LayoutEdit::Fullscreen { within_gaps } => {
                 EditResult::Raise(self.tiles.toggle_fullscreen(layout, within_gaps))
             }
+            LayoutEdit::ExitFullscreen(window) => {
+                EditResult::from(self.tiles.exit_fullscreen(layout, window))
+            }
             LayoutEdit::Swap(a, b) => EditResult::from(self.tiles.swap_windows(layout, a, b)),
             LayoutEdit::ReorderTab { window, target } => {
                 EditResult::from(self.tiles.move_stack_tab(layout, window, target))

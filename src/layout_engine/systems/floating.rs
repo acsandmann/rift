@@ -537,6 +537,9 @@ impl LayoutSystem for FloatingLayoutSystem {
             LayoutEdit::Fullscreen { within_gaps } => {
                 EditResult::Raise(self.groups.toggle_fullscreen(layout, within_gaps))
             }
+            LayoutEdit::ExitFullscreen(window) => {
+                EditResult::from(self.groups.exit_fullscreen(layout, window))
+            }
             LayoutEdit::Swap(a, b) => EditResult::from(self.groups.swap_windows(layout, a, b)),
             LayoutEdit::ReorderTab { window, target } => {
                 EditResult::from(self.groups.move_stack_tab(layout, window, target))
