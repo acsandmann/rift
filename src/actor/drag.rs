@@ -171,17 +171,15 @@ impl DragActor {
 
     pub fn kind(&self) -> Option<DragKind> { self.session().map(|session| session.kind) }
 
-    /// Update reactor-resolved space membership and invalidate destination state.
-    pub fn update_current_space(&mut self, current_space: Option<SpaceId>) -> bool {
+    /// Update reactor-resolved space membership, with that space's scene, and invalidate
+    /// destination state.
+    pub fn update_current_space(&mut self, current_space: Option<SpaceId>, scene: DragScene) {
         let Some(session) = &mut self.session else {
-            return false;
+            return;
         };
-        if session.source.current_space == current_space {
-            return false;
-        }
         session.source.current_space = current_space;
+        session.scene = scene;
         session.invalidate_drop();
-        true
     }
 
     pub fn replace_scene(&mut self, scene: DragScene) {
@@ -191,11 +189,7 @@ impl DragActor {
         let previous = session.target.intent();
         session.scene = scene;
         session.invalidate_drop();
-        if self.settings.enabled
-            && session.source.tiled
-            && matches!(session.kind, DragKind::NativeMove | DragKind::ModifierMove)
-            && session.source.origin_space == session.source.current_space
-        {
+        if self.settings.enabled && session.source.tiled && session.kind.is_move() {
             let next = hit_test_available(
                 &session.scene,
                 session.pointer,
@@ -272,15 +266,11 @@ impl DragActor {
         self.session = Some(Session::new(source, MouseButton::Left, pointer, scene, kind));
     }
 
-    /// Updates an existing native drag without rebuilding its immutable scene.
+    /// Updates an existing native drag's frame. The pointer, not the frame, decides which
+    /// display the drag is on (`update_current_space`).
     ///
     /// Returns `true` when `window` owns the active native drag session.
-    pub fn update_native(
-        &mut self,
-        window: WindowId,
-        frame: CGRect,
-        current_space: Option<SpaceId>,
-    ) -> bool {
+    pub fn update_native(&mut self, window: WindowId, frame: CGRect) -> bool {
         let Some(session) = &mut self.session else {
             return false;
         };
@@ -295,10 +285,6 @@ impl DragActor {
         } else {
             DragKind::NativeResize
         };
-        if session.source.current_space != current_space {
-            session.source.current_space = current_space;
-            session.invalidate_drop();
-        }
         true
     }
 
@@ -341,7 +327,6 @@ impl DragActor {
         let next = if !self.settings.enabled
             || session.kind == DragKind::NativeResize
             || !session.source.tiled
-            || session.source.origin_space != session.source.current_space
         {
             None
         } else {
@@ -1004,7 +989,7 @@ mod tests {
         actor.set_preview(intent, Some(rect()));
         assert!(actor.target().is_some());
 
-        assert!(actor.update_current_space(Some(destination)));
+        actor.update_current_space(Some(destination), DragScene::default());
         assert_eq!(actor.source().unwrap().current_space, Some(destination));
         assert!(actor.intent().is_none());
         assert!(actor.target().is_none());

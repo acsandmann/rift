@@ -1995,22 +1995,27 @@ impl Reactor {
                 return Ok(());
             }
             Event::DragMotion(motion) => {
-                let mut intent_changed = self.drag_manager.actor.motion(motion);
-                if self.drag_manager.actor.kind()
-                    == Some(crate::actor::drag::DragKind::ModifierMove)
+                // The display under the pointer is where a move drops, for native drags too:
+                // macOS puts a dragged window on the pointer's display while most of its frame
+                // can still be on the old one. Entering a display swaps in its scene.
+                let mut intent_changed = false;
+                if let Some(source) = self.drag_manager.actor.source()
+                    && self.drag_manager.actor.kind().is_some_and(|kind| kind.is_move())
                 {
-                    let current_space =
-                        self.screen_for_point(motion.point)
-                            .and_then(|screen| screen.space)
-                            .or_else(|| {
-                                self.drag_manager.actor.source().and_then(|source| {
-                                    self.best_space_for_frame(&source.last_frame)
-                                })
-                            });
-                    if self.drag_manager.actor.update_current_space(current_space) {
-                        intent_changed |= self.drag_manager.actor.motion(motion);
+                    let current_space = self
+                        .screen_for_point(motion.point)
+                        .and_then(|screen| screen.space)
+                        .or_else(|| self.best_space_for_frame(&source.last_frame));
+                    if current_space != source.current_space {
+                        let scene = current_space
+                            .filter(|_| source.tiled)
+                            .map(|space| self.drag_scene(source.window, space))
+                            .unwrap_or_default();
+                        self.drag_manager.actor.update_current_space(current_space, scene);
+                        intent_changed = true;
                     }
                 }
+                intent_changed |= self.drag_manager.actor.motion(motion);
                 if intent_changed {
                     self.resolve_drag_preview();
                 }

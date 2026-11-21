@@ -82,8 +82,14 @@ impl Reactor {
 
         let start = self.best_space_for_frame(&source.origin_frame);
         let landing = self.best_space_for_frame(&source.last_frame);
-        let crossing =
-            landing.filter(|space| Some(*space) != start && self.is_space_active(*space));
+        // The pointer's display is where the drop lands; the frame can still be mostly on the
+        // display the drag left.
+        let crossing = source
+            .current_space
+            .filter(|space| *space != owner && self.is_space_active(*space))
+            .or_else(|| {
+                landing.filter(|space| Some(*space) != start && self.is_space_active(*space))
+            });
         let crossing = crossing.or_else(|| {
             // The last AX frame can lag mouse-up. Use a complete membership sample
             // only when current WindowServer membership corroborates its destination.
@@ -110,9 +116,9 @@ impl Reactor {
             return;
         };
 
-        if let Some(target) = commit.target
+        let target = commit.target.filter(|target| target.intent.space == space);
+        if let Some(target) = target
             && owner == space
-            && target.intent.space == space
             && self.state.windows.contains_window(target.intent.window)
         {
             trace!(source=?window, target=?target.intent.window, action=?target.intent.action, "performing window drop");
@@ -149,7 +155,9 @@ impl Reactor {
                 &crate::layout_engine::WorkspaceDropRequest {
                     window,
                     workspace: destination,
-                    target: None,
+                    target: target
+                        .filter(|_| space != owner)
+                        .map(|target| (target.intent.window, target.intent.action)),
                     frame,
                 },
             ) && space != owner

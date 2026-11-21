@@ -11,6 +11,10 @@ pub enum DragKind {
     ModifierMove,
 }
 
+impl DragKind {
+    pub fn is_move(self) -> bool { matches!(self, Self::NativeMove | Self::ModifierMove) }
+}
+
 #[derive(Debug, Clone, Copy)]
 pub struct DragSceneTarget {
     pub window: WindowId,

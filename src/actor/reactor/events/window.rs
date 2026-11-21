@@ -150,7 +150,7 @@ impl Reactor {
                 .store_floating_position(workspace, wid, new_frame);
         }
 
-        if self.drag_manager.actor.update_native(wid, new_frame, new_space) {
+        if self.drag_manager.actor.update_native(wid, new_frame) {
             self.drag_manager.sync_preview();
             if !old_frame.size.same_as(new_frame.size) && active_resize_space.is_some() {
                 self.reconcile_layout_event(changes, LayoutEvent::WindowResized {
