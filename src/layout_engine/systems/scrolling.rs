@@ -1795,6 +1795,17 @@ impl ScrollingLayoutSystem {
         }
         vec![wid]
     }
+
+    fn exit_fullscreen(&mut self, layout: LayoutId, window: WindowId) -> bool {
+        let Some(state) = self.layouts.get_mut(layout) else {
+            return false;
+        };
+        let exited = state.arrangement.fullscreen.remove(&window).is_some();
+        if exited {
+            state.restore_fullscreen_view();
+        }
+        exited
+    }
 }
 
 impl LayoutSystem for ScrollingLayoutSystem {
@@ -2065,6 +2076,9 @@ impl LayoutSystem for ScrollingLayoutSystem {
             } => EditResult::from(self.move_selection(layout, direction)),
             LayoutEdit::Fullscreen { within_gaps } => {
                 EditResult::Raise(self.toggle_fullscreen(layout, within_gaps))
+            }
+            LayoutEdit::ExitFullscreen(window) => {
+                EditResult::from(self.exit_fullscreen(layout, window))
             }
             LayoutEdit::Swap(a, b) => EditResult::from(self.swap_windows(layout, a, b)),
             LayoutEdit::Drop { source, target, action } => {
