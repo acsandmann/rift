@@ -886,6 +886,22 @@ impl Arrangement {
         Some((self.active_column, row))
     }
 
+    fn select_available_column(
+        &mut self,
+        preferred: Option<ColumnId>,
+        inactive: &HashSet<WindowId>,
+    ) -> Option<ColumnId> {
+        let bookmarked =
+            preferred.and_then(|id| self.columns.iter().position(|column| column.id == id));
+        let candidate = bookmarked
+            .into_iter()
+            .chain(self.active_column..self.columns.len())
+            .chain((0..self.active_column).rev())
+            .find(|&index| self.columns[index].windows().any(|w| !inactive.contains(w)))?;
+        self.active_column = candidate;
+        Some(self.columns[candidate].id)
+    }
+
     fn locate(&self, wid: WindowId) -> Option<(usize, usize)> {
         self.columns.iter().enumerate().find_map(|(col, column)| {
             column.windows().position(|&w| w == wid).map(|row| (col, row))
@@ -1336,10 +1352,20 @@ impl ScrollingLayoutSystem {
             None
         };
         let was_fullscreen = state.arrangement.fullscreen.remove(&wid).is_some();
-        state.mutate(settings, inactive, |state| {
+        let selected_column = state.mutate(settings, inactive, |state| {
             state.arrangement.detach(wid, inactive);
+            if active_removed {
+                state.arrangement.select_available_column(
+                    restore.as_ref().map(|bookmark| bookmark.column),
+                    inactive,
+                )
+            } else {
+                None
+            }
         });
-        let restored = restore.is_some_and(|bookmark| state.restore(bookmark));
+        let restored = restore
+            .filter(|bookmark| Some(bookmark.column) == selected_column)
+            .is_some_and(|bookmark| state.restore(bookmark));
         let restored_fullscreen = was_fullscreen && state.restore_fullscreen_view();
         if active_removed && !restored && !restored_fullscreen {
             state.reveal(settings);
@@ -1822,21 +1848,24 @@ impl LayoutSystem for ScrollingLayoutSystem {
         {
             let previous_column = state.arrangement.active_column;
             state.mutate(&self.settings, &self.inactive, |state| {
-                if state.arrangement.selected(&self.inactive).is_none()
-                    && let Some((col, row)) =
-                        state.arrangement.columns.iter().enumerate().find_map(|(col, column)| {
-                            column
-                                .windows()
-                                .position(|w| !self.inactive.contains(w))
-                                .map(|row| (col, row))
-                        })
-                {
-                    state.arrangement.active_column = col;
-                    state.arrangement.columns[col].active_window = row;
+                if state.arrangement.selected(&self.inactive).is_none() {
+                    state.arrangement.select_available_column(
+                        state.camera.transient_restore.as_ref().map(|bookmark| bookmark.column),
+                        &self.inactive,
+                    );
                 }
             });
             if state.arrangement.active_column != previous_column {
-                state.reveal(&self.settings);
+                let selected_column = state.arrangement.columns[state.arrangement.active_column].id;
+                let restored = state
+                    .camera
+                    .transient_restore
+                    .take()
+                    .filter(|bookmark| bookmark.column == selected_column)
+                    .is_some_and(|bookmark| state.restore(bookmark));
+                if !restored {
+                    state.reveal(&self.settings);
+                }
             }
         }
         true
@@ -2607,6 +2636,18 @@ pub(crate) mod tests {
                 Some(vec![usize::from(direction == Direction::Right), 0])
             );
         }
+    }
+
+    #[test]
+    fn removing_selected_column_skips_suspended_neighbor() {
+        let mut f = Fixture::new(3);
+        f.select(3);
+        f.system.set_window_participation(wid(2), false);
+
+        f.system.update(WindowChange::Remove(wid(3)));
+
+        assert_eq!(f.selected(), Some(wid(1)));
+        assert_eq!(f.frame(1).origin.x, f.screen.origin.x);
     }
 
     #[test]

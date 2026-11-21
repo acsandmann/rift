@@ -7423,12 +7423,18 @@ fn window_server_destroy_after_ax_invalidation_removes_logical_window() {
 }
 
 #[test]
-fn closing_ax_invalidated_scrolling_window_reveals_surviving_column() {
+fn closing_ax_invalidated_scrolling_window_returns_to_previous_column() {
+    for window_count in [2, 3] {
+        assert_scrolling_close_returns_to_previous_column(window_count);
+    }
+}
+
+fn assert_scrolling_close_returns_to_previous_column(window_count: pid_t) {
     let (mut apps, mut reactor) = test_context();
     let screen = CGRect::new(CGPoint::ZERO, CGSize::new(1000., 1000.));
     let space = SpaceId::new(1);
-    let survivor = WindowId::new(1, 1);
-    let closing = WindowId::new(1, 2);
+    let survivor = WindowId::new(window_count - 1, 1);
+    let closing = WindowId::new(window_count, 1);
     let scrolling = &mut reactor.config.settings.layout.scrolling;
     scrolling.column_width_ratio = 1.0;
     scrolling.max_column_width_ratio = 1.0;
@@ -7442,9 +7448,12 @@ fn closing_ax_invalidated_scrolling_window_reveals_surviving_column() {
         workspace: None,
         mode: LayoutMode::Scrolling,
     });
-    make_active_app(&mut apps, &mut reactor, 1, make_windows(2), Some(closing));
-    reactor.handle_test_layout_event(LayoutEvent::WindowFocused(space, closing));
-    apps.simulate_until_quiet(&mut reactor);
+    for pid in 1..=window_count {
+        let window = WindowId::new(pid, 1);
+        make_active_app(&mut apps, &mut reactor, pid, make_windows(1), Some(window));
+        reactor.handle_test_layout_event(LayoutEvent::WindowFocused(space, window));
+        apps.simulate_until_quiet(&mut reactor);
+    }
 
     let visible_frame = apps.windows[&closing].frame;
     assert!(screen.contains(visible_frame.mid()));
@@ -7453,6 +7462,8 @@ fn closing_ax_invalidated_scrolling_window_reveals_surviving_column() {
     let (sender, receiver) = super::animation::AnimationSender::channel();
     reactor.animation_tx = Some(sender);
     assert!(reactor.arrange_test(false, Some(space)));
+    let (raise_tx, mut raises) = actor::channel();
+    reactor.communication_manager.raise_manager_tx = raise_tx;
 
     let wsid = reactor.test_window_server_id(closing);
     let mut presenter = super::animation::AnimationManager::new();
@@ -7471,6 +7482,7 @@ fn closing_ax_invalidated_scrolling_window_reveals_surviving_column() {
     }
 
     assert!(reactor.state.windows.record(closing).is_none());
+    assert_eq!(next_raise(&mut raises).focus_window.unwrap().0, survivor);
 }
 
 #[test]
