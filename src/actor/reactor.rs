@@ -2551,27 +2551,19 @@ impl Reactor {
                 let windows = &self.state.windows;
                 let workspaces = self.layout_manager.layout_engine.workspaces();
                 let resolved_window = match window_id {
-                    Some(index) => command_space
-                        .and_then(|space| workspaces.find_window_by_idx(windows, space, index))
-                        .or_else(|| {
-                            self.iter_active_spaces().find_map(|space| {
-                                workspaces.find_window_by_idx(windows, space, index)
-                            })
-                        })
-                        .or_else(|| {
-                            windows.iter_workspace_assignments().find_map(|(window, _)| {
-                                (window.idx.get() == index
-                                    && windows.can_move_assigned_window(window))
-                                .then_some(window)
-                            })
-                        }),
+                    Some(index) => workspaces.resolve_window_index(
+                        windows,
+                        command_space,
+                        |space| self.is_space_active(space),
+                        index,
+                    ),
                     None => self.main_window().or_else(|| self.window_id_under_cursor()),
                 };
                 let Some((window, source_space)) = resolved_window
                     .filter(|&window| windows.can_move_assigned_window(window))
                     .and_then(|window| Some((window, self.assigned_space_for_window_id(window)?)))
                 else {
-                    warn!("Move window to display ignored: no eligible assigned window");
+                    warn!("Move window to display ignored: no unique eligible assigned window");
                     return Ok(());
                 };
                 let origin = self

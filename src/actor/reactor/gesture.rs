@@ -412,9 +412,11 @@ mod tests {
             mode: LayoutMode::Scrolling,
         });
         for i in 1..=4 {
+            let window = crate::actor::app::WindowId::new(1, i);
+            r.insert_test_window_state(window, CGRect::ZERO, None, true);
+            r.assign_test_window_to_active_workspace(space, window);
             r.handle_test_layout_event(crate::layout_engine::LayoutEvent::WindowAdded(
-                space,
-                crate::actor::app::WindowId::new(1, i),
+                space, window,
             ));
         }
         // Prepare through the real engine boundary; no native app is needed to

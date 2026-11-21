@@ -1442,17 +1442,39 @@ impl WorkspaceStore {
             .collect()
     }
 
-    pub fn find_window_by_idx(
+    /// Resolve an index in the command Space, then other visible Spaces,
+    /// then retained workspaces. A tie in the best matching scope is ambiguous.
+    pub(crate) fn resolve_window_index(
         &self,
-        window_store: &WindowStore,
-        space: SpaceId,
-        idx: u32,
+        windows: &WindowStore,
+        command_space: Option<SpaceId>,
+        is_visible: impl Fn(SpaceId) -> bool,
+        index: u32,
     ) -> Option<WindowId> {
-        window_store.iter_workspace_assignments().find_map(|(wid, info)| {
-            (self.workspaces.get(info).is_some_and(|workspace| workspace.space == space)
-                && wid.idx.get() == idx)
-                .then_some(wid)
-        })
+        let mut best_rank = 0;
+        let mut resolved = None;
+        for (window, workspace) in windows.iter_workspace_assignments() {
+            if window.idx.get() != index {
+                continue;
+            }
+            let Some(space) = self.workspace_space(workspace) else {
+                continue;
+            };
+            let rank = if Some(space) == command_space {
+                3
+            } else if is_visible(space) {
+                2
+            } else {
+                1
+            };
+            if rank > best_rank {
+                best_rank = rank;
+                resolved = Some(window);
+            } else if rank == best_rank {
+                resolved = None;
+            }
+        }
+        resolved
     }
 
     pub fn find_window_in_workspace_by_idx(
@@ -1576,27 +1598,6 @@ impl WorkspaceStore {
                 .get(*assignment)
                 .is_some_and(|workspace| workspace.space == space)
         })
-    }
-
-    #[cfg(test)]
-    pub(crate) fn auto_assign_window(
-        &mut self,
-        window_store: &mut WindowStore,
-        window_id: WindowId,
-        space: SpaceId,
-    ) -> Result<VirtualWorkspaceId, WorkspaceError> {
-        let default_workspace_id = self.get_default_workspace(space)?;
-        if self.assign_window_to_workspace(
-            window_store,
-            self[default_workspace_id].space,
-            window_id,
-            default_workspace_id,
-        ) {
-            window_store.clear_rule_floating(window_id);
-            Ok(default_workspace_id)
-        } else {
-            Err(WorkspaceError::AssignmentFailed)
-        }
     }
 
     pub(crate) fn apply_app_rule_decision<'a>(
