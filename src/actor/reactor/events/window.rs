@@ -2,7 +2,6 @@ use objc2_core_foundation::CGRect;
 
 use super::super::*;
 use crate::actor::reactor::transaction_manager::TransactionManager;
-use crate::model::WindowVisibility;
 use crate::sys::event::MouseState;
 
 #[derive(Debug)]
@@ -81,94 +80,6 @@ pub fn frame_change_needs_layout(
 }
 
 impl Reactor {
-    pub(in crate::actor::reactor) fn create_window(
-        &mut self,
-        changes: &mut Changes,
-        wid: WindowId,
-        window: WindowInfo,
-        ws_info: Option<WindowServerInfo>,
-    ) {
-        if let Some(previous) = self.state.windows.reconcile_ax_identity(wid, window.sys_id) {
-            self.layout_manager
-                .layout_engine
-                .transfer_persistent_window_identity(previous, wid);
-        }
-        if let Some(info) = ws_info {
-            self.state.windows.clear_window_server_observed(info.id);
-            self.state.windows.track_window_server_info(info);
-        }
-        let rule_override =
-            self.state.windows.window(wid).and_then(|window| window.manage_override);
-        let mut window_state: WindowState = window.into();
-        window_state.manage_override = rule_override;
-        self.state.windows.insert_window(wid, window_state);
-        let _ = utils::refresh_heuristic(&mut self.state, wid);
-        changes.refresh_notifications = true;
-        if self.state.windows.can_reconcile_admission(wid) {
-            self.finalize_created_window(changes, wid);
-        }
-    }
-
-    pub(in crate::actor::reactor) fn destroy_window(
-        &mut self,
-        changes: &mut Changes,
-        wid: WindowId,
-    ) {
-        if self.state.windows.suspend_fullscreen_ax_identity(wid) {
-            self.reconcile_layout_event(changes, LayoutEvent::WindowSuspended(wid));
-        } else if let Some(record) = self.state.windows.remove_window(wid) {
-            self.retire_window(changes, (wid, record.window_server_id()));
-        }
-    }
-
-    pub(in crate::actor::reactor) fn retire_window(
-        &mut self,
-        changes: &mut Changes,
-        (wid, wsid): (WindowId, Option<WindowServerId>),
-    ) {
-        if let Some(wsid) = wsid {
-            self.transaction_manager.remove_for_window(wsid);
-            changes.refresh_notifications = true;
-        }
-        self.drag_manager.forget_window(wid);
-        self.reconcile_layout_event(changes, LayoutEvent::WindowRemoved(wid));
-    }
-
-    pub(in crate::actor::reactor) fn reconcile_window_visibility(
-        &mut self,
-        changes: &mut Changes,
-        wid: WindowId,
-        visible: bool,
-    ) {
-        if !visible {
-            if self.state.windows.observe_minimized(wid) {
-                self.reconcile_layout_event(changes, LayoutEvent::WindowSuspended(wid));
-            }
-            return;
-        }
-        let ax_returned = self.state.windows.validate_ax_identity(wid);
-        let Some(window) = self.state.windows.window_mut(wid) else {
-            debug!(?wid, "Received WindowDeminiaturized for unknown window");
-            return;
-        };
-        if !window.info.is_minimized && !ax_returned {
-            return;
-        }
-        window.info.is_minimized = false;
-        let _ = utils::refresh_heuristic(&mut self.state, wid);
-        // Inventory needs positive native visibility when other app windows are visible.
-        match self.state.windows.record(wid).and_then(|record| record.window_server_id()) {
-            Some(wsid) => {
-                self.state.windows.mark_window_visible(wsid);
-            }
-            None => self.state.windows.set_visibility(wid, WindowVisibility::Visible),
-        }
-        changes.inventory(wid.pid);
-        if !self.state.windows.is_claimed(wid) {
-            self.finalize_created_window(changes, wid);
-        }
-    }
-
     pub(in crate::actor::reactor) fn handle_window_frame_changed(
         &mut self,
         changes: &mut Changes,
@@ -254,46 +165,23 @@ impl Reactor {
                 changes.arrange(Some(space), Presentation::Animated);
             }
 
-            if old_space != new_space {
-                if pending_target_space.is_some()
+            if old_space == new_space
+                || keep_assigned_for_scrolling
+                || (pending_target_space.is_some()
                     && assigned_space == pending_target_space
-                    && new_space != pending_target_space
-                {
-                    return;
-                }
-                if keep_assigned_for_scrolling {
-                    return;
-                }
-                self.reconcile_layout_event(
-                    changes,
-                    LayoutEvent::WindowRemovedPreserveFloating(wid),
-                );
+                    && new_space != pending_target_space)
+            {
+                return;
+            }
+            if let Some(server) = server_id {
                 if let Some(space) = new_space {
-                    if let Some(server) = server_id {
-                        self.state.windows.observe_native_space(server, space, true);
-                    }
-                    if new_space_active
-                        && self.state.windows.window(wid).is_some_and(WindowState::is_admitted)
-                    {
-                        if let Some(workspace) =
-                            self.layout_manager.layout_engine.workspaces().active_workspace(space)
-                        {
-                            let _ = self
-                                .layout_manager
-                                .layout_engine
-                                .workspaces_mut()
-                                .assign_window_to_workspace(
-                                    &mut self.state.windows,
-                                    space,
-                                    wid,
-                                    workspace,
-                                );
-                        }
-                        self.reconcile_layout_event(changes, LayoutEvent::WindowAdded(space, wid));
-                    }
-                } else if let Some(server) = server_id {
+                    self.state.windows.observe_native_space(server, space, true);
+                } else {
                     self.state.windows.set_window_server_space(server, None);
                 }
+            }
+            if let Some(space) = new_space.filter(|_| new_space_active) {
+                self.reassign_window_to_authoritative_space(changes, wid, space, false);
             }
         }
     }

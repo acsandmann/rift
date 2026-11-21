@@ -107,6 +107,12 @@ impl Reactor {
         )
     }
 
+    pub(super) fn assign_test_window_to_active_workspace(&mut self, space: SpaceId, wid: WindowId) {
+        let workspace =
+            self.layout_manager.layout_engine.workspaces().active_workspace(space).unwrap();
+        assert!(self.assign_test_window_to_workspace(space, wid, workspace));
+    }
+
     pub fn set_test_active_workspace(
         &mut self,
         space: SpaceId,
@@ -615,7 +621,6 @@ impl Apps {
             debug!(?request);
             match request {
                 Request::Terminate => break,
-                Request::WindowMaybeDestroyed(_) => {}
                 Request::RefreshWindowInventory(token) => {
                     if got_visible_windows {
                         continue;

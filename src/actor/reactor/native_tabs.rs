@@ -34,7 +34,8 @@ impl Reactor {
                 let window = self.state.windows.window(old)?;
                 let wsid = window.info.sys_id?;
                 let space = self.layout_manager.layout_engine.space_with_window(old)?;
-                if !self.is_space_active(space)
+                if Some(wsid) == info.sys_id
+                    || !self.is_space_active(space)
                     || self.window_in_non_active_workspace(space, old)
                     || !(info.has_native_tabs || window.info.has_native_tabs)
                     || !(same_tab_frame(window.frame_monotonic, info.frame)
@@ -71,12 +72,8 @@ impl Reactor {
         let mut replacement = WindowState::from(info.clone());
         replacement.manage_override = manage_override;
         self.state.windows.insert_window(incoming, replacement);
-        self.state.windows.transfer_persistent_window_metadata(old, incoming);
-        self.layout_manager
-            .layout_engine
-            .transfer_persistent_window_identity(old, incoming);
-        self.state.windows.remove_window(old);
-        self.transaction_manager.remove_for_window(old_wsid);
+        self.state.windows.replace_window_identity(old, incoming);
+        self.replace_window_identity(old, incoming, Some(old_wsid));
         debug!(?old, ?incoming, "Replaced native tab in existing layout slot");
     }
 
@@ -90,7 +87,10 @@ impl Reactor {
         let Some(space) = self.layout_manager.layout_engine.space_with_window(old) else {
             return false;
         };
-        if !self.is_space_active(space) || self.window_in_non_active_workspace(space, old) {
+        if self.state.windows.is_claimed(old)
+            || !self.is_space_active(space)
+            || self.window_in_non_active_workspace(space, old)
+        {
             return false;
         }
         #[cfg(not(test))]
