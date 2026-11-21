@@ -148,10 +148,10 @@ impl TraditionalLayoutSystem {
         let selection_parent = selection.parent(self.tiles.map());
         let target_parent = target.parent(self.tiles.map());
 
-        let selection_stack_parent =
-            selection_parent.filter(|&parent| self.tiles.layout(parent).is_stacked());
-        let target_stack_parent =
-            target_parent.filter(|&parent| self.tiles.layout(parent).is_stacked());
+        // Joining toward a stack joins it, whether the target is one of its windows or the
+        // stack itself.
+        let selection_stack_parent = self.tiles.enclosing_stack(selection);
+        let target_stack_parent = self.tiles.enclosing_stack(target);
 
         let backwards = matches!(direction, Direction::Left | Direction::Up);
         let join = match (selection_stack_parent, target_stack_parent) {
@@ -949,5 +949,35 @@ mod tests {
             assert_eq!(bar, expected_bar);
             assert_eq!(system.tiles.tree.map.kind(root), kind);
         }
+    }
+
+    #[test]
+    fn joining_toward_an_adjacent_stack_grows_it() {
+        use crate::common::config::StackDefaultOrientation;
+
+        let mut system = TraditionalLayoutSystem::default();
+        let layout = system.create_layout();
+        let root = system.tiles.layout_roots[layout].0;
+        system.tiles.set_layout(root, LayoutKind::Horizontal);
+        for window in [w(1), w(2), w(3)] {
+            system.add_window_after_selection(layout, window);
+        }
+        system.focus(layout, Focus::Select(w(1)));
+        system.edit(layout, LayoutEdit::Group(GroupEdit::Join(Direction::Right)));
+        let _ = system.edit(
+            layout,
+            LayoutEdit::Group(GroupEdit::Stack(StackDefaultOrientation::Same)),
+        );
+        assert_eq!(system.windows(layout, WindowQuery::Stack(w(1))), vec![
+            w(1),
+            w(2)
+        ]);
+
+        // Window 3, beside the stack, joins it: at the end it came from, and stays selected.
+        system.focus(layout, Focus::Select(w(3)));
+        system.edit(layout, LayoutEdit::Group(GroupEdit::Join(Direction::Left)));
+        let stack = system.windows(layout, WindowQuery::Stack(w(1)));
+        assert_eq!(stack, [w(1), w(2), w(3)]);
+        assert_eq!(system.selected_window(layout), Some(w(3)));
     }
 }

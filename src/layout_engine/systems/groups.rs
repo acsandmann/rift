@@ -684,6 +684,15 @@ impl GroupLayouts {
         self.visible_windows_under_internal(container)
     }
 
+    /// The stack `node` is shown in: `node` itself if it is a stacked container, else its parent
+    /// if that is stacked. Every node stores a layout kind, but only a container's means anything.
+    pub(super) fn enclosing_stack(&self, node: NodeId) -> Option<NodeId> {
+        let container = self.window_at(node).is_none();
+        Some(node)
+            .filter(|&node| container && self.layout(node).is_stacked())
+            .or_else(|| node.parent(self.map()).filter(|&parent| self.layout(parent).is_stacked()))
+    }
+
     fn stacked_selection_container(&self, layout: LayoutId) -> Option<NodeId> {
         let selection = self.selection(layout);
         let stacked = |&node: &NodeId| self.layout(node).is_stacked();
