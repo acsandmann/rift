@@ -8610,6 +8610,43 @@ fn floating_window_toggle_off_restore_previous_frame() {
 }
 
 #[test]
+fn directional_focus_exits_floating_fullscreen_only_when_enabled_and_focus_moves() {
+    for enabled in [false, true] {
+        for command in [LayoutCommand::ToggleFullscreen, LayoutCommand::ToggleFullscreenWithinGaps] {
+            let (mut reactor, wid, space, screen, floating_frame) = reactor_with_floating_window();
+            let mut settings = reactor.config.settings.layout.clone();
+            settings.exit_fullscreen_on_move_focus = enabled;
+            reactor.layout_manager.layout_engine.set_layout_settings(&settings);
+            reactor.config.settings.layout = settings;
+            reactor.handle_test_layout_command(command);
+
+            reactor.handle_test_layout_command(LayoutCommand::MoveFocus(Direction::Right));
+            assert!(
+                !laid_out_frame(&mut reactor, space, screen, wid).unwrap().same_as(floating_frame)
+            );
+
+            let target = WindowId::new(1, 2);
+            let workspace =
+                reactor.layout_manager.layout_engine.workspaces().active_workspace(space).unwrap();
+            reactor.add_test_window(target, WindowServerId::new(122), Some(space), floating_frame);
+            assert!(reactor.assign_test_window_to_workspace(space, target, workspace));
+            reactor.handle_test_layout_event(LayoutEvent::WindowAdded(space, target));
+            reactor.handle_test_layout_event(LayoutEvent::WindowFocused(space, wid));
+            let before = reactor.layout_calculations.len();
+            reactor.handle_test_layout_command(LayoutCommand::MoveFocus(Direction::Right));
+
+            assert_eq!(
+                laid_out_frame(&mut reactor, space, screen, wid).unwrap().same_as(floating_frame),
+                enabled
+            );
+            if enabled {
+                assert!(reactor.layout_calculations.len() > before);
+            }
+        }
+    }
+}
+
+#[test]
 fn floating_window_toggles_to_fullscreen_within_gaps() {
     let (mut reactor, wid, space1, screen, _floating_frame) = reactor_with_floating_window();
     // Assymetric gaps to prevent swapped left/right or swapped width/height bugs from passing
