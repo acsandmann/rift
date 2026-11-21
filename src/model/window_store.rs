@@ -232,12 +232,22 @@ impl WindowStore {
         })
     }
 
+    /// An explicit move can change retained ownership independently of placement.
+    pub(crate) fn can_move_assigned_window(&self, wid: WindowId) -> bool {
+        self.record(wid).is_some_and(|record| {
+            !record.ax_invalidated
+                && record.claim.is_none()
+                && record.workspace.is_some()
+                && record.state.as_ref().is_some_and(|w| w.allows_management(w.manage_override))
+        })
+    }
+
     /// Rules and admission are reconciled only for windows Rift may manage.
     pub(crate) fn can_reconcile_admission(&self, wid: WindowId) -> bool {
         self.record(wid).is_some_and(|record| {
             !record.ax_invalidated
                 && record.claim.is_none()
-                && record.state.as_ref().is_some_and(WindowState::can_reconcile_admission)
+                && record.state.as_ref().is_some_and(|window| !window.info.is_minimized)
         })
     }
 
@@ -481,14 +491,13 @@ impl WindowStore {
         let wsid = wsid?;
         let previous = self.track_window_server_id(wsid, wid).filter(|old| *old != wid);
         if let Some(old) = previous {
-            self.transfer_persistent_window_metadata(old, wid);
             if !self.contains_window(wid) {
                 let state = self.windows.get_mut(&old).and_then(|record| record.state.take());
                 if let Some(state) = state {
                     self.insert_window(wid, state);
                 }
             }
-            self.remove_window(old);
+            self.replace_window_identity(old, wid);
         }
         self.clear_window_server_observed(wsid);
         previous
@@ -529,12 +538,12 @@ impl WindowStore {
         wsid: WindowServerId,
         visible: bool,
     ) -> Option<i32> {
-        let pid = self
-            .tracked_window_id(wsid)
+        if !self.set_native_visibility(wsid, visible) {
+            return None;
+        }
+        self.tracked_window_id(wsid)
             .map(|wid| wid.pid)
-            .or_else(|| self.get_window_server_info(wsid).map(|info| info.pid));
-        self.set_native_visibility(wsid, visible);
-        pid
+            .or_else(|| self.get_window_server_info(wsid).map(|info| info.pid))
     }
 
     /// A current successful AX omission is destructive only with native negative evidence.
@@ -946,14 +955,15 @@ impl WindowStore {
         } else {
             return false;
         };
-        let changed = record.visible != visible;
-        record.visible = visible;
+        let mut changed = std::mem::replace(&mut record.visible, visible) != visible;
         if let Some(wid) = record.window_id {
-            self.windows.entry(wid).or_default().visibility = if visible {
+            let visibility = if visible {
                 WindowVisibility::Visible
             } else {
                 WindowVisibility::Hidden
             };
+            let window = self.windows.entry(wid).or_default();
+            changed |= std::mem::replace(&mut window.visibility, visibility) != visibility;
         } else if !visible {
             record.observed = false;
         }
@@ -1042,6 +1052,7 @@ impl WindowStore {
             record.observed = false;
             record.space = None;
             record.info = None;
+            record.pending_native_fullscreen = None;
         }
         if let Some(wid) = wid
             && let Some(record) = self.windows.get_mut(&wid)
@@ -1330,7 +1341,12 @@ impl WindowStore {
     /// macOS rekeys the same WindowServer window across sleep/wake or similar
     /// churn. The caller remains responsible for replacing any layout/window
     /// state that still references `from`.
-    pub fn transfer_persistent_window_metadata(&mut self, from: WindowId, to: WindowId) {
+    pub(crate) fn replace_window_identity(&mut self, from: WindowId, to: WindowId) {
+        self.transfer_persistent_window_metadata(from, to);
+        self.remove_window(from);
+    }
+
+    fn transfer_persistent_window_metadata(&mut self, from: WindowId, to: WindowId) {
         if from == to {
             return;
         }
@@ -1437,6 +1453,11 @@ impl WindowStore {
 
     pub fn rule_floating(&self, window_id: WindowId) -> bool {
         self.windows.get(&window_id).is_some_and(|record| record.rule_floating)
+    }
+
+    pub(crate) fn retire_window(&mut self, window: WindowId) {
+        self.restore_window_from_native_fullscreen(window);
+        self.remove_window(window);
     }
 
     pub fn remove_window(&mut self, window_id: WindowId) -> Option<WindowRecord> {
@@ -1572,14 +1593,15 @@ impl WindowStore {
     }
 
     pub(crate) fn can_place_window(&self, window: WindowId) -> bool {
-        !self.is_temporarily_unavailable(window)
-            && self.native_fullscreen_record_for_window(window).is_none()
-            && self.record(window).is_none_or(|record| {
-                !matches!(
+        self.record(window).is_none_or(|record| {
+            !record.ax_invalidated
+                && record.claim.is_none()
+                && record.state.as_ref().is_none_or(WindowState::is_admitted)
+                && !matches!(
                     record.visibility,
                     WindowVisibility::Hidden | WindowVisibility::Minimized
                 )
-            })
+        }) && self.native_fullscreen_record_for_window(window).is_none()
     }
 
     /// Coalesce repeated intent; only a new destination or newly available

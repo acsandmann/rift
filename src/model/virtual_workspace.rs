@@ -1578,7 +1578,8 @@ impl WorkspaceStore {
         })
     }
 
-    pub fn auto_assign_window(
+    #[cfg(test)]
+    pub(crate) fn auto_assign_window(
         &mut self,
         window_store: &mut WindowStore,
         window_id: WindowId,

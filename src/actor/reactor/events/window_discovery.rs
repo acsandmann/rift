@@ -4,7 +4,6 @@ use super::super::{Changes, Presentation, Reactor};
 use crate::actor::app::{AppInfo, WindowId, pid_t};
 use crate::actor::reactor::LayoutEvent;
 use crate::common::collections::{HashMap, HashSet};
-use crate::layout_engine::ResolvedWindow;
 use crate::sys::screen::SpaceId;
 
 pub(crate) struct EmitLayoutPayload<'a> {
@@ -99,14 +98,8 @@ impl Reactor {
             ) else {
                 continue;
             };
-            if active && let Some(window) = self.state.windows.window(wid) {
-                self.reconcile_layout_event(
-                    changes,
-                    LayoutEvent::WindowObserved(space, ResolvedWindow {
-                        info: window.layout_info(wid),
-                        effects,
-                    }),
-                );
+            if active {
+                self.project_observed_window(changes, space, wid, effects);
             }
         }
 

@@ -30,11 +30,12 @@ impl Reactor {
             },
             reapply,
         ) {
-            Ok(AppRuleResult::Managed(effects)) => Some(effects),
-            Ok(AppRuleResult::Rejected(_)) => {
+            Ok(Some(AppRuleResult::Managed(effects))) => Some(effects),
+            Ok(Some(AppRuleResult::Rejected(_))) => {
                 self.reconcile_window_membership(changes, wid, None);
                 None
             }
+            Ok(None) => None,
             Err(error) => {
                 warn!(?wid, ?error, "Failed to assign window to workspace");
                 None
@@ -89,16 +90,15 @@ impl Reactor {
             changes.membership_for(Some(space));
             changes.refresh_menu = true;
         }
+        self.cancel_window_presentations(vec![wid]);
         self.discard_window_activity(wid, wsid);
         self.reconcile_layout_event(changes, LayoutEvent::WindowRemoved(wid));
-        self.state.windows.restore_window_from_native_fullscreen(wid);
-        self.state.windows.remove_window(wid);
-        self.main_window_tracker.replace_window(wid, None);
+        self.state.windows.retire_window(wid);
+        self.replace_window_references(wid, None);
         changes.refresh_notifications |= wsid.is_some();
     }
 
     fn discard_window_activity(&mut self, wid: WindowId, obsolete_native: Option<WindowServerId>) {
-        self.cancel_window_presentations(vec![wid]);
         self.drag_manager.forget_window(wid);
         if let Some(wsid) = obsolete_native {
             self.transient_focus.windows.remove(&wsid);
@@ -112,6 +112,7 @@ impl Reactor {
         replacement: WindowId,
         obsolete_native: Option<WindowServerId>,
     ) {
+        self.cancel_window_presentations(vec![old]);
         self.discard_window_activity(old, obsolete_native);
         if obsolete_native.is_none()
             && let Some(id) =
@@ -122,20 +123,41 @@ impl Reactor {
         self.layout_manager
             .layout_engine
             .transfer_persistent_window_identity(old, replacement);
-        self.main_window_tracker.replace_window(old, Some(replacement));
+        self.replace_window_references(old, Some(replacement));
+    }
+
+    fn replace_window_references(&mut self, old: WindowId, replacement: Option<WindowId>) {
+        self.main_window_tracker.replace_window(old, replacement);
+        if let Some((space, window, stamp)) = self.overview_focus
+            && window == old
+        {
+            self.overview_focus = replacement.map(|window| (space, window, stamp));
+        }
+        let pending = &mut self.window_inventory_manager.refocus_after_refresh;
+        if pending.get(&old.pid) == Some(&old) {
+            if let Some(window) = replacement {
+                pending.insert(window.pid, window);
+            } else {
+                pending.remove(&old.pid);
+            }
+        }
     }
 
     pub(super) fn retire_app_windows(&mut self, changes: &mut Changes, pid: pid_t) {
-        for wid in self.state.windows.window_ids_for_pid(pid) {
+        let windows: Vec<_> = self.state.windows.window_ids_for_pid(pid).collect();
+        for &wid in &windows {
             if let Some(space) = self.assigned_space_for_window_id(wid) {
                 changes.membership_for(Some(space));
                 changes.arrange(Some(space), Presentation::Animated);
             }
-            if let Some(id) = self.state.windows.record(wid).and_then(|r| r.window_server_id()) {
-                self.transaction_manager.remove_for_window(id);
-            }
-            self.drag_manager.forget_window(wid);
+            self.discard_window_activity(
+                wid,
+                self.state.windows.record(wid).and_then(|r| r.window_server_id()),
+            );
         }
+        self.cancel_window_presentations(windows);
+        self.overview_focus = self.overview_focus.filter(|(_, window, _)| window.pid != pid);
+        self.transient_focus.windows.retain(|_, transient| transient.pid != pid);
         self.state.windows.remove_windows_for_app(pid);
         self.reconcile_layout_event(changes, LayoutEvent::AppClosed(pid));
         changes.refresh_notifications = true;
@@ -174,6 +196,7 @@ impl Reactor {
         if let Some(old) = self.state.windows.record(wid).and_then(|r| r.window_server_id())
             && Some(old) != info.sys_id
         {
+            self.cancel_window_presentations(vec![wid]);
             self.discard_window_activity(wid, Some(old));
         }
         let previous = self.state.windows.reconcile_ax_identity(wid, info.sys_id);
@@ -237,7 +260,8 @@ impl Reactor {
         minimized: bool,
     ) {
         let was_unavailable = self.state.windows.is_temporarily_unavailable(wid);
-        let ax_returned = self.state.windows.validate_ax_identity(wid);
+        // Application hiding can report minimization for a cached AX key.
+        let ax_returned = !minimized && self.state.windows.validate_ax_identity(wid);
         let Some(window) = self.state.windows.window_mut(wid) else {
             return;
         };
@@ -318,6 +342,16 @@ impl Reactor {
                 })
         });
         let Some(space) = active_space else { return };
+        self.admit_window_in_space(changes, window, space, true);
+    }
+
+    fn admit_window_in_space(
+        &mut self,
+        changes: &mut Changes,
+        window: WindowId,
+        space: SpaceId,
+        pointer_placement: bool,
+    ) {
         if let Some(state) = self.state.windows.window(window)
             && let Some(id) = state.info.sys_id
         {
@@ -334,22 +368,32 @@ impl Reactor {
         ) else {
             return;
         };
-        let Some(state) = self.state.windows.window(window) else {
-            return;
-        };
-        self.reconcile_layout_event(
-            changes,
-            LayoutEvent::WindowObserved(space, crate::layout_engine::ResolvedWindow {
-                info: state.layout_info(window),
-                effects,
-            }),
-        );
-        if effects.source_workspace.is_none()
+        self.project_observed_window(changes, space, window, effects);
+        if pointer_placement
+            && effects.source_workspace.is_none()
             && !effects.names_workspace
             && !self.is_dragging_window(window)
             && let Some(owner) = self.assigned_space_for_window_id(window)
         {
             self.place_new_window_on_pointer_display(changes, window, owner);
+        }
+    }
+
+    pub(super) fn project_observed_window(
+        &mut self,
+        changes: &mut Changes,
+        space: SpaceId,
+        window: WindowId,
+        effects: AppRuleEffects,
+    ) {
+        if let Some(state) = self.state.windows.window(window) {
+            self.reconcile_layout_event(
+                changes,
+                LayoutEvent::WindowObserved(space, crate::layout_engine::ResolvedWindow {
+                    info: state.layout_info(window),
+                    effects,
+                }),
+            );
         }
     }
 
@@ -434,7 +478,11 @@ impl Reactor {
         // Appearance can restore participation, but is not an authoritative move.
         let owner = self.assigned_space_for_window_id(window).unwrap_or(space);
         if self.is_space_active(owner) && self.state.windows.is_visible_admitted(window) {
-            self.reconcile_window_membership(changes, window, Some(owner));
+            if self.state.windows.workspace_for_window(window).is_some() {
+                self.reconcile_window_membership(changes, window, Some(owner));
+            } else {
+                self.admit_window_in_space(changes, window, owner, false);
+            }
         }
     }
 
@@ -463,7 +511,14 @@ impl Reactor {
             self.reconcile_window_membership(changes, wid, None);
             return;
         }
-        if self.assigned_space_for_window_id(wid) != Some(space) {
+        let owner = self.assigned_space_for_window_id(wid);
+        if owner.is_none() {
+            if self.is_space_active(space) {
+                self.admit_window_in_space(changes, wid, space, false);
+            }
+            return;
+        }
+        if owner != Some(space) {
             let departed_from = self.state.windows.workspace_for_window(wid);
             let engine = &mut self.layout_manager.layout_engine;
             // A window a departure moved off this display goes back where it was.

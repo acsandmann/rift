@@ -2668,6 +2668,30 @@ fn scrolling_boundary_discards_the_original_focus_decision_after_switching() {
 }
 
 #[test]
+fn resizing_across_a_display_boundary_keeps_the_window_on_its_workspace() {
+    let (mut reactor, window, _, source, _, initial, target_screen) =
+        reactor_with_window_on_space1_two_displays();
+    reactor.handle_test_layout_event(LayoutEvent::WindowAdded(source, window));
+    let mut resized = initial;
+    resized.size.width = 2.0 * (target_screen.mid().x - initial.origin.x);
+    reactor.handle_event(Event::WindowFrameChanged(
+        window,
+        resized,
+        None,
+        Requested(false),
+        Some(MouseState::Down),
+    ));
+    assert_eq!(
+        reactor.drag_manager.actor.kind(),
+        Some(crate::actor::drag::DragKind::NativeResize)
+    );
+    reactor.handle_event(Event::MouseUp(crate::actor::drag::MouseButton::Left));
+
+    assert_eq!(reactor.assigned_space_for_window_id(window), Some(source));
+    assert!(reactor.state.windows.record(window).unwrap().pending_transfer().is_none());
+}
+
+#[test]
 fn cross_display_drag_relocates_the_window_once_and_preserves_floating() {
     for (floating, last_frame_delayed) in [(false, false), (true, false), (false, true)] {
         let (mut reactor, wid, wsid, space1, space2, initial_frame, screen2) =
@@ -2691,6 +2715,9 @@ fn cross_display_drag_relocates_the_window_once_and_preserves_floating() {
                 initial_frame,
             );
         }
+        // Use the accepted frame after tiling. Changing its size on mouse-down
+        // would send a resize rather than a native move.
+        let initial_frame = reactor.state.windows.window(wid).unwrap().frame_monotonic;
         let released = CGRect::new(
             CGPoint::new(screen2.origin.x + 120.0, initial_frame.origin.y),
             initial_frame.size,
@@ -5612,6 +5639,43 @@ fn moving_workspace_direction_wrap_is_opt_in() {
         )));
         assert_eq!(reactor.assigned_space_for_window_id(moved), Some(spaces[1]));
         assert_eq!(frame_writes(&mut apps), [(moved, frames[1])]);
+    }
+}
+
+#[test]
+fn reloading_management_rules_rejects_and_readmits_an_existing_window() {
+    for claimed in [false, true] {
+        let (mut apps, mut reactor) = test_context();
+        let space = SpaceId::new(1);
+        let screen = shared_left();
+        let window = WindowId::new(1, 1);
+        apps.make_app_and_settle_on_screen(&mut reactor, screen, space, 1, make_windows(1));
+
+        let config = reactor.config.clone();
+        let mut excluded = config.clone();
+        excluded
+            .virtual_workspaces
+            .app_rules
+            .push(crate::common::config::AppWorkspaceRule {
+                app_id: Some("com.testapp1".into()),
+                manage: Some(false),
+                ..Default::default()
+            });
+        let owner = crate::model::window_store::ClaimOwner(1);
+        if claimed {
+            reactor
+                .claim_window(window, owner, rift_protocol::WindowClaimFlags::empty())
+                .unwrap();
+        }
+        reactor.handle_event(Event::ConfigUpdated(excluded));
+        if claimed {
+            reactor.release_window(window, owner).unwrap();
+        }
+        assert!(reactor.state.windows.workspace_for_window(window).is_none());
+        assert!(!has_window_in_layout(&mut reactor, space, screen, window));
+
+        reactor.handle_event(Event::ConfigUpdated(config));
+        assert!(has_window_in_layout(&mut reactor, space, screen, window));
     }
 }
 
@@ -12444,6 +12508,53 @@ fn display_refresh_reapplies_frames_when_macos_resized_windows_without_notificat
 }
 
 mod claims;
+
+#[test]
+fn explicit_move_places_a_minimized_window_on_its_new_display_after_restore() {
+    for floating in [false, true] {
+        let (mut apps, mut reactor, _, target) = two_displays(shared_settings());
+        let window = WindowId::new(1, 1);
+        if floating {
+            reactor.handle_test_layout_command(LayoutCommand::ToggleWindowFloating);
+        }
+        apps.simulate_until_quiet(&mut reactor);
+        reactor.handle_event(Event::WindowMinimized(window));
+        apps.simulate_until_quiet(&mut reactor);
+        let minimized_frame = apps.windows[&window].frame;
+        reactor.handle_event(Event::Command(Command::Reactor(
+            ReactorCommand::MoveWindowToDisplay {
+                selector: DisplaySelector::Index(1),
+                window_id: Some(window.idx.get()),
+            },
+        )));
+        apps.simulate_until_quiet(&mut reactor);
+
+        let destination =
+            reactor.layout_manager.layout_engine.workspaces().active_workspace(target);
+        assert!(destination.is_some());
+        assert_eq!(reactor.state.windows.workspace_for_window(window), destination);
+        assert_eq!(apps.windows[&window].frame, minimized_frame);
+        assert!(!has_window_in_layout(
+            &mut reactor,
+            target,
+            shared_right(),
+            window
+        ));
+
+        reactor.handle_event(Event::WindowDeminiaturized(window));
+        apps.simulate_until_quiet(&mut reactor);
+        assert_eq!(reactor.state.windows.workspace_for_window(window), destination);
+        assert_eq!(
+            has_window_in_layout(&mut reactor, target, shared_right(), window),
+            !floating,
+        );
+        assert_eq!(
+            reactor.layout_manager.layout_engine.is_window_floating(window),
+            floating
+        );
+        assert!(shared_right().contains(apps.windows[&window].frame.mid()));
+    }
+}
 
 #[test]
 fn master_restore_returns_a_window_to_the_display_it_was_saved_on() {

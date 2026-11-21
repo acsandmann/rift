@@ -72,6 +72,14 @@ impl Reactor {
         };
         changes.arrange(Some(owner), Presentation::Animated);
 
+        if kind == Some(crate::actor::drag::DragKind::NativeResize) {
+            let engine = &mut self.layout_manager.layout_engine;
+            if engine.is_window_floating(window) {
+                engine.store_floating_position(workspace, window, source.last_frame);
+            }
+            return;
+        }
+
         let start = self.best_space_for_frame(&source.origin_frame);
         let landing = self.best_space_for_frame(&source.last_frame);
         let crossing =

@@ -37,7 +37,7 @@ impl Reactor {
             if let Some(wsid) = reactor.state.windows.window(wid).and_then(|w| w.info.sys_id) {
                 reactor.transaction_manager.clear_target_for_window(wsid);
             }
-            reactor.drag_manager.forget_window(wid);
+            reactor.state.windows.cancel_transfer(wid);
             // Leave the projection (keeping floating state and the layout slot) before the
             // claim takes the assignment, but arrange only after: no write may target it.
             let mut changes = Changes::default();

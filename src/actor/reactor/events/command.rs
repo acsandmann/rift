@@ -236,6 +236,8 @@ impl Reactor {
         if self.config.settings.drag_drop != new_config.settings.drag_drop {
             self.cancel_drag(changes);
         }
+        let rules_changed =
+            self.config.virtual_workspaces.app_rules != new_config.virtual_workspaces.app_rules;
         self.config = new_config;
         self.layout_manager
             .layout_engine
@@ -245,6 +247,18 @@ impl Reactor {
             &self.config.virtual_workspaces,
             migration,
         );
+        if rules_changed {
+            let apps: Vec<_> = self
+                .app_manager
+                .apps
+                .iter()
+                .map(|(&pid, app)| (pid, app.info.clone()))
+                .collect();
+            for (pid, info) in apps {
+                let windows: Vec<_> = self.state.windows.window_ids_for_pid(pid).collect();
+                self.process_windows_for_app_rules(changes, windows, info, false);
+            }
+        }
         self.drag_manager.update_config(self.config.settings.drag_drop);
         self.update_service_config();
         changes.arrange(None, Presentation::Animated);
