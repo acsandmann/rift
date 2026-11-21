@@ -7423,6 +7423,57 @@ fn window_server_destroy_after_ax_invalidation_removes_logical_window() {
 }
 
 #[test]
+fn closing_ax_invalidated_scrolling_window_reveals_surviving_column() {
+    let (mut apps, mut reactor) = test_context();
+    let screen = CGRect::new(CGPoint::ZERO, CGSize::new(1000., 1000.));
+    let space = SpaceId::new(1);
+    let survivor = WindowId::new(1, 1);
+    let closing = WindowId::new(1, 2);
+    let scrolling = &mut reactor.config.settings.layout.scrolling;
+    scrolling.column_width_ratio = 1.0;
+    scrolling.max_column_width_ratio = 1.0;
+    scrolling.preserve_window_sizes = false;
+    reactor
+        .layout_manager
+        .layout_engine
+        .set_layout_settings(&reactor.config.settings.layout);
+    reactor.handle_event(space_state_event(vec![screen], vec![Some(space)]));
+    reactor.handle_test_layout_command(LayoutCommand::SetWorkspaceLayout {
+        workspace: None,
+        mode: LayoutMode::Scrolling,
+    });
+    make_active_app(&mut apps, &mut reactor, 1, make_windows(2), Some(closing));
+    reactor.handle_test_layout_event(LayoutEvent::WindowFocused(space, closing));
+    apps.simulate_until_quiet(&mut reactor);
+
+    let visible_frame = apps.windows[&closing].frame;
+    assert!(screen.contains(visible_frame.mid()));
+    assert!(apps.windows[&survivor].frame.mid().x < screen.origin.x);
+
+    let (sender, receiver) = super::animation::AnimationSender::channel();
+    reactor.animation_tx = Some(sender);
+    assert!(reactor.arrange_test(false, Some(space)));
+
+    let wsid = reactor.test_window_server_id(closing);
+    let mut presenter = super::animation::AnimationManager::new();
+    for event in [
+        Event::WindowInvalidated(closing, super::WindowInvalidationSource::InvalidUiElement),
+        Event::WindowClosed(wsid),
+    ] {
+        reactor.handle_event(event);
+        for message in receiver.commands.try_iter() {
+            presenter.handle_message(message);
+        }
+        presenter.tick_at(Instant::now() + Duration::from_secs(2));
+        // Apply the frame writes while controlling the close notification order.
+        apps.simulate_events();
+        assert_eq!(apps.windows[&survivor].frame, visible_frame);
+    }
+
+    assert!(reactor.state.windows.record(closing).is_none());
+}
+
+#[test]
 fn window_closed_removes_logical_window_without_inventory_refresh() {
     let (mut apps, mut reactor) = test_context();
     let screen = CGRect::new(CGPoint::new(0., 0.), CGSize::new(1000., 1000.));

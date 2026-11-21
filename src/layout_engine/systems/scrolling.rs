@@ -1820,6 +1820,7 @@ impl LayoutSystem for ScrollingLayoutSystem {
             .values_mut()
             .filter(|state| state.arrangement.locate(window).is_some())
         {
+            let previous_column = state.arrangement.active_column;
             state.mutate(&self.settings, &self.inactive, |state| {
                 if state.arrangement.selected(&self.inactive).is_none()
                     && let Some((col, row)) =
@@ -1834,6 +1835,9 @@ impl LayoutSystem for ScrollingLayoutSystem {
                     state.arrangement.columns[col].active_window = row;
                 }
             });
+            if state.arrangement.active_column != previous_column {
+                state.reveal(&self.settings);
+            }
         }
         true
     }

@@ -4858,7 +4858,8 @@ impl Reactor {
             self.layout_manager.layout_engine.handle_event(&mut self.state.windows, event);
         let response = layout_outcome.response;
         if let Some(window) = suspended.filter(|_| response.changed) {
-            self.cancel_window_presentations(vec![window]);
+            // Preserve the viewport target set by the layout change.
+            self.cancel_window_frame_writes(vec![window]);
         }
         let resumed_transfer = admitted.and_then(|window| {
             let operation = self.state.windows.record(window)?.pending_transfer()?;

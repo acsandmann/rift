@@ -511,10 +511,15 @@ impl CameraAnimation {
 }
 
 impl Reactor {
-    pub(super) fn cancel_window_presentations(&mut self, mut windows: Vec<WindowId>) {
+    pub(super) fn cancel_window_presentations(&mut self, windows: Vec<WindowId>) {
         if windows.is_empty() {
             return;
         }
+        self.cancel_window_frame_writes(windows);
+        self.commit_presentations();
+    }
+
+    pub(super) fn cancel_window_frame_writes(&mut self, mut windows: Vec<WindowId>) {
         windows.sort_unstable();
         let mut frames = Vec::new();
         for camera in self.presentations.values_mut() {
@@ -541,7 +546,6 @@ impl Reactor {
                 }
             }
         }
-        self.commit_presentations();
     }
 
     pub(super) fn commit_presentations(&mut self) {
