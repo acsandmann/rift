@@ -886,26 +886,10 @@ impl SpacesActor {
     }
 
     fn is_fullscreen_space(space: SpaceId) -> bool {
-        #[cfg(test)]
-        {
-            (0x400000000..0x800000000).contains(&space.get())
-        }
-        #[cfg(not(test))]
-        {
-            window_server::space_is_fullscreen(space.get())
-        }
+        window_server::space_is_fullscreen(space.get())
     }
 
-    fn is_user_space(space: SpaceId) -> bool {
-        #[cfg(test)]
-        {
-            space.get() < 0x400000000
-        }
-        #[cfg(not(test))]
-        {
-            window_server::space_is_user(space.get())
-        }
-    }
+    fn is_user_space(space: SpaceId) -> bool { window_server::space_is_user(space.get()) }
 
     fn was_managed_space(&self, space: SpaceId) -> bool {
         self.state.last_forwarded.as_ref().is_some_and(|previous| {
