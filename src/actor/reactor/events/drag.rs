@@ -116,24 +116,30 @@ impl Reactor {
             return;
         };
 
+        // A target on the drop's display: within the owner's layout it is applied here; a
+        // window crossing displays carries it into the relocation below.
         let target = commit.target.filter(|target| target.intent.space == space);
-        if let Some(target) = target
-            && owner == space
-            && self.state.windows.contains_window(target.intent.window)
-        {
-            trace!(source=?window, target=?target.intent.window, action=?target.intent.action, "performing window drop");
-            if self.layout_manager.layout_engine.apply_window_drop(
-                crate::layout_engine::WindowDropRequest {
-                    source: window,
-                    target: target.intent.window,
-                    space,
-                    action: target.intent.action,
-                },
-            ) {
-                changes.space(space).layout_changed = true;
-                changes.drop_haptic = self.drag_manager.haptics_enabled;
+        let relocation_target = if space == owner {
+            if let Some(target) = target
+                && self.state.windows.contains_window(target.intent.window)
+            {
+                trace!(source=?window, target=?target.intent.window, action=?target.intent.action, "performing window drop");
+                if self.layout_manager.layout_engine.apply_window_drop(
+                    crate::layout_engine::WindowDropRequest {
+                        source: window,
+                        target: target.intent.window,
+                        space,
+                        action: target.intent.action,
+                    },
+                ) {
+                    changes.space(space).layout_changed = true;
+                    changes.drop_haptic = self.drag_manager.haptics_enabled;
+                }
             }
-        }
+            None
+        } else {
+            target.map(|target| (target.intent.window, target.intent.action))
+        };
 
         if crossing.is_some() || landing == Some(space) {
             let floating = self.layout_manager.layout_engine.is_window_floating(window);
@@ -155,9 +161,7 @@ impl Reactor {
                 &crate::layout_engine::WorkspaceDropRequest {
                     window,
                     workspace: destination,
-                    target: target
-                        .filter(|_| space != owner)
-                        .map(|target| (target.intent.window, target.intent.action)),
+                    target: relocation_target,
                     frame,
                 },
             ) && space != owner

@@ -981,7 +981,7 @@ mod tests {
     }
 
     #[test]
-    fn modifier_space_change_invalidates_origin_drop_state() {
+    fn entering_another_space_targets_that_spaces_scene() {
         let destination = SpaceId::new(2);
         let mut actor = modifier(MouseAction::Move, true);
         motion(&mut actor, 100.0, 50.0);
@@ -989,13 +989,26 @@ mod tests {
         actor.set_preview(intent, Some(rect()));
         assert!(actor.target().is_some());
 
-        actor.update_current_space(Some(destination), DragScene::default());
+        let there = frame(1000.0, 0.0, 200.0, 100.0);
+        let scene = scene_with(vec![DragSceneTarget {
+            window: w(3),
+            space: destination,
+            frame: there,
+        }]);
+        actor.update_current_space(Some(destination), scene);
         assert_eq!(actor.source().unwrap().current_space, Some(destination));
         assert!(actor.intent().is_none());
         assert!(actor.target().is_none());
+
+        // The origin space's tile is no longer a target; the destination's is.
         motion(&mut actor, 100.0, 50.0);
         assert!(actor.intent().is_none());
-        assert!(actor.finish(MouseButton::Left).unwrap().target.is_none());
+        motion(&mut actor, 1100.0, 50.0);
+        let intent = actor.intent().unwrap();
+        assert_eq!((intent.window, intent.space), (w(3), destination));
+        actor.set_preview(intent, Some(there));
+        let target = actor.finish(MouseButton::Left).unwrap().target.unwrap();
+        assert_eq!((target.intent.window, target.intent.space), (w(3), destination));
     }
 
     #[test]

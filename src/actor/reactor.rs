@@ -2000,17 +2000,16 @@ impl Reactor {
                 // can still be on the old one. Entering a display swaps in its scene.
                 let mut intent_changed = false;
                 if let Some(source) = self.drag_manager.actor.source()
-                    && self.drag_manager.actor.kind().is_some_and(|kind| kind.is_move())
+                    && let Some(kind) = self.drag_manager.actor.kind()
+                    && kind.is_move()
                 {
                     let current_space = self
                         .screen_for_point(motion.point)
                         .and_then(|screen| screen.space)
                         .or_else(|| self.best_space_for_frame(&source.last_frame));
                     if current_space != source.current_space {
-                        let scene = current_space
-                            .filter(|_| source.tiled)
-                            .map(|space| self.drag_scene(source.window, space))
-                            .unwrap_or_default();
+                        let moved = crate::actor::drag::DragSource { current_space, ..source };
+                        let scene = self.move_drag_scene(&moved, kind).unwrap_or_default();
                         self.drag_manager.actor.update_current_space(current_space, scene);
                         intent_changed = true;
                     }
@@ -2050,26 +2049,18 @@ impl Reactor {
                 self.take_drag_authority(window, frame);
                 let space =
                     assigned_space.or_else(|| self.best_space_for_window(&frame, server_id));
-                let tiled = !self.layout_manager.layout_engine.is_window_floating(window);
-                let scene = if tiled {
-                    space.map(|space| self.drag_scene(window, space)).unwrap_or_default()
-                } else {
-                    Default::default()
+                let source = crate::actor::drag::DragSource {
+                    window,
+                    origin_frame: frame,
+                    last_frame: frame,
+                    origin_space: space,
+                    current_space: space,
+                    tiled: !self.layout_manager.layout_engine.is_window_floating(window),
                 };
-                self.drag_manager.actor.begin_modifier(
-                    crate::actor::drag::DragSource {
-                        window,
-                        origin_frame: frame,
-                        last_frame: frame,
-                        origin_space: space,
-                        current_space: space,
-                        tiled,
-                    },
-                    button,
-                    point,
-                    action,
-                    scene,
-                );
+                let scene = self
+                    .move_drag_scene(&source, crate::actor::drag::DragKind::ModifierMove)
+                    .unwrap_or_default();
+                self.drag_manager.actor.begin_modifier(source, button, point, action, scene);
                 self.drag_manager.sync_preview();
                 return Ok(());
             }
@@ -4462,23 +4453,27 @@ impl Reactor {
         self.drag_manager.sync_preview();
     }
 
+    /// The scene a drag hit-tests against: the tiles of the space it is on (`current_space`), for
+    /// a tiled move; `None` for any other drag.
+    fn move_drag_scene(
+        &self,
+        source: &crate::actor::drag::DragSource,
+        kind: crate::actor::drag::DragKind,
+    ) -> Option<crate::actor::drag::DragScene> {
+        let space = source.current_space.filter(|_| source.tiled && kind.is_move())?;
+        Some(self.drag_scene(source.window, space))
+    }
+
     fn refresh_active_drag_scene(&mut self) {
         let Some(source) = self.drag_manager.actor.source() else {
             return;
         };
-        if !source.tiled
-            || !matches!(
-                self.drag_manager.actor.kind(),
-                Some(
-                    crate::actor::drag::DragKind::NativeMove
-                        | crate::actor::drag::DragKind::ModifierMove
-                )
-            )
-        {
+        let Some(kind) = self.drag_manager.actor.kind() else {
             return;
-        }
-        let Some(space) = source.current_space else { return };
-        let scene = self.drag_scene(source.window, space);
+        };
+        let Some(scene) = self.move_drag_scene(&source, kind) else {
+            return;
+        };
         self.drag_manager.actor.replace_scene(scene);
         self.resolve_drag_preview();
     }

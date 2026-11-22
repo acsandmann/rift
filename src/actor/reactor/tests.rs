@@ -11248,14 +11248,11 @@ struct TwoDisplays {
     space_b: SpaceId,
 }
 
-const DRAG_SPACE_A: u64 = 1;
-const DRAG_SPACE_B: u64 = 2;
-
 fn two_displays_with_tiles(windows_on_b: u32) -> TwoDisplays {
     let (mut apps, mut reactor) = test_context();
     let screen_a = CGRect::new(CGPoint::ZERO, CGSize::new(1000., 800.));
     let screen_b = CGRect::new(CGPoint::new(1000., 0.), CGSize::new(1000., 800.));
-    let (space_a, space_b) = (SpaceId::new(DRAG_SPACE_A), SpaceId::new(DRAG_SPACE_B));
+    let (space_a, space_b) = (SpaceId::new(1), SpaceId::new(2));
     reactor.handle_event(space_state_event(vec![screen_a, screen_b], vec![
         Some(space_a),
         Some(space_b),
@@ -11379,7 +11376,7 @@ fn with_the_pointer_on_another_display_no_target_is_on_the_source_display() {
 fn a_native_drag_dropped_on_another_display_lands_at_the_previewed_target() {
     let mut f = two_displays_with_tiles(2);
     drag_onto_display_b_with_the_frame_lagging(&mut f);
-    assert!(f.reactor.drag_manager.actor.target().is_some());
+    let previewed = f.reactor.drag_manager.actor.target().expect("a target on display B");
     f.reactor.handle_event(Event::MouseUp(crate::actor::drag::MouseButton::Left));
     f.apps.simulate_until_quiet(&mut f.reactor);
 
@@ -11390,6 +11387,9 @@ fn a_native_drag_dropped_on_another_display_lands_at_the_previewed_target() {
     // Inserted left of B's left tile.
     let x = |wid| tile(&f.reactor, wid).origin.x;
     assert!(x(f.dragged) < x(f.on_b[0]) && x(f.on_b[0]) < x(f.on_b[1]));
+    // Preview and commit come from one prospective layout, so the window lands exactly where
+    // the preview showed it.
+    assert_eq!(tile(&f.reactor, f.dragged), previewed.preview_area);
 }
 
 #[test]
