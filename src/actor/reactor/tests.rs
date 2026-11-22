@@ -635,6 +635,25 @@ fn a_destroyed_window_takes_its_size_constraints_with_it() {
 }
 
 #[test]
+fn a_quitting_app_takes_its_windows_size_constraints_with_it() {
+    let (mut apps, mut reactor) = test_context();
+    reactor.handle_event(space_state_event(
+        vec![CGRect::new(CGPoint::new(0., 0.), CGSize::new(1000., 1000.))],
+        vec![Some(SpaceId::new(1))],
+    ));
+    apps.make_app_and_settle(&mut reactor, 1, make_windows(2));
+    apps.make_app_and_settle(&mut reactor, 2, make_windows(1));
+    let has_constraints =
+        |reactor: &Reactor, wid| reactor.layout_manager.layout_engine.has_window_constraints(wid);
+    let quitting = [WindowId::new(1, 1), WindowId::new(1, 2)];
+    let staying = WindowId::new(2, 1);
+    assert!(quitting.iter().all(|&wid| has_constraints(&reactor, wid)));
+    reactor.handle_event(Event::ApplicationThreadTerminated(1));
+    assert!(quitting.iter().all(|&wid| !has_constraints(&reactor, wid)));
+    assert!(has_constraints(&reactor, staying));
+}
+
+#[test]
 fn it_manages_windows_on_enabled_spaces() {
     let (mut apps, mut reactor) = test_context();
     let full_screen = CGRect::new(CGPoint::new(0., 0.), CGSize::new(1000., 1000.));

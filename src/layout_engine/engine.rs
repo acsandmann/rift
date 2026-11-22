@@ -197,12 +197,6 @@ impl LayoutConstraints {
         removed
     }
 
-    fn remove_app(&mut self, pid: pid_t) {
-        let count = self.windows.len();
-        self.windows.retain(|window, _| window.pid != pid);
-        self.revision += u64::from(self.windows.len() != count);
-    }
-
     fn set_width(&mut self, window: WindowId, width: f64) {
         if let Some(constraints) = self.windows.get_mut(&window)
             && constraints.locked_width != width
@@ -2142,7 +2136,6 @@ impl LayoutEngine {
                 self.evicted.retain(|wid, _| wid.pid != pid);
                 self.prune_native_layouts();
                 self.floating.remove_all_for_pid(pid);
-                self.window_layout_constraints.remove_app(pid);
                 self.forget_persisted_app(pid);
 
                 self.floating_positions.remove_app(pid);
@@ -4441,10 +4434,8 @@ mod tests {
         let _ = engine.handle_event(&mut window_store, LayoutEvent::WindowAdded(space, fixed));
         assert_eq!(width(&mut engine), 300.0);
 
-        // Leaving the layout for good still isn't the window's end; retiring it is.
+        // Leaving the layout for good still isn't the window's end.
         let _ = engine.handle_event(&mut window_store, LayoutEvent::WindowRemoved(fixed));
         assert!(engine.window_layout_constraints.windows.contains_key(&fixed));
-        engine.retire_window(fixed);
-        assert!(!engine.window_layout_constraints.windows.contains_key(&fixed));
     }
 }

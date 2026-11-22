@@ -155,6 +155,7 @@ impl Reactor {
                 wid,
                 self.state.windows.record(wid).and_then(|r| r.window_server_id()),
             );
+            self.layout_manager.layout_engine.retire_window(wid);
         }
         self.cancel_window_presentations(windows);
         self.overview_focus = self.overview_focus.filter(|(_, window, _)| window.pid != pid);
