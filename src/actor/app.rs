@@ -1320,19 +1320,14 @@ impl State {
             ..
         } = pending;
         let _guard = span.enter();
-        // AX can animate position-only samples too. Keep suppression across
-        // an animation, or just across this batch for unbracketed drag samples.
-        let window = self.window_mut(wid)?;
-        if window.is_animating {
-            if !window.animation_eui_held {
-                let app = self.app.clone();
-                self.enhanced_ui.acquire(&app);
-                self.window_mut(wid)?.animation_eui_held = true;
-            }
-        } else {
-            self.require_batch_eui(eui);
+        // Position samples need suppression too. Acquire through the batch so
+        // a failed attempt can be retried on the next sample batch.
+        self.require_batch_eui(eui);
+        let window = self.windows.get_mut(&wid).ok_or(AxError::NotFound)?;
+        if window.is_animating && !window.animation_eui_held {
+            self.enhanced_ui.retain();
+            window.animation_eui_held = true;
         }
-        let window = self.window_mut(wid)?;
         window.last_seen_txid = txid;
         window.frame_source = source;
         // Release reapplies this frame, including position-only viewport writes.
@@ -2351,6 +2346,7 @@ impl State {
         });
         debug_assert!(old.is_none(), "Duplicate window id {wid:?}");
         self.elem_to_wid.insert(elem, wid);
+        self.enhanced_ui.invalidate_support_cache();
         Some((info, wid, server_info))
     }
 
