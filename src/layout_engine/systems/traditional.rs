@@ -951,36 +951,6 @@ mod tests {
     }
 
     #[test]
-    fn joining_toward_an_adjacent_stack_grows_it() {
-        use crate::common::config::StackDefaultOrientation;
-
-        let mut system = TraditionalLayoutSystem::default();
-        let layout = system.create_layout();
-        let root = system.tiles.layout_roots[layout].0;
-        system.tiles.set_layout(root, LayoutKind::Horizontal);
-        for window in [w(1), w(2), w(3)] {
-            system.add_window_after_selection(layout, window);
-        }
-        system.focus(layout, Focus::Select(w(1)));
-        system.edit(layout, LayoutEdit::Group(GroupEdit::Join(Direction::Right)));
-        let _ = system.edit(
-            layout,
-            LayoutEdit::Group(GroupEdit::Stack(StackDefaultOrientation::Same)),
-        );
-        assert_eq!(system.windows(layout, WindowQuery::Stack(w(1))), vec![
-            w(1),
-            w(2)
-        ]);
-
-        // Window 3, beside the stack, joins it: at the end it came from, and stays selected.
-        system.focus(layout, Focus::Select(w(3)));
-        system.edit(layout, LayoutEdit::Group(GroupEdit::Join(Direction::Left)));
-        let stack = system.windows(layout, WindowQuery::Stack(w(1)));
-        assert_eq!(stack, [w(1), w(2), w(3)]);
-        assert_eq!(system.selected_window(layout), Some(w(3)));
-    }
-
-    #[test]
     fn join_adds_a_window_to_the_neighboring_stack_in_every_direction() {
         use crate::common::config::StackDefaultOrientation;
 
