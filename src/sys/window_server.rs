@@ -444,16 +444,20 @@ pub fn window_is_sticky(id: WindowServerId) -> bool {
     spaces_cf.len() > 1
 }
 
+/// In tests, only what a test set: fixture ids are real windows' ids on the test machine too.
+#[cfg(test)]
 pub fn window_spaces(id: WindowServerId) -> Vec<crate::sys::screen::SpaceId> {
-    #[cfg(test)]
     TEST_WINDOW_SPACE_QUERY_COUNT.with(|count| count.set(count.get() + 1));
-    #[cfg(test)]
-    if let Some(override_spaces) =
-        TEST_WINDOW_SPACES_OVERRIDE.with(|spaces| spaces.borrow().get(&id.as_u32()).cloned())
-    {
-        return override_spaces.into_iter().map(crate::sys::screen::SpaceId::new).collect();
-    }
+    TEST_WINDOW_SPACES_OVERRIDE
+        .with(|spaces| spaces.borrow().get(&id.as_u32()).cloned())
+        .unwrap_or_default()
+        .into_iter()
+        .map(crate::sys::screen::SpaceId::new)
+        .collect()
+}
 
+#[cfg(not(test))]
+pub fn window_spaces(id: WindowServerId) -> Vec<crate::sys::screen::SpaceId> {
     let cf_windows = cf_array_from_ids(&[id]);
     let space_list_ref = unsafe {
         SLSCopySpacesForWindows(*G_CONNECTION, 0x7, CFRetained::as_ptr(&cf_windows).as_ptr())
@@ -484,14 +488,17 @@ pub fn window_space(id: WindowServerId) -> Option<crate::sys::screen::SpaceId> {
         .or_else(|| spaces.into_iter().next())
 }
 
+/// In tests, only what a test set, else what macOS says of a window that does not exist:
+/// ordered out (see `window_spaces`).
+#[cfg(test)]
 pub fn window_ordered_in(id: WindowServerId) -> Option<bool> {
-    #[cfg(test)]
-    if let Some(ordered) = TEST_WINDOW_ORDERED_IN_OVERRIDE
+    TEST_WINDOW_ORDERED_IN_OVERRIDE
         .with(|override_ordered| override_ordered.borrow().get(&id.as_u32()).copied())
-    {
-        return Some(ordered);
-    }
+        .or(Some(false))
+}
 
+#[cfg(not(test))]
+pub fn window_ordered_in(id: WindowServerId) -> Option<bool> {
     let mut ordered: u8 = 0;
     if let Ok(_) = cg_ok(unsafe { SLSWindowIsOrderedIn(*G_CONNECTION, id.as_u32(), &mut ordered) })
     {
@@ -786,6 +793,7 @@ fn tags_match_app_window_role(tags: SLSWindowTags) -> bool {
 }
 
 /// Returns whether the iterator points at a top-level application window.
+#[cfg_attr(test, allow(dead_code))]
 fn iterator_window_suitable(iterator: *mut CFType) -> bool {
     let tags = iterator_window_tags(iterator);
     let parent_wid = unsafe { SLSWindowIteratorGetParentID(iterator) };
@@ -1002,6 +1010,11 @@ pub fn set_window_ordered_in_override(id: WindowServerId, ordered: Option<bool>)
     });
 }
 
+/// In tests, what macOS says of a window that does not exist (see `window_spaces`).
+#[cfg(test)]
+pub fn app_window_suitability(_id: WindowServerId) -> Option<bool> { Some(false) }
+
+#[cfg(not(test))]
 pub fn app_window_suitability(id: WindowServerId) -> Option<bool> {
     let query = WindowIterator::new(&[id])?;
 
@@ -1016,7 +1029,23 @@ pub fn app_window_suitable(id: WindowServerId) -> bool {
     app_window_suitability(id).unwrap_or(false)
 }
 
+/// In tests, a Space's kind is read off its id: below 0x400000000 a user desktop,
+/// 0x400000000..0x800000000 fullscreen. This is a fixture convention, not macOS's rule
+/// (macOS reads the kind from `SLSSpaceGetType`, and an unknown Space is neither kind);
+/// fixture ids are real Spaces' ids too, so asking macOS would depend on the machine.
+#[cfg(test)]
+const TEST_FULLSCREEN_SPACES: std::ops::Range<u64> = 0x400000000..0x800000000;
+
+#[cfg(test)]
+pub fn space_is_user(sid: u64) -> bool { sid < TEST_FULLSCREEN_SPACES.start }
+
+#[cfg(test)]
+pub fn space_is_fullscreen(sid: u64) -> bool { TEST_FULLSCREEN_SPACES.contains(&sid) }
+
+#[cfg(not(test))]
 pub fn space_is_user(sid: u64) -> bool { unsafe { SLSSpaceGetType(*G_CONNECTION, sid) == 0 } }
+
+#[cfg(not(test))]
 pub fn space_is_fullscreen(sid: u64) -> bool { unsafe { SLSSpaceGetType(*G_CONNECTION, sid) == 4 } }
 
 // credit: https://github.com/Hammerspoon/hammerspoon/issues/370#issuecomment-545545468
