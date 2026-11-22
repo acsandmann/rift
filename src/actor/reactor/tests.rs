@@ -276,6 +276,72 @@ fn geometry_commands_request_arrangement_without_camera_movement() {
 }
 
 #[test]
+fn scrolling_resize_places_the_new_geometry_on_the_first_frame() {
+    use crate::actor::app::FrameMode;
+    use crate::layout_engine::ResizeOrientation::Horizontal;
+
+    let screen = CGRect::new(CGPoint::ZERO, CGSize::new(1000., 1000.));
+    let space = SpaceId::new(1);
+    let left = WindowId::new(1, 1);
+    let right = WindowId::new(2, 1);
+    for (selected, command, width) in [
+        (left, LayoutCommand::ResizeWindowShrink(Horizontal), 450.),
+        (right, LayoutCommand::ResizeWindowGrow(Horizontal), 550.),
+    ] {
+        let (mut apps, mut reactor) = test_context();
+        let layout = &mut reactor.config.settings.layout;
+        layout.gaps = Default::default();
+        layout.scrolling.animate = Some(true);
+        layout.scrolling.column_width_ratio = 0.5;
+        layout.scrolling.preserve_window_sizes = false;
+        reactor.layout_manager.layout_engine.set_layout_settings(layout);
+        reactor.handle_event(space_state_event(vec![screen], vec![Some(space)]));
+        reactor.handle_test_layout_command(LayoutCommand::SetWorkspaceLayout {
+            workspace: None,
+            mode: LayoutMode::Scrolling,
+        });
+        apps.make_app_and_settle(&mut reactor, 1, make_windows(1));
+        apps.make_app_and_settle(&mut reactor, 2, make_windows(1));
+        reactor.handle_test_layout_event(LayoutEvent::WindowFocused(space, selected));
+        apps.simulate_until_quiet(&mut reactor);
+        assert_eq!(
+            apps.windows[&left].frame.max().x,
+            apps.windows[&right].frame.origin.x
+        );
+        assert_eq!(apps.windows[&right].frame.max().x, screen.max().x);
+
+        let (sender, receiver) = super::animation::AnimationSender::channel();
+        reactor.animation_tx = Some(sender);
+        reactor.handle_test_layout_command(command);
+        let mut presenter = super::animation::AnimationManager::new();
+        for message in receiver.commands.try_iter() {
+            presenter.handle_message(message);
+        }
+        presenter.tick_at(Instant::now());
+        let requests = apps.requests();
+        for request in &requests {
+            if let Request::SetWindowFrames(frames, _, FrameMode::Full, ..) = request {
+                for &(window, frame) in frames {
+                    if window == selected {
+                        assert!(
+                            frame.origin.x >= screen.origin.x && frame.max().x <= screen.max().x,
+                            "resizing a fully visible column requested a frame outside the screen: {frame:?}"
+                        );
+                    }
+                }
+            }
+        }
+        apps.simulate_events_for_requests(requests);
+
+        assert_eq!(apps.windows[&selected].frame.size.width, width);
+        assert_eq!(
+            apps.windows[&left].frame.max().x,
+            apps.windows[&right].frame.origin.x
+        );
+    }
+}
+
+#[test]
 fn no_op_layout_command_does_not_schedule_arrange() {
     let mut reactor = test_reactor();
     let screen = CGRect::new(CGPoint::new(0., 0.), CGSize::new(1000., 1000.));

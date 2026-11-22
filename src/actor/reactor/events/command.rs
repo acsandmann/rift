@@ -2,6 +2,7 @@ use tracing::{info, warn};
 
 use super::super::*;
 use crate::actor::wm_controller::{WmCmd, WmCommand};
+use crate::common::config::LayoutMode;
 use crate::layout_engine::LayoutCommand;
 use crate::model::space_activation::ToggleSpaceContext;
 
@@ -28,6 +29,13 @@ impl Reactor {
             &multiple
         };
         let is_move_node = matches!(cmd, LayoutCommand::MoveNode(_));
+        let is_resize = matches!(
+            cmd,
+            LayoutCommand::ResizeWindowGrow(_)
+                | LayoutCommand::ResizeWindowShrink(_)
+                | LayoutCommand::ResizeWindowBy { .. }
+                | LayoutCommand::SwitchPresetColumnWidth { .. }
+        );
         let post_arrange_mouse_warp = (is_move_node && self.config.settings.mouse_follows_focus)
             .then(|| self.main_window())
             .flatten();
@@ -77,7 +85,7 @@ impl Reactor {
                 | LayoutCommand::ConsumeOrExpelWindow(_)
         ) && let Some(space) = command_space
             && self.layout_manager.layout_engine.active_layout_mode_at(space)
-                == crate::common::config::LayoutMode::Floating
+                == LayoutMode::Floating
         {
             self.store_current_floating_positions(space);
         }
@@ -148,6 +156,15 @@ impl Reactor {
         let target = response.workspace_space.or(response.layout_space).or(edit_space);
         let policy = if is_workspace_switch && response.changed {
             Presentation::WorkspaceSwitch
+        } else if is_resize
+            && target.is_some_and(|space| {
+                self.layout_manager.layout_engine.active_layout_mode_at(space)
+                    == LayoutMode::Scrolling
+            })
+        {
+            // The viewport applies sizes up front. Place neighbors on the same
+            // sample so they don't leave a gap while easing to their new positions.
+            Presentation::Resize
         } else {
             Presentation::Animated
         };
