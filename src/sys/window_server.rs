@@ -488,11 +488,13 @@ pub fn window_space(id: WindowServerId) -> Option<crate::sys::screen::SpaceId> {
         .or_else(|| spaces.into_iter().next())
 }
 
-/// In tests, only what a test set (see `window_spaces`).
+/// In tests, only what a test set, else what macOS says of a window that does not exist:
+/// ordered out (see `window_spaces`).
 #[cfg(test)]
 pub fn window_ordered_in(id: WindowServerId) -> Option<bool> {
     TEST_WINDOW_ORDERED_IN_OVERRIDE
         .with(|override_ordered| override_ordered.borrow().get(&id.as_u32()).copied())
+        .or(Some(false))
 }
 
 #[cfg(not(test))]
@@ -1028,7 +1030,9 @@ pub fn app_window_suitable(id: WindowServerId) -> bool {
 }
 
 /// In tests, a Space's kind is read off its id: below 0x400000000 a user desktop,
-/// 0x400000000..0x800000000 fullscreen. Fixture ids are real Spaces' ids too.
+/// 0x400000000..0x800000000 fullscreen. This is a fixture convention, not macOS's rule
+/// (macOS reads the kind from `SLSSpaceGetType`, and an unknown Space is neither kind);
+/// fixture ids are real Spaces' ids too, so asking macOS would depend on the machine.
 #[cfg(test)]
 const TEST_FULLSCREEN_SPACES: std::ops::Range<u64> = 0x400000000..0x800000000;
 
