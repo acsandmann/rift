@@ -197,12 +197,6 @@ impl LayoutConstraints {
         removed
     }
 
-    fn remove_app(&mut self, pid: pid_t) {
-        let count = self.windows.len();
-        self.windows.retain(|window, _| window.pid != pid);
-        self.revision += u64::from(self.windows.len() != count);
-    }
-
     fn set_width(&mut self, window: WindowId, width: f64) {
         if let Some(constraints) = self.windows.get_mut(&window)
             && constraints.locked_width != width
@@ -1519,7 +1513,6 @@ impl LayoutEngine {
         if self.focused_window == Some(wid) {
             self.focused_window = None;
         }
-        self.window_layout_constraints.remove(&wid);
 
         removal.is_some()
     }
@@ -2143,7 +2136,6 @@ impl LayoutEngine {
                 self.evicted.retain(|wid, _| wid.pid != pid);
                 self.prune_native_layouts();
                 self.floating.remove_all_for_pid(pid);
-                self.window_layout_constraints.remove_app(pid);
                 self.forget_persisted_app(pid);
 
                 self.floating_positions.remove_app(pid);
@@ -3751,6 +3743,17 @@ impl LayoutEngine {
         self.floating_positions.remove_window(window);
     }
 
+    /// A window's size constraints live as long as the window, so only its retirement drops
+    /// them. Leaving a layout doesn't: a move between Spaces arrives as a layout removal.
+    pub(crate) fn retire_window(&mut self, wid: WindowId) {
+        self.window_layout_constraints.remove(&wid);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn has_window_constraints(&self, wid: WindowId) -> bool {
+        self.window_layout_constraints.windows.contains_key(&wid)
+    }
+
     pub(crate) fn transfer_persistent_window_identity(&mut self, from: WindowId, to: WindowId) {
         if from == to {
             return;
@@ -4381,5 +4384,58 @@ mod tests {
             let layout = workspace.active_layout().unwrap();
             assert_eq!(workspace.layout_system.contains_window(layout, wid), id == ws1);
         }
+    }
+
+    #[test]
+    fn moving_a_window_between_spaces_keeps_its_size_constraints() {
+        let mut engine = test_engine();
+        let mut window_store = WindowStore::default();
+        let space = SpaceId::new(93);
+        let screen = CGRect::new(CGPoint::new(0.0, 0.0), CGSize::new(1200.0, 800.0));
+        let _ =
+            engine.handle_event(&mut window_store, LayoutEvent::SpaceExposed(space, screen.size));
+        let (fixed, other) = (WindowId::new(7, 1), WindowId::new(8, 1));
+        let mut state = live_window(CGSize::new(300.0, 800.0));
+        state.info.is_resizable = false;
+        let fixed_info = state.layout_info(fixed);
+        window_store.insert_window(fixed, state);
+        window_store.insert_window(other, live_window(CGSize::new(500.0, 500.0)));
+        let _ = engine.handle_event(
+            &mut window_store,
+            LayoutEvent::windows_observed(space, fixed.pid, vec![fixed_info], None),
+        );
+        let _ = engine.handle_event(
+            &mut window_store,
+            LayoutEvent::windows_observed(
+                space,
+                other.pid,
+                vec![window_layout_info(other, CGSize::new(500.0, 500.0))],
+                None,
+            ),
+        );
+        let width = |engine: &mut LayoutEngine| {
+            let frames =
+                engine.calculate_layout(space, screen, &Default::default(), Default::default());
+            frames
+                .into_iter()
+                .find(|(w, _)| *w == fixed)
+                .expect("fixed window is tiled")
+                .1
+                .size
+                .width
+        };
+        assert_eq!(width(&mut engine), 300.0);
+
+        // A display move: the window leaves the layout and comes back.
+        let _ = engine.handle_event(
+            &mut window_store,
+            LayoutEvent::WindowRemovedPreserveFloating(fixed),
+        );
+        let _ = engine.handle_event(&mut window_store, LayoutEvent::WindowAdded(space, fixed));
+        assert_eq!(width(&mut engine), 300.0);
+
+        // Leaving the layout for good still isn't the window's end.
+        let _ = engine.handle_event(&mut window_store, LayoutEvent::WindowRemoved(fixed));
+        assert!(engine.window_layout_constraints.windows.contains_key(&fixed));
     }
 }
