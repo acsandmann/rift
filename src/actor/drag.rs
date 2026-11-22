@@ -15,7 +15,6 @@ pub use crate::model::drag::{
     DragCancel, DragCommit, DragKind, DragScene, DragSceneTarget, DragSource, DropIntent,
     DropTarget, DropZone,
 };
-use crate::sys::geometry::SameAs;
 use crate::sys::screen::SpaceId;
 
 const HYSTERESIS_POINTS: f64 = 8.0;
@@ -254,11 +253,7 @@ impl DragActor {
         if self.is_active() {
             return;
         }
-        let kind = if source.origin_frame.size.same_as(source.last_frame.size) {
-            DragKind::NativeMove
-        } else {
-            DragKind::NativeResize
-        };
+        let kind = DragKind::native(source.origin_frame, source.last_frame);
         let pointer = CGPoint::new(
             source.last_frame.origin.x + source.last_frame.size.width / 2.0,
             source.last_frame.origin.y + source.last_frame.size.height / 2.0,
@@ -280,11 +275,7 @@ impl DragActor {
             return false;
         }
         session.source.last_frame = frame;
-        session.kind = if session.source.origin_frame.size.same_as(frame.size) {
-            DragKind::NativeMove
-        } else {
-            DragKind::NativeResize
-        };
+        session.kind = DragKind::native(session.source.origin_frame, frame);
         true
     }
 

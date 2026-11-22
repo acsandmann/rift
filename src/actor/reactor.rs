@@ -1045,26 +1045,17 @@ impl Reactor {
         current_space: Option<SpaceId>,
     ) {
         self.take_drag_authority(window, origin_frame);
-        let tiled = !self.layout_manager.layout_engine.is_window_floating(window);
-        let scene = if tiled
-            && self.drag_manager.actor.drop_enabled()
-            && origin_frame.size.same_as(last_frame.size)
-        {
-            origin_space.map(|space| self.drag_scene(window, space)).unwrap_or_default()
-        } else {
-            Default::default()
+        let source = crate::actor::drag::DragSource {
+            window,
+            origin_frame,
+            last_frame,
+            origin_space,
+            current_space,
+            tiled: !self.layout_manager.layout_engine.is_window_floating(window),
         };
-        self.drag_manager.actor.begin_native(
-            crate::actor::drag::DragSource {
-                window,
-                origin_frame,
-                last_frame,
-                origin_space,
-                current_space,
-                tiled,
-            },
-            scene,
-        );
+        let kind = crate::actor::drag::DragKind::native(origin_frame, last_frame);
+        let scene = self.move_drag_scene(&source, kind).unwrap_or_default();
+        self.drag_manager.actor.begin_native(source, scene);
     }
 
     fn is_mission_control_active(&self) -> bool {
@@ -4454,7 +4445,8 @@ impl Reactor {
     }
 
     /// The scene a drag hit-tests against: the tiles of the space it is on (`current_space`), for
-    /// a tiled move; `None` for any other drag.
+    /// a tiled move; `None` for any other drag. Every drag scene is built here, from the source's
+    /// own `current_space`, so a drag's scene and space cannot disagree.
     fn move_drag_scene(
         &self,
         source: &crate::actor::drag::DragSource,

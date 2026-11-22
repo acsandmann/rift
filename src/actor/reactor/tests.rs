@@ -11392,6 +11392,38 @@ fn a_native_drag_dropped_on_another_display_lands_at_the_previewed_target() {
     assert_eq!(tile(&f.reactor, f.dragged), previewed.preview_area);
 }
 
+/// The drag's first frame is already mostly on display B, with the pointer there too: the drag
+/// starts on B, so it targets B's tiles, not the origin display's.
+#[test]
+fn a_native_drag_whose_first_frame_is_on_another_display_targets_that_display() {
+    let mut f = two_displays_with_tiles(2);
+    let start = f.apps.windows[&f.dragged].frame;
+    let moved = CGRect::new(CGPoint::new(1000. - start.size.width / 4., 0.), start.size);
+    assert!(
+        moved.max().x - 1000. > 1000. - moved.origin.x,
+        "most of the frame is on B"
+    );
+    f.reactor.handle_event(Event::WindowFrameChanged(
+        f.dragged,
+        moved,
+        Some(f.apps.windows[&f.dragged].last_seen_txid),
+        Requested(false),
+        Some(MouseState::Down),
+    ));
+    f.apps.windows.get_mut(&f.dragged).unwrap().frame = moved;
+    assert_eq!(
+        f.reactor.drag_manager.actor.source().and_then(|source| source.current_space),
+        Some(f.space_b)
+    );
+    let point = CGPoint::new(1040., 400.);
+    f.reactor
+        .handle_event(Event::DragMotion(crate::actor::drag::DragMotion { point }));
+
+    let target = f.reactor.drag_manager.actor.target().expect("a target on display B");
+    assert_eq!(target.intent.space, f.space_b, "{target:?}");
+    assert_eq!(target.intent.window, f.on_b[0], "{target:?}");
+}
+
 #[test]
 fn a_native_drag_dropped_with_no_target_lands_on_the_pointers_display() {
     let mut f = two_displays_with_tiles(0);
