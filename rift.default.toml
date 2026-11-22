@@ -209,6 +209,8 @@ activate_on_hotkey_release = false
 enabled = false
 # Include empty workspaces as navigation and drag destinations.
 show_empty_workspaces = true
+# Hide the camera and navigation controls in the corner of Overview.
+# hide_toolbar = true
 
 [settings.ui.menu_bar]
 # enable menu bar workspace indicators

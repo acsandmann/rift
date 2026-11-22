@@ -351,6 +351,15 @@ fn catalog() -> &'static [Entry] {
         append::<DragDropSettings>(&mut out, "", Mouse, None, "Mouse & Trackpad › Drag & Drop");
         append::<MenuBarSettings>(&mut out, "", MenuBar, None, "Menu Bar");
         append::<MissionControlSettings>(&mut out, "", Overview, None, "Overview");
+        out.extend(super::interface::OVERVIEW_SHORTCUTS.map(|(_, title)| Draft {
+            title,
+            location: "Overview › Keyboard Shortcuts".into(),
+            page: Overview,
+            layout: None,
+            key: "",
+            help: "",
+            aliases: "hotkeys keybindings".into(),
+        }));
         append::<StackLineSettings>(&mut out, "", StackTabs, None, "Stack Tabs");
         append::<LayoutSettings>(&mut out, "", Layouts, None, "Layouts");
         append::<BaseLayoutSettings>(&mut out, "", Layouts, None, "Layouts › Shared settings");
@@ -474,12 +483,18 @@ mod tests {
             ("stack offset", "Window offset", Layouts, Some(LayoutMode::Stack)),
             ("screen edges", "Screen edges", Layouts, None),
             ("per display override", "Display overrides", Layouts, None),
+            ("overview shortcuts zoom in", "Zoom In", Overview, None),
         ] {
             let found = results(query);
             let first = found.first().expect("find a setting, not just its section");
             assert_eq!((first.title, first.page, first.layout), (title, page, layout));
         }
         assert!(results("gaps").iter().any(|result| result.title == "Screen edges"));
+        assert!(
+            results("fit workspace").iter().any(|result| {
+                result.page == Overview && result.title == "Fit Current Workspace"
+            })
+        );
         assert!(
             results("column width unrelatedword").is_empty(),
             "match every query word"

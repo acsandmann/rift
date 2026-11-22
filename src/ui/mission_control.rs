@@ -150,6 +150,20 @@ struct Motion {
     completed: Arc<AtomicBool>,
 }
 impl Motion {
+    fn timing_function(&self) -> Retained<objc2_quartz_core::CAMediaTimingFunction> {
+        // Linear time control points reproduce the cubic camera curves.
+        objc2_quartz_core::CAMediaTimingFunction::functionWithControlPoints(
+            1. / 3.,
+            match self.curve {
+                MotionCurve::Enter => 1.,
+                MotionCurve::Smooth => 0.,
+                MotionCurve::Retarget(slope) => (slope / 3.) as f32,
+            },
+            2. / 3.,
+            1.,
+        )
+    }
+
     fn sample(&self, now: Instant) -> (Camera, bool) {
         let t = (now.duration_since(self.start).as_secs_f64() / self.duration).min(1.);
         // Entry settles quickly; focus accelerates into the window without a first-frame jump.
@@ -238,6 +252,29 @@ fn decoration_fade(layer: &CALayer, shadow: bool, to: f32, duration: f64) {
         layer.addAnimation_forKey(&animation, Some(&key));
     } else {
         layer.removeAnimationForKey(&key);
+    }
+}
+
+fn place_workspace_label(label: &CALayer, target: CGPoint, motion: Option<&Motion>) {
+    let key = NSString::from_str("position");
+    let start = motion.filter(|_| !label.isHidden()).and_then(|motion| {
+        let presented = unsafe { label.presentationLayer() };
+        let source = presented.as_deref().unwrap_or(label);
+        (source.opacity() > 0.).then(|| (motion, source.position()))
+    });
+    label.setPosition(target);
+    if let Some((motion, from)) = start {
+        let animation = CABasicAnimation::animationWithKeyPath(Some(&key));
+        unsafe {
+            animation.setFromValue(Some(&NSValue::valueWithPoint(from)));
+            animation.setToValue(Some(&NSValue::valueWithPoint(target)));
+        }
+        animation.setDuration(motion.duration);
+        animation.setTimingFunction(Some(&motion.timing_function()));
+        label.addAnimation_forKey(&animation, Some(&key));
+    } else {
+        // A label newly entering the viewport has no visible starting position.
+        label.removeAnimationForKey(&key);
     }
 }
 
@@ -475,6 +512,7 @@ impl WorkspaceRegion {
     fn new(ws: &RuntimeWorkspaceData, origin: CGPoint, root: &CALayer, scale: f64) -> Self {
         let (label, title, icon, extra_icon, _) = window_badge("", None, scale);
         label.setOpacity(0.);
+        label.setHidden(true);
         root.addSublayer(&label);
         let mut region = Self {
             id: ws.workspace_id,
@@ -556,6 +594,7 @@ struct DisplayOverview {
     pictures: Retained<CALayer>,
     focus_ring: Retained<CALayer>,
     controls: Retained<CALayer>,
+    active: bool,
     percentage: Retained<CATextLayer>,
     help: Retained<CATextLayer>,
     help_index: Option<usize>,
@@ -638,6 +677,7 @@ impl DisplayOverview {
         controls.setBorderColor(Some(&color(1., 1., 1., 0.15)));
         controls.setZPosition(3.);
         controls.setOpacity(0.);
+        controls.setHidden(true);
         root.addSublayer(&controls);
         symbol(&controls, "minus", 12., scale);
         let percentage = text(&controls, "34%", rect(42., 9., 40., 18.), scale, 13.);
@@ -706,6 +746,7 @@ impl DisplayOverview {
             pictures,
             focus_ring,
             controls,
+            active: false,
             percentage,
             help,
             help_index: None,
@@ -916,11 +957,23 @@ impl DisplayOverview {
         }
     }
 
-    fn fit(&self) -> Camera {
+    fn empty_workspace_frame(&self, workspace: &RuntimeWorkspaceData) -> CGRect {
+        CGRect::new(self.workspace_origin(workspace.index), self.info.frame.size)
+    }
+
+    fn fit(&self, workspace: Option<&RuntimeWorkspaceData>) -> Camera {
         self.windows
             .iter()
+            .filter(|w| workspace.is_none_or(|ws| w.workspace == ws.workspace_id))
             .map(|w| w.world)
+            .chain(
+                self.workspaces
+                    .iter()
+                    .filter(|ws| workspace.is_none() && ws.windows.is_empty())
+                    .map(|ws| self.empty_workspace_frame(ws)),
+            )
             .reduce(union)
+            .or_else(|| workspace.map(|ws| self.empty_workspace_frame(ws)))
             .map(|r| Camera::fit(r, self.bounds.size))
             .unwrap_or(self.camera)
     }
@@ -959,18 +1012,7 @@ impl DisplayOverview {
                     animation.setFromValue(Some(&from));
                     animation.setToValue(Some(&to));
                 }
-                animation.setTimingFunction(Some(
-                    &objc2_quartz_core::CAMediaTimingFunction::functionWithControlPoints(
-                        1. / 3.,
-                        match motion.curve {
-                            MotionCurve::Enter => 1.,
-                            MotionCurve::Smooth => 0.,
-                            MotionCurve::Retarget(slope) => (slope / 3.) as f32,
-                        },
-                        2. / 3.,
-                        1.,
-                    ),
-                ));
+                animation.setTimingFunction(Some(&motion.timing_function()));
                 animation.setDuration(motion.duration);
                 if animation.respondsToSelector(objc2::sel!(setPreferredFrameRateRange:)) {
                     animation.setPreferredFrameRateRange(objc2_quartz_core::CAFrameRateRange::new(
@@ -1015,51 +1057,29 @@ impl DisplayOverview {
             ));
             let group = camera.frame(bounds);
             let visible = intersects(group, viewport) && group.max().y >= 44. * factor;
+            let was_visible = !region.label.isHidden() && region.label.opacity() > 0.;
             let hidden = !visible
-                && self
-                    .motion
-                    .as_ref()
-                    .is_none_or(|motion| !intersects(motion.from.frame(bounds), viewport));
-            if region.label.isHidden() != hidden {
-                region.label.setHidden(hidden);
-            }
+                && (!was_visible
+                    || self
+                        .motion
+                        .as_ref()
+                        .is_none_or(|motion| !intersects(motion.from.frame(bounds), viewport)));
             if !hidden {
                 let width = region.label.bounds().size.width * factor;
                 let x =
                     group.origin.x.max(12.).min((self.bounds.size.width - width - 12.).max(12.));
                 let y = (group.origin.y - 38. * factor).max(12.);
-                if self.motion.is_none() {
-                    region.label.removeAnimationForKey(&NSString::from_str("position"));
+                let position = CGPoint::new(x, y);
+                if submitting || !was_visible || self.motion.is_none() {
+                    place_workspace_label(
+                        &region.label,
+                        position,
+                        self.motion.as_ref().filter(|_| submitting),
+                    );
+                } else {
+                    region.label.setPosition(position);
                 }
-                let position = unsafe { region.label.presentationLayer() }
-                    .map_or(region.label.position(), |p| p.position());
-                region.label.setPosition(CGPoint::new(x, y));
-                if submitting && let Some(motion) = &self.motion {
-                    let animation = CABasicAnimation::animationWithKeyPath(Some(
-                        &NSString::from_str("position"),
-                    ));
-                    unsafe {
-                        animation.setFromValue(Some(&NSValue::valueWithPoint(position)));
-                        animation.setToValue(Some(&NSValue::valueWithPoint(CGPoint::new(x, y))));
-                    }
-                    animation.setDuration(motion.duration);
-                    animation.setTimingFunction(Some(
-                        &objc2_quartz_core::CAMediaTimingFunction::functionWithControlPoints(
-                            1. / 3.,
-                            match motion.curve {
-                                MotionCurve::Enter => 1.,
-                                MotionCurve::Smooth => 0.,
-                                MotionCurve::Retarget(slope) => (slope / 3.) as f32,
-                            },
-                            2. / 3.,
-                            1.,
-                        ),
-                    ));
-                    region
-                        .label
-                        .addAnimation_forKey(&animation, Some(&NSString::from_str("position")));
-                }
-                if zoom_changed {
+                if zoom_changed || !was_visible {
                     region.label.setAffineTransform(CGAffineTransform {
                         a: factor,
                         b: 0.,
@@ -1069,6 +1089,9 @@ impl DisplayOverview {
                         ty: 0.,
                     });
                 }
+            }
+            if region.label.isHidden() != hidden {
+                region.label.setHidden(hidden);
             }
             if opacity_changed {
                 decoration_fade(&region.label, false, decorations, self.decoration_duration);
@@ -1108,9 +1131,7 @@ impl DisplayOverview {
 
     fn update_focus_ring(&self, opacity: f32) {
         let selected = self.windows.iter().find(|w| Some(w.data.id) == self.selection.window);
-        let visible = !self.controls.isHidden()
-            && self.dragged != self.selection.window
-            && selected.is_some();
+        let visible = self.active && self.dragged != self.selection.window && selected.is_some();
         self.focus_ring.setHidden(!visible);
         if let Some(w) = selected {
             self.focus_ring.setFrame(w.world);
@@ -1208,6 +1229,15 @@ impl DisplayOverview {
 
     fn local(&self, p: CGPoint) -> CGPoint {
         CGPoint::new(p.x - self.bounds.origin.x, p.y - self.bounds.origin.y)
+    }
+
+    fn toolbar_item_at(&self, local: CGPoint) -> Option<usize> {
+        let frame = self.controls.frame();
+        if self.controls.isHidden() || !contains(frame, local) {
+            return None;
+        }
+        let x = local.x - frame.origin.x;
+        [36., 82., 112., 162., 204., 237., 270.].iter().position(|end| x < *end)
     }
 
     fn workspace_label_at(&self, local: CGPoint) -> Option<crate::model::VirtualWorkspaceId> {
@@ -1621,6 +1651,7 @@ pub struct OverviewSession {
     exit: Option<ExitScene>,
     reveal: Option<Instant>,
     show_empty: bool,
+    hide_toolbar: bool,
     shared: bool,
     duration: f64,
     fade_duration: f64,
@@ -1698,6 +1729,7 @@ impl OverviewSession {
             wake: None,
             previews: false,
             show_empty: settings.show_empty_workspaces,
+            hide_toolbar: settings.hide_toolbar,
             shared,
             duration: settings.fade_duration_ms.max(1.) / 1000.,
             fade_duration: if settings.fade_enabled {
@@ -2385,17 +2417,28 @@ impl OverviewSession {
 
     // Zoom is one overview operation; workspace scrolling and ownership remain per display.
     fn zoom_view(&mut self, target: Camera, duration: Option<f64>) {
+        let active = self.active;
+        self.move_cameras(duration, |i, d| {
+            if i == active {
+                return target;
+            }
+            let mut camera = d.camera;
+            camera.zoom_at(
+                target.zoom / camera.zoom,
+                CGPoint::new(d.bounds.size.width / 2., d.bounds.size.height / 2.),
+            );
+            camera
+        });
+    }
+
+    fn move_cameras(
+        &mut self,
+        duration: Option<f64>,
+        target: impl Fn(usize, &DisplayOverview) -> Camera,
+    ) {
         let now = Instant::now();
         for (i, d) in self.displays.iter_mut().enumerate() {
-            let mut camera = d.camera;
-            if i == self.active {
-                camera = target;
-            } else {
-                camera.zoom_at(
-                    target.zoom / camera.zoom,
-                    CGPoint::new(d.bounds.size.width / 2., d.bounds.size.height / 2.),
-                );
-            }
+            let camera = target(i, d);
             if let Some(duration) = duration {
                 d.animate(camera, duration);
                 d.motion.as_mut().unwrap().start = now;
@@ -2407,17 +2450,60 @@ impl OverviewSession {
         }
     }
 
+    fn camera_command(&mut self, input: &Input, center_on_selection: bool) {
+        if self.pending_drop.is_some() {
+            return;
+        }
+        let d = &self.displays[self.active];
+        match input {
+            Input::ZoomStep(step) => {
+                let pivot = self
+                    .selection
+                    .window
+                    .filter(|_| center_on_selection)
+                    .and_then(|id| d.windows.iter().find(|w| w.data.id == id))
+                    .map(|w| d.camera.project(w.world.mid()))
+                    .unwrap_or(CGPoint::new(d.bounds.size.width / 2., d.bounds.size.height / 2.));
+                let mut target = d.camera;
+                target.zoom_at(
+                    if *step == 0 {
+                        1. / target.zoom
+                    } else {
+                        1.2_f64.powi(*step as i32)
+                    },
+                    pivot,
+                );
+                self.zoom_view(target, Some(0.18));
+            }
+            Input::FitWorkspace => {
+                let ws = d
+                    .workspaces
+                    .iter()
+                    .find(|ws| ws.index == d.selection.workspace)
+                    .unwrap_or(&d.workspaces[0]);
+                self.zoom_view(d.fit(Some(ws)), Some(self.duration));
+            }
+            Input::FitAllWorkspaces => {
+                self.move_cameras(Some(self.duration), |_, d| d.fit(None));
+            }
+            _ => unreachable!(),
+        }
+    }
+
     fn activate_display(&mut self, index: usize) {
         if self.active != index {
             self.displays[self.active].selection = self.selection;
             self.active = index;
             self.selection = self.displays[index].selection;
         }
-        for (i, d) in self.displays.iter().enumerate() {
-            d.controls.setHidden(i != self.active);
+        for (i, d) in self.displays.iter_mut().enumerate() {
+            d.active = i == self.active;
+            let hide_toolbar = self.hide_toolbar || !d.active;
+            d.controls.setHidden(hide_toolbar);
             d.update_focus_ring(d.applied.map_or(0., |(_, opacity)| opacity));
-            if i != self.active {
+            if hide_toolbar {
                 d.help.setHidden(true);
+                d.help_index = None;
             }
         }
     }
@@ -2437,6 +2523,16 @@ impl OverviewSession {
     pub(crate) fn input(&mut self, input: Input) -> Option<OverviewAction> {
         if self.displays.is_empty() {
             return Some(OverviewAction::Dismiss);
+        }
+        if matches!(
+            input,
+            Input::ZoomStep(_) | Input::FitWorkspace | Input::FitAllWorkspaces
+        ) && (matches!(self.phase, Phase::Exiting { .. })
+            || self.pending_drop.is_some()
+            || self.drag.is_some()
+            || self.pressed.is_some())
+        {
+            return None;
         }
         // Releases and repeated activation keys belong to the closing gesture;
         // they must not interrupt the exit or restart its handoff deadline.
@@ -2511,24 +2607,8 @@ impl OverviewSession {
                     d.policy_dirty = true;
                 }
             }
-            Input::ZoomStep(step) => {
-                let d = &mut self.displays[self.active];
-                let pivot = self
-                    .selection
-                    .window
-                    .and_then(|id| d.windows.iter().find(|w| w.data.id == id))
-                    .map(|w| d.camera.project(w.world.mid()))
-                    .unwrap_or(CGPoint::new(d.bounds.size.width / 2., d.bounds.size.height / 2.));
-                let mut target = d.camera;
-                target.zoom_at(
-                    if step == 0 {
-                        1. / target.zoom
-                    } else {
-                        1.2_f64.powi(step as i32)
-                    },
-                    pivot,
-                );
-                self.zoom_view(target, Some(0.18));
+            Input::ZoomStep(_) | Input::FitWorkspace | Input::FitAllWorkspaces => {
+                self.camera_command(&input, true);
             }
             Input::Magnify { point, factor } => {
                 if let Some(i) = self.displays.iter().position(|d| contains(d.bounds, point)) {
@@ -2546,35 +2626,17 @@ impl OverviewSession {
                     self.activate_display(i);
                 }
                 for d in &mut self.displays {
-                    let p = d.local(point);
-                    let index = contains(d.controls.frame(), p).then(|| {
-                        let x = p.x - d.controls.frame().origin.x;
-                        if x < 36. {
-                            0
-                        } else if x < 82. {
-                            1
-                        } else if x < 112. {
-                            2
-                        } else if x < 162. {
-                            3
-                        } else if x < 204. {
-                            4
-                        } else if x < 237. {
-                            5
-                        } else {
-                            6
-                        }
-                    });
+                    let index = d.toolbar_item_at(d.local(point));
                     if index != d.help_index {
                         if let Some(i) = index {
                             set_text(
                                 &d.help,
                                 [
-                                    "Zoom out · ⌘− · Pinch to zoom",
-                                    "Actual size · ⌘0",
-                                    "Zoom in · ⌘+ · Pinch to zoom",
-                                    "Fit workspace · ↑↓ switch workspace",
-                                    "Fit all workspaces · Scroll to explore",
+                                    "Zoom out",
+                                    "Actual size",
+                                    "Zoom in",
+                                    "Fit current workspace",
+                                    "Fit all workspaces",
                                     "Open selected window · Return · ←→ select",
                                     "Return to desktop · Escape",
                                 ][i],
@@ -2588,7 +2650,7 @@ impl OverviewSession {
                     let d = &self.displays[self.active];
                     let local = d.local(point);
                     if contains(d.bounds, point)
-                        && !contains(d.controls.frame(), local)
+                        && d.toolbar_item_at(local).is_none()
                         && !d
                             .regions
                             .iter()
@@ -2611,7 +2673,7 @@ impl OverviewSession {
                 if let Some(i) = self.displays.iter().position(|d| contains(d.bounds, point)) {
                     self.activate_display(i);
                     let d = &self.displays[i];
-                    if contains(d.controls.frame(), d.local(point))
+                    if d.toolbar_item_at(d.local(point)).is_some()
                         || d.workspace_label_at(d.local(point)).is_some()
                     {
                         return None;
@@ -2718,48 +2780,17 @@ impl OverviewSession {
                 } else {
                     let d = &mut self.displays[self.active];
                     let p = d.local(point);
-                    if contains(d.controls.frame(), p) {
-                        let x = p.x - d.controls.frame().origin.x;
-                        let pivot =
-                            CGPoint::new(d.bounds.size.width / 2., d.bounds.size.height / 2.);
-                        let (target, duration) = if x < 112. {
-                            let mut target = d.camera;
-                            target.zoom_at(
-                                if x < 36. {
-                                    1. / 1.2
-                                } else if x < 82. {
-                                    1. / target.zoom
-                                } else {
-                                    1.2
-                                },
-                                pivot,
-                            );
-                            (target, 0.18)
-                        } else if x < 162. {
-                            let ws = d
-                                .workspaces
-                                .iter()
-                                .find(|ws| ws.index == self.selection.workspace)
-                                .unwrap_or(&d.workspaces[0]);
-                            let frame = d
-                                .windows
-                                .iter()
-                                .filter(|w| w.workspace == ws.workspace_id)
-                                .map(|w| w.world)
-                                .reduce(union)
-                                .unwrap_or(CGRect::new(
-                                    d.workspace_origin(ws.index),
-                                    d.info.frame.size,
-                                ));
-                            (Camera::fit(frame, d.bounds.size), self.duration)
-                        } else if x < 204. {
-                            (d.fit(), self.duration)
-                        } else if x < 237. {
-                            return self.activate(false);
-                        } else {
-                            return self.activate(true);
+                    if let Some(item) = d.toolbar_item_at(p) {
+                        let action = match item {
+                            0 => Input::ZoomStep(-1),
+                            1 => Input::ZoomStep(0),
+                            2 => Input::ZoomStep(1),
+                            3 => Input::FitWorkspace,
+                            4 => Input::FitAllWorkspaces,
+                            5 => return self.activate(false),
+                            _ => return self.activate(true),
                         };
-                        self.zoom_view(target, Some(duration));
+                        self.camera_command(&action, false);
                     } else if let Some(index) = d
                         .workspace_label_at(p)
                         .and_then(|id| d.workspaces.iter().position(|w| w.workspace_id == id))
@@ -3489,6 +3520,38 @@ impl OverviewSession {
 mod tests {
     use super::*;
     #[test]
+    fn workspace_labels_enter_at_their_target_and_visible_labels_follow_motion() {
+        let _tx = LayerTransaction::disabled();
+        let label = layer(rect(0., 0., 120., 28.), 1.);
+        let camera = Camera {
+            position: CGPoint::ZERO,
+            zoom: 1.,
+        };
+        let motion = Motion {
+            from: camera,
+            to: camera,
+            start: Instant::now(),
+            duration: 0.18,
+            curve: MotionCurve::Enter,
+            submitted: true,
+            completed: Arc::default(),
+        };
+        let position = NSString::from_str("position");
+        for (y, hidden, opacity, animates) in [
+            (75., false, 0., false),
+            (150., false, 1., true),
+            (225., true, 1., false),
+        ] {
+            label.setHidden(hidden);
+            label.setOpacity(opacity);
+            let target = CGPoint::new(200., y);
+            place_workspace_label(&label, target, Some(&motion));
+            assert_eq!(label.position(), target);
+            assert_eq!(unsafe { label.animationForKey(&position) }.is_some(), animates);
+        }
+    }
+
+    #[test]
     fn cancelled_compositor_animation_wakes_paused_presenter_once() {
         let completed = Arc::new(AtomicBool::new(false));
         let (wake, mut events) = crate::actor::channel();
@@ -3558,11 +3621,29 @@ mod tests {
     }
     #[test]
     fn camera_fit_preserves_world_aspect_and_leaves_controls_clear() {
-        let c = Camera::fit(rect(-600., 200., 2400., 1600.), CGSize::new(1200., 900.));
-        let r = c.frame(rect(-600., 200., 2400., 1600.));
-        assert!(r.min().x >= 55.999 && r.max().x <= 1144.001);
-        assert!(r.min().y >= 47.999 && r.max().y <= 820.001);
-        assert!((r.size.width / r.size.height - 1.5).abs() < 1e-9);
+        for (world, viewport, expected_zoom) in [
+            (
+                rect(-600., 200., 2400., 1600.),
+                CGSize::new(1200., 900.),
+                1088. / 2400.,
+            ),
+            (
+                rect(100., -200., 1160., 3000.),
+                CGSize::new(1920., 1080.),
+                920. / 3000.,
+            ),
+        ] {
+            let camera = Camera::fit(world, viewport);
+            let fitted = camera.frame(world);
+            assert!((camera.zoom - expected_zoom).abs() < 1e-9);
+            assert!(fitted.min().x >= 55.999 && fitted.max().x <= viewport.width - 55.999);
+            assert!(fitted.min().y >= 47.999 && fitted.max().y <= viewport.height - 79.999);
+            assert!(
+                (fitted.size.width / fitted.size.height - world.size.width / world.size.height)
+                    .abs()
+                    < 1e-9
+            );
+        }
     }
     #[test]
     fn interrupted_motion_starts_from_current_camera_without_overshoot() {

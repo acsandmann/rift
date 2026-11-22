@@ -11,6 +11,76 @@ use crate::layout_engine::{LayoutCommand, ResizeOrientation};
 use crate::sys::hotkey::Modifiers;
 
 #[test]
+fn overview_shortcuts_validate_within_their_own_scope() {
+    use OverviewCommand::*;
+    let defaults = Config::parse("[settings]\n[keys]").unwrap();
+    let settings = &defaults.settings.ui.mission_control;
+    assert!(settings.keys.is_none());
+    assert_eq!(settings.keymap().get("Meta + Equal"), Some(&ZoomIn));
+    assert_eq!(settings.keymap().get("Shift + F"), Some(&FitAllWorkspaces));
+
+    let section = "[keys]\n[settings.ui.mission_control.keys]\n";
+    for (bindings, expected) in [
+        (r#""F" = "unknown""#, "unknown variant"),
+        (r#""F + G" = "zoom_in""#, "Could not parse Overview shortcut"),
+        (r#""Alt ++ F" = "zoom_in""#, "Could not parse Overview shortcut"),
+        (
+            "\"Alt + F\" = \"fit_workspace\"\n\"AltLeft + F\" = \"fit_workspace\"",
+            "conflicts with another Overview binding",
+        ),
+    ] {
+        let error = Config::parse(&format!("{section}{bindings}")).unwrap_err();
+        assert!(error.to_string().contains(expected), "{error}");
+    }
+    assert!(Config::parse(
+        "[keys]\nF = \"show_mission_control_all\"\n[settings.ui.mission_control.keys]\nF = \"fit_workspace\""
+    ).is_ok());
+}
+
+#[test]
+fn overview_shortcut_edits_persist_and_keep_an_explicit_empty_map() {
+    use OverviewCommand::*;
+    let mut document = ConfigDocument::parse(
+        "# Overview preferences\n[settings.ui.mission_control]\nenabled = true # keep this\n[keys]\n",
+    )
+    .unwrap();
+    let edit = |document: &mut ConfigDocument, action, old, new: Option<&str>| {
+        let change = document.edited(|s| {
+            s.edit_overview_shortcut(action, old, new.map(str::to_owned))
+                .map_err(anyhow::Error::msg)
+        })?;
+        *document = change.document;
+        Ok::<_, anyhow::Error>(())
+    };
+
+    edit(&mut document, FitWorkspace, None, Some("Alt + G")).unwrap();
+    edit(&mut document, FitWorkspace, Some("F"), Some("H")).unwrap();
+    let before = document.to_string();
+    assert!(edit(&mut document, FitWorkspace, Some("H"), Some("AltLeft + G")).is_err());
+    assert_eq!(document.to_string(), before);
+    let settings = document.source().unwrap().settings.ui.mission_control;
+    assert_eq!(settings.keymap().get("Alt + G"), Some(&FitWorkspace));
+    assert_eq!(settings.keymap().get("H"), Some(&FitWorkspace));
+    assert_eq!(settings.keymap().get("F"), None);
+    assert_eq!(settings.keymap().get("Shift + F"), Some(&FitAllWorkspaces));
+    for (key, action) in settings.keymap() {
+        edit(&mut document, *action, Some(key), None).unwrap();
+    }
+
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("config.toml");
+    document.save(&path).unwrap();
+    let reloaded = ConfigDocument::read(&path).unwrap();
+    assert!(reloaded.to_string().contains("# Overview preferences"));
+    assert!(reloaded.to_string().contains("enabled = true # keep this"));
+    assert_eq!(
+        reloaded.source().unwrap().settings.ui.mission_control.keys,
+        Some(Default::default())
+    );
+    assert!(reloaded.runtime().unwrap().settings.ui.mission_control.keymap().is_empty());
+}
+
+#[test]
 fn scrolling_display_widths_merge_and_validate() {
     let settings: ScrollingLayoutSettings = toml::from_str(
         r#"

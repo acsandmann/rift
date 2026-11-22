@@ -1077,6 +1077,10 @@ impl StackLineReserve {
 #[derive(Serialize, Deserialize, Debug, PartialEq, Clone, Default, ConfigSchema)]
 #[serde(deny_unknown_fields)]
 pub struct MissionControlSettings {
+    /// Overview-only shortcuts. An omitted map uses the built-in bindings.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[setting(ignore)]
+    pub keys: Option<BTreeMap<String, OverviewCommand>>,
     #[serde(default)]
     /// Release the shortcut key and all modifier keys to switch to the selected window or workspace.
     /// When turned off, press Return or click to switch.
@@ -1093,6 +1097,10 @@ pub struct MissionControlSettings {
     /// Show a preview of each window in Overview. Requires Screen Recording permission.
     #[setting(label = "Window previews", enabled_by = "enabled")]
     pub window_previews: bool,
+    /// Hide the camera and navigation controls in the corner of Overview.
+    #[serde(default)]
+    #[setting(label = "Hide toolbar", enabled_by = "enabled")]
+    pub hide_toolbar: bool,
     #[serde(default)]
     /// Enable the workspace Overview. Requires restarting Rift.
     #[setting(label = "Enabled", order = 0)]
@@ -1105,6 +1113,37 @@ pub struct MissionControlSettings {
     /// Duration of Overview entry and camera navigation, in milliseconds.
     #[setting(label = "Animation duration", unit = "ms", enabled_by = "enabled")]
     pub fade_duration_ms: f64,
+}
+
+#[derive(Serialize, Deserialize, Debug, PartialEq, Eq, Clone, Copy)]
+#[serde(rename_all = "snake_case")]
+pub enum OverviewCommand {
+    ZoomIn,
+    ZoomOut,
+    ActualSize,
+    FitWorkspace,
+    FitAllWorkspaces,
+}
+
+impl MissionControlSettings {
+    pub fn keymap(&self) -> &BTreeMap<String, OverviewCommand> {
+        use OverviewCommand::*;
+        static DEFAULTS: std::sync::LazyLock<BTreeMap<String, OverviewCommand>> =
+            std::sync::LazyLock::new(|| {
+                let mut keys = BTreeMap::from([
+                    ("F".into(), FitWorkspace),
+                    ("Shift + F".into(), FitAllWorkspaces),
+                ]);
+                for (key, command) in [("Equal", ZoomIn), ("Minus", ZoomOut), ("0", ActualSize)] {
+                    // Preserve the original zoom keys, which accepted Meta and Shift independently.
+                    for prefix in ["", "Meta + ", "Shift + ", "Meta + Shift + "] {
+                        keys.insert(format!("{prefix}{key}"), command);
+                    }
+                }
+                keys
+            });
+        self.keys.as_ref().unwrap_or(&DEFAULTS)
+    }
 }
 
 fn default_mission_control_fade_duration_ms() -> f64 { 180.0 }
@@ -1887,6 +1926,56 @@ impl ConfigSource {
     /// The hotkey a binding key triggers, with this source's modifier combinations.
     pub fn hotkey(&self, key: &str) -> Option<Hotkey> {
         Config::binding_hotkey(key, &self.modifier_combinations).map(|(_, hotkey)| hotkey)
+    }
+
+    pub fn validate_overview_shortcut(
+        &self,
+        action: OverviewCommand,
+        old: Option<&str>,
+        new: Option<&str>,
+    ) -> Result<(), String> {
+        let settings = &self.settings.ui.mission_control;
+        let keys = settings.keymap();
+        if !settings.enabled || old.is_some_and(|key| keys.get(key) != Some(&action)) {
+            return Err("Overview shortcuts changed elsewhere; try again".into());
+        }
+        if let Some(key) = new {
+            let hotkey =
+                self.hotkey(key).ok_or_else(|| format!("“{key}” is not a valid shortcut"))?;
+            if let Some(other) = keys.keys().find(|other| {
+                Some(other.as_str()) != old
+                    && self.hotkey(other).is_some_and(|other| other.overlaps(&hotkey))
+            }) {
+                return Err(format!("“{other}” already uses this shortcut in Overview"));
+            }
+        }
+        Ok(())
+    }
+
+    pub fn edit_overview_shortcut(
+        &mut self,
+        action: OverviewCommand,
+        old: Option<&str>,
+        new: Option<String>,
+    ) -> Result<(), String> {
+        self.validate_overview_shortcut(action, old, new.as_deref())?;
+        if let (Some(old), Some(new)) = (old, &new)
+            && self.hotkey(old) == self.hotkey(new)
+        {
+            return Ok(());
+        }
+        let settings = &mut self.settings.ui.mission_control;
+        if settings.keys.is_none() {
+            settings.keys = Some(settings.keymap().clone());
+        }
+        let keys = settings.keys.as_mut().unwrap();
+        if let Some(old) = old {
+            keys.remove(old);
+        }
+        if let Some(key) = new {
+            keys.insert(key, action);
+        }
+        Ok(())
     }
 
     /// The binding in `mode`, other than `except`, that the keys of `key` would also trigger.

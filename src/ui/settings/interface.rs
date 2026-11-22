@@ -2,12 +2,13 @@
 use cgs::app::Application;
 use cgs::controls::{Button, NumberSlider, PathField};
 use cgs::drawing::VisualEffect;
+use cgs::input::KeyRecorder;
 use cgs::layout::{HStack, Spacer, VStack};
 use cgs::settings::{Section, SettingsPage, ValidationMessage};
 use cgs::style::Font;
 use cgs::tabs::TabSelector;
 use cgs::text::{Caption, Label};
-use cgs::view::NativeView;
+use cgs::view::{NativeControl, NativeView, WeakView};
 use cgs::{Insets, Ui};
 use objc2_app_kit::*;
 use objc2_core_graphics::{CGPreflightScreenCaptureAccess, CGRequestScreenCaptureAccess};
@@ -15,6 +16,7 @@ use objc2_core_graphics::{CGPreflightScreenCaptureAccess, CGRequestScreenCapture
 use super::interface_preview::StackPreview;
 use super::*;
 use crate::common::config::*;
+use crate::sys::hotkey::Hotkey;
 use crate::ui::menu_bar::MenuBarPreview;
 
 pub(super) fn menu_bar(ui: Ui, model: &Rc<Model>) -> Page {
@@ -235,12 +237,25 @@ pub(super) fn menu_bar(ui: Ui, model: &Rc<Model>) -> Page {
     )
 }
 
+pub(super) const OVERVIEW_SHORTCUTS: [(OverviewCommand, &str); 5] = [
+    (OverviewCommand::ZoomIn, "Zoom In"),
+    (OverviewCommand::ZoomOut, "Zoom Out"),
+    (OverviewCommand::ActualSize, "Actual Size"),
+    (OverviewCommand::FitWorkspace, "Fit Current Workspace"),
+    (OverviewCommand::FitAllWorkspaces, "Fit All Workspaces"),
+];
+
 pub(super) fn overview(ui: Ui, model: &Rc<Model>) -> Page {
     let mut f = FormBuilder::new(ui, model);
     f.tooltips = true;
     let visibility = f.fields(
         Section::new(&ui, "Workspaces"),
-        &["enabled", "show_empty_workspaces", "window_previews"],
+        &[
+            "enabled",
+            "show_empty_workspaces",
+            "window_previews",
+            "hide_toolbar",
+        ],
         |s| &s.settings.ui.mission_control,
         |s| &mut s.settings.ui.mission_control,
     );
@@ -275,16 +290,181 @@ pub(super) fn overview(ui: Ui, model: &Rc<Model>) -> Page {
     f.enabled(&duration, |s| {
         s.settings.ui.mission_control.enabled && s.settings.ui.mission_control.fade_enabled
     });
+    let mut shortcuts = Section::new(&ui, "Keyboard Shortcuts");
+    for (action, label) in OVERVIEW_SHORTCUTS {
+        let controls = Rc::new(VStack::new(&ui).spacing(4.));
+        let message = Rc::new(ValidationMessage::new(&ui));
+        let model = Rc::downgrade(model);
+        let error = Rc::downgrade(&message);
+        let last = RefCell::new(None);
+        f.sync(&controls, move |controls, source| {
+            let settings = &source.settings.ui.mission_control;
+            let mut bindings: Vec<_> = settings
+                .keymap()
+                .iter()
+                .filter(|(_, command)| **command == action)
+                .map(|(key, _)| (key.clone(), source.hotkey(key)))
+                .collect();
+            // Show the familiar Command shortcut first when legacy aliases are present.
+            bindings.sort_by_key(|(_, key)| {
+                key.as_ref()
+                    .is_none_or(|key| key.modifiers != crate::sys::hotkey::Modifiers::META)
+            });
+            let current = (settings.enabled, bindings);
+            if last.borrow().as_ref() == Some(&current) {
+                return;
+            }
+            let mut rows = Vec::new();
+            let mut line = HStack::new(&ui).spacing(5.).spacer(&ui);
+            for (i, (key, hotkey)) in current.1.iter().enumerate() {
+                if i != 0 && i % 4 == 0 {
+                    rows.push(Rc::new(line));
+                    line = HStack::new(&ui).spacing(5.).spacer(&ui);
+                }
+                let recorder = overview_recorder(
+                    &ui,
+                    action,
+                    label,
+                    Some((key, hotkey.as_ref())),
+                    &model,
+                    &error,
+                    None,
+                );
+                line.add(recorder.flat_field(&ui));
+            }
+            if current.1.is_empty() {
+                let add = overview_recorder(&ui, action, label, None, &model, &error, None);
+                rows.push(Rc::new(line.push(add.flat_field(&ui))));
+            } else {
+                let pending = Rc::new(HStack::new(&ui).spacer(&ui));
+                let add = overview_recorder(
+                    &ui,
+                    action,
+                    label,
+                    None,
+                    &model,
+                    &error,
+                    Some(WeakView::new(&pending)),
+                );
+                pending.add(add.flat_field(&ui));
+                pending.set_hidden(true);
+                let reveal = pending.clone();
+                let plus = Button::new(&ui, "").symbol("plus.circle.fill").borderless().on_click(
+                    move || {
+                        reveal.set_hidden(false);
+                        add.begin_recording();
+                    },
+                );
+                let name = format!("Add a shortcut for {label}");
+                plus.accessibility_label(&name);
+                plus.tooltip(&name);
+                plus.width(20.);
+                plus.ns_button().setContentTintColor(Some(&NSColor::secondaryLabelColor()));
+                rows.push(Rc::new(line.push(plus)));
+                rows.push(pending);
+            }
+            controls.set_children(rows);
+            WeakView::new(controls).set_enabled(settings.enabled);
+            last.replace(Some(current));
+        });
+        shortcuts = shortcuts.row(f.row(label, controls, message));
+    }
     f.finish(
         SettingsPage::new(&ui, "")
             .section(visibility)
             .section(recording)
             .section(transitions.row(duration))
-            .section(Caption::new(
-                &ui,
-                "Changes are saved now and take effect after restarting Rift.",
-            )),
+            .section(shortcuts)
+            .section(Caption::new(&ui, "Enabling Overview requires restarting Rift.")),
     )
+}
+
+fn overview_shortcut_edit(
+    model: &Weak<Model>,
+    error: &Weak<ValidationMessage>,
+    action: OverviewCommand,
+    old: Option<String>,
+) -> impl Fn(Option<String>) + 'static {
+    let (model, error) = (model.clone(), error.clone());
+    move |new| {
+        let old = old.clone();
+        Model::submit(
+            &model,
+            Box::new(move |source| source.edit_overview_shortcut(action, old.as_deref(), new)),
+            error.clone(),
+        );
+    }
+}
+
+fn overview_recorder(
+    ui: &Ui,
+    action: OverviewCommand,
+    label: &str,
+    binding: Option<(&String, Option<&Hotkey>)>,
+    model: &Weak<Model>,
+    error: &Weak<ValidationMessage>,
+    pending: Option<WeakView>,
+) -> Rc<KeyRecorder> {
+    use super::commands::{recorded_key, recording_guard, shortcut};
+    let old = binding.map(|(key, _)| key.clone());
+    let original = binding.and_then(|(_, hotkey)| hotkey.map(shortcut));
+    let recorder = Rc::new_cyclic(|weak: &Weak<KeyRecorder>| {
+        let (weak, model, error) = (weak.clone(), model.clone(), error.clone());
+        let (old, original) = (old.clone(), original.clone());
+        let submit = overview_shortcut_edit(&model, &error, action, old.clone());
+        let mut capture = recording_guard(model.clone(), error.clone());
+        let target = old.clone();
+        let validation = error.clone();
+        KeyRecorder::new(ui)
+            .placeholder("Add Shortcut")
+            .capture(move |recording| {
+                let result = capture(recording);
+                if !recording {
+                    report(&validation, &Ok(()));
+                }
+                if (!recording || result.is_err())
+                    && let Some(view) = pending.as_ref().and_then(WeakView::load)
+                {
+                    view.setHidden(true);
+                }
+                result
+            })
+            .conflict(move |value| {
+                let result = recorded_key(value)
+                    .ok_or_else(|| "This key cannot be assigned as a shortcut".to_owned())
+                    .and_then(|key| {
+                        model
+                            .upgrade()
+                            .ok_or_else(|| "Settings has closed".to_owned())?
+                            .source
+                            .borrow()
+                            .validate_overview_shortcut(action, target.as_deref(), Some(&key))
+                    });
+                report(&error, &result);
+                result.err()
+            })
+            .on_change(move |value| {
+                if let Some(recorder) = weak.upgrade() {
+                    recorder.set_value(original.clone());
+                    if let (None, Some(key)) = (&original, &old) {
+                        recorder.set_title(key);
+                    }
+                }
+                if old.is_some() || value.is_some() {
+                    submit(value.as_ref().and_then(recorded_key));
+                }
+            })
+    });
+    recorder.control_size(NSControlSize::Small);
+    recorder.accessibility_label(&format!(
+        "{} {label} shortcut",
+        if old.is_some() { "Change" } else { "Add" }
+    ));
+    recorder.set_value(original.clone());
+    if let (None, Some(key)) = (&original, &old) {
+        recorder.set_title(key);
+    }
+    recorder
 }
 
 fn screen_recording_status() -> &'static str {

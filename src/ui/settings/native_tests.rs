@@ -95,6 +95,144 @@ fn change_text(field: &objc2_app_kit::NSTextField, text: &str) {
     }
 }
 
+fn hover_shortcut_action(button: &NSButton, hovered: bool) {
+    use objc2_app_kit::{NSEvent, NSEventModifierFlags, NSEventType};
+    let kind = if hovered {
+        NSEventType::MouseEntered
+    } else {
+        NSEventType::MouseExited
+    };
+    let event = unsafe {
+        NSEvent::enterExitEventWithType_location_modifierFlags_timestamp_windowNumber_context_eventNumber_trackingNumber_userData(
+            kind, CGPoint::ZERO, NSEventModifierFlags::empty(), 0., 0, None, 0, 0, std::ptr::null_mut(),
+        )
+    }.unwrap();
+    if hovered {
+        button.mouseEntered(&event);
+    } else {
+        button.mouseExited(&event);
+    }
+}
+
+pub fn run_overview(ui: Ui) {
+    use objc2::runtime::NSObjectProtocol;
+    use objc2_app_kit::{NSEvent, NSEventModifierFlags, NSEventType};
+    use objc2_foundation::NSString;
+
+    use crate::common::config::OverviewCommand;
+
+    let (requests, mut pending) = tokio::sync::mpsc::unbounded_channel();
+    let mut source = source();
+    source.settings.ui.mission_control.enabled = true;
+    source.settings.ui.mission_control.fade_enabled = true;
+    let settings = Settings::new(
+        ui,
+        source.clone(),
+        "/tmp/native-settings-test.toml".into(),
+        vec![],
+        vec![],
+        requests,
+        || {},
+    );
+    let capturing = Rc::new(Cell::new(false));
+    let lease = capturing.clone();
+    settings.set_shortcut_capture(move |recording| {
+        assert_ne!(lease.replace(recording), recording);
+        Ok(())
+    });
+    settings.router.navigate(Category::Overview);
+    let root = root_window(&settings);
+    let button = |label| named::<NSButton>(&root, label).expect(label);
+    let click = |control: &NSControl| {
+        assert!(unsafe { control.sendAction_to(control.action(), control.target().as_deref()) });
+    };
+    let press = |recorder: &NSButton, code, text| {
+        let text = NSString::from_str(text);
+        recorder.keyDown(&NSEvent::keyEventWithType_location_modifierFlags_timestamp_windowNumber_context_characters_charactersIgnoringModifiers_isARepeat_keyCode(
+            NSEventType::KeyDown, CGPoint::ZERO, NSEventModifierFlags::empty(), 0., 0, None, &text, &text, false, code
+        ).unwrap());
+    };
+    let apply = |source: &mut ConfigSource,
+                 pending: &mut tokio::sync::mpsc::UnboundedReceiver<Request>| {
+        let Request {
+            action: Action::Edit(edit),
+            finish,
+            ..
+        } = pending.try_recv().unwrap()
+        else {
+            panic!("expected a native Settings edit");
+        };
+        edit(source).unwrap();
+        settings.synchronize(source.clone());
+        finish(Ok(()));
+    };
+
+    let recorder = button("Change Zoom In shortcut");
+    click(&recorder);
+    press(&recorder, 3, "f");
+    assert!(capturing.get(), "a conflict keeps recording active");
+    assert!(pending.try_recv().is_err());
+    press(&recorder, 53, "");
+    assert!(!capturing.get());
+    assert_eq!(recorder.title().to_string(), "⌘=");
+
+    click(&button("Add a shortcut for Fit Current Workspace"));
+    let add = button("Add Fit Current Workspace shortcut");
+    assert!(capturing.get());
+    press(&add, 118, "");
+    assert!(!capturing.get());
+    assert!(
+        add.isHiddenOrHasHiddenAncestor(),
+        "the add field closes after recording"
+    );
+    apply(&mut source, &mut pending);
+    assert_eq!(
+        source.settings.ui.mission_control.keymap().get("F4"),
+        Some(&OverviewCommand::FitWorkspace)
+    );
+
+    assert!(named::<NSButton>(&root, "Clear shortcut").is_none());
+    click(&button("Change Fit Current Workspace shortcut"));
+    let restore = button("Cancel recording and restore previous shortcut");
+    let remove = button("Clear shortcut");
+    let neutral = restore.contentTintColor().unwrap();
+    hover_shortcut_action(&restore, true);
+    let restore_hover = restore.contentTintColor().unwrap();
+    assert!(!restore_hover.isEqual(Some(&neutral)));
+    assert!(remove.contentTintColor().unwrap().isEqual(Some(&neutral)));
+    hover_shortcut_action(&restore, false);
+    assert!(restore.contentTintColor().unwrap().isEqual(Some(&neutral)));
+    hover_shortcut_action(&remove, true);
+    let remove_hover = remove.contentTintColor().unwrap();
+    assert!(!remove_hover.isEqual(Some(&neutral)) && !remove_hover.isEqual(Some(&restore_hover)));
+    click(&remove);
+    assert!(!capturing.get());
+    assert!(named::<NSButton>(&root, "Clear shortcut").is_none());
+    apply(&mut source, &mut pending);
+    assert_eq!(source.settings.ui.mission_control.keymap().get("F"), None);
+    assert_eq!(
+        source.settings.ui.mission_control.keymap().get("F4"),
+        Some(&OverviewCommand::FitWorkspace)
+    );
+
+    let toolbar = named::<NSSwitch>(&root, "Hide toolbar").unwrap();
+    toolbar.setState(1);
+    click(&toolbar);
+    apply(&mut source, &mut pending);
+    assert!(source.settings.ui.mission_control.hide_toolbar);
+
+    let duration = source.settings.ui.mission_control.fade_duration_ms;
+    let stepper = named::<objc2_app_kit::NSStepper>(&root, "Animation duration").unwrap();
+    assert!(named::<NSSlider>(&root, "Animation duration").is_none());
+    stepper.setDoubleValue(1.0);
+    click(&stepper);
+    apply(&mut source, &mut pending);
+    assert_eq!(
+        source.settings.ui.mission_control.fade_duration_ms,
+        duration + 1.0
+    );
+}
+
 pub fn run(ui: Ui) {
     let (requests, mut pending) = tokio::sync::mpsc::unbounded_channel();
     let (model, host) = autoreleasepool(|_| {
@@ -1807,7 +1945,7 @@ fn interface_controls(
     assert!(!source.settings.ui.mission_control.window_previews);
     toggle("Fade transitions", true);
     commit(&mut source, pending);
-    let duration = named::<NSSlider>(&root, "Fade duration").unwrap();
+    let duration = named::<objc2_app_kit::NSStepper>(&root, "Animation duration").unwrap();
     assert!(duration.isEnabled());
     toggle("Fade transitions", false);
     commit(&mut source, pending);
@@ -2269,7 +2407,7 @@ pub fn render(
         snapshot.keys = defaults().keys.clone();
         snapshot.modifier_combinations = defaults().modifier_combinations.clone();
     }
-    if page == Some(Category::Overview.index()) && scope == Some(13) {
+    if page == Some(Category::Overview.index()) && matches!(scope, Some(13..=16)) {
         snapshot.settings.ui.mission_control.enabled = true;
         snapshot.settings.ui.mission_control.fade_enabled = true;
     }
@@ -2440,6 +2578,20 @@ pub fn render(
         CGSize::new(880.0, 660.0)
     }));
     let content = window.contentView().unwrap();
+    if page == Some(Category::Overview.index()) && matches!(scope, Some(14..=16)) {
+        let recorder = named::<NSButton>(&content, "Change Zoom In shortcut").unwrap();
+        assert!(unsafe { recorder.sendAction_to(recorder.action(), recorder.target().as_deref()) });
+        objc2_foundation::NSRunLoop::currentRunLoop()
+            .runUntilDate(&objc2_foundation::NSDate::dateWithTimeIntervalSinceNow(0.18));
+        let hover = match scope {
+            Some(15) => Some("Cancel recording and restore previous shortcut"),
+            Some(16) => Some("Clear shortcut"),
+            _ => None,
+        };
+        if let Some(hover) = hover {
+            hover_shortcut_action(&named::<NSButton>(&content, hover).unwrap(), true);
+        }
+    }
     fn invalidate_layout(view: &NSView) {
         view.setNeedsUpdateConstraints(true);
         view.setNeedsLayout(true);

@@ -42,6 +42,8 @@ pub enum Input {
     Down,
     Activate,
     ZoomStep(i8),
+    FitWorkspace,
+    FitAllWorkspaces,
     Cycle(bool),
     WindowSteps(i64),
     WorkspaceSteps(i64),
@@ -107,14 +109,6 @@ impl Input {
     }
 
     pub(crate) fn from_keycode(keycode: u16, flags: CGEventFlags) -> Option<Self> {
-        if !flags.intersects(CGEventFlags::MaskControl | CGEventFlags::MaskAlternate) {
-            match keycode {
-                24 => return Some(Self::ZoomStep(1)),
-                27 => return Some(Self::ZoomStep(-1)),
-                29 => return Some(Self::ZoomStep(0)),
-                _ => {}
-            }
-        }
         if flags.intersects(
             CGEventFlags::MaskCommand | CGEventFlags::MaskControl | CGEventFlags::MaskAlternate,
         ) {
@@ -232,7 +226,7 @@ pub struct MissionControlActor {
 
 impl MissionControlActor {
     pub fn new(
-        settings: MissionControlSettings,
+        mut settings: MissionControlSettings,
         shared: bool,
         rx: Receiver,
         tx: Sender,
@@ -244,6 +238,7 @@ impl MissionControlActor {
         if settings.enabled && settings.window_previews && CGPreflightScreenCaptureAccess() {
             let _ = cgs::compositor::preview::PreviewCompositor::prepare();
         }
+        settings.keys = None;
         Self {
             settings,
             shared,
@@ -405,11 +400,12 @@ impl MissionControlActor {
             Event::RefreshCurrentWorkspace => {
                 self.request_refresh(None);
             }
-            Event::Configure(settings, shared) => {
+            Event::Configure(mut settings, shared) => {
                 self.close();
                 if !settings.enabled || !settings.window_previews {
                     self.cache = None;
                 }
+                settings.keys = None;
                 self.settings = settings;
                 self.shared = shared;
             }

@@ -391,7 +391,9 @@ impl WmController {
                 _ = self.input_tx.send(input::Request::SetLowPowerMode(is_low_power_mode));
             }
             KeyboardLayoutChanged => {
-                _ = self.input_tx.send(input::Request::KeyboardLayoutChanged);
+                _ = self.input_tx.send(input::Request::KeyboardLayoutChanged(
+                    self.config.config.settings.ui.mission_control.clone(),
+                ));
             }
             Command(Wm(ReloadConfig)) => self.reload_config(),
             Command(Wm(BindingMode(target))) => {
