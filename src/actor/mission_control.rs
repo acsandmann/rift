@@ -19,6 +19,7 @@ pub enum Event {
         workspaces: Vec<crate::model::server::RuntimeWorkspaceData>,
     },
     PumpPreviews,
+    DesktopBackgroundReady(u32),
     ShowAll,
     Dismiss,
     RefreshCurrentWorkspace,
@@ -239,13 +240,15 @@ impl MissionControlActor {
             let _ = cgs::compositor::preview::PreviewCompositor::prepare();
         }
         settings.keys = None;
+        let mut backgrounds = DesktopBackgrounds::default();
+        backgrounds.sync(mtm, &tx);
         Self {
             settings,
             shared,
             rx,
             tx,
             cache: None,
-            backgrounds: DesktopBackgrounds::new(mtm),
+            backgrounds,
             reactor,
             session: None,
             generation: 0,
@@ -315,6 +318,7 @@ impl MissionControlActor {
                 }
                 self.refresh_pending = false;
                 if let Some(session) = &mut self.session {
+                    self.backgrounds.sync(self.mtm, &self.tx);
                     session.refresh(&displays, &workspaces, moved, &mut self.backgrounds);
                     self.stack_line_tx
                         .send(super::stack_line::Event::OverviewBounds(session.input_bounds()));
@@ -335,6 +339,13 @@ impl MissionControlActor {
                         // prepared and verified underneath the cover.
                         self.close();
                     }
+                }
+            }
+            Event::DesktopBackgroundReady(display) => {
+                if let Some(image) = self.backgrounds.image(display)
+                    && let Some(session) = &self.session
+                {
+                    session.set_desktop_background(display, image);
                 }
             }
             Event::ActivationTarget(target) => {
@@ -373,6 +384,7 @@ impl MissionControlActor {
                     if self.settings.window_previews {
                         let _ = cgs::compositor::preview::PreviewCompositor::prepare();
                     }
+                    self.backgrounds.sync(self.mtm, &self.tx);
                     self.session = OverviewSession::new(
                         &self.reactor,
                         self.mtm,

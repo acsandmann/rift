@@ -23,7 +23,7 @@ use objc2_quartz_core::{
 };
 
 use crate::actor::app::WindowId;
-use crate::actor::mission_control::Input;
+use crate::actor::mission_control::{Event, Input, Sender};
 use crate::actor::reactor::{OverviewDrop, OverviewTarget, ReactorHandle};
 use crate::common::config::MissionControlSettings;
 use crate::model::server::{RuntimeDisplayData, RuntimeWindowData, RuntimeWorkspaceData};
@@ -637,9 +637,8 @@ impl DisplayOverview {
         root.setGeometryFlipped(true);
         root.setMasksToBounds(true);
         let background = layer(rect(0., -inset, full.size.width, full.size.height), scale);
-        // Prefer the startup snapshot; decode the native image only as a fallback.
         if let Some(image) = wallpaper {
-            image_contents(&background, image);
+            set_desktop_snapshot(&background, image);
         } else if let Some(url) = NSWorkspace::sharedWorkspace().desktopImageURLForScreen(&screen)
             && let Some(image) = NSImage::initWithContentsOfURL(NSImage::alloc(), &url)
             && let Some(image) = unsafe {
@@ -647,12 +646,12 @@ impl DisplayOverview {
             }
         {
             image_contents(&background, &image);
+            unsafe {
+                background.setContentsGravity(objc2_quartz_core::kCAGravityResizeAspectFill);
+            }
         } else {
             // No usable image file; retain a neutral background if snapshot capture also fails.
             background.setBackgroundColor(Some(&NSColor::windowBackgroundColor().CGColor()));
-        }
-        unsafe {
-            background.setContentsGravity(objc2_quartz_core::kCAGravityResizeAspectFill);
         }
         background.setOpacity(0.);
         root.addSublayer(&background);
@@ -1383,54 +1382,84 @@ impl DisplayOverview {
     }
 }
 
-// One capture per startup display, retained independently of window preview sessions.
+fn set_desktop_snapshot(background: &CALayer, image: &CGImage) {
+    // A capture already contains the wallpaper sized and cropped for this display.
+    unsafe {
+        background.setContentsGravity(objc2_quartz_core::kCAGravityResize);
+    }
+    image_contents(background, image);
+}
+
+// Keep one capture per connected display and mode across overview sessions.
 #[derive(Default)]
-pub(crate) struct DesktopBackgrounds(
-    Vec<(
-        u32,
-        Option<cgs::compositor::preview::DesktopSnapshot>,
-        Option<Retained<CGImage>>,
-    )>,
-);
+pub(crate) struct DesktopBackgrounds(Vec<DesktopBackground>);
+
+struct DesktopBackground {
+    display_id: u32,
+    size: CGSize,
+    scale: f64,
+    snapshot: Option<cgs::compositor::preview::DesktopSnapshot>,
+    image: Option<Retained<CGImage>>,
+}
+
 impl DesktopBackgrounds {
-    pub(crate) fn new(mtm: MainThreadMarker) -> Self {
+    pub(crate) fn sync(&mut self, mtm: MainThreadMarker, wake: &Sender) {
         if !CGPreflightScreenCaptureAccess() {
-            return Self::default();
+            return;
         }
-        Self(
-            NSScreen::screens(mtm)
-                .iter()
-                .filter_map(|screen| {
-                    let id = screen.get_number().ok()?.as_u32();
-                    let snapshot = cgs::compositor::preview::DesktopSnapshot::new(
-                        id,
-                        screen.backingScaleFactor(),
-                        || {},
-                    )
-                    .map_err(|error| tracing::warn!(?error, "Desktop snapshot unavailable"))
-                    .ok()?;
-                    Some((id, Some(snapshot), None))
-                })
-                .collect(),
-        )
+        let screens: Vec<_> = NSScreen::screens(mtm)
+            .iter()
+            .filter_map(|screen| {
+                let display = screen.get_number().ok()?.as_u32();
+                Some((
+                    display,
+                    CGDisplayBounds(display).size,
+                    screen.backingScaleFactor(),
+                ))
+            })
+            .collect();
+        self.0.retain(|entry| {
+            screens.contains(&(entry.display_id, entry.size, entry.scale))
+                && (entry.image.is_some() || entry.snapshot.is_some())
+        });
+        for (display_id, size, scale) in screens {
+            if self.0.iter().any(|entry| entry.display_id == display_id) {
+                continue;
+            }
+            let wake = wake.clone();
+            match cgs::compositor::preview::DesktopSnapshot::new(display_id, scale, move || {
+                wake.send(Event::DesktopBackgroundReady(display_id));
+            }) {
+                Ok(snapshot) => self.0.push(DesktopBackground {
+                    display_id,
+                    size,
+                    scale,
+                    snapshot: Some(snapshot),
+                    image: None,
+                }),
+                Err(error) => {
+                    tracing::warn!(display_id, ?error, "Desktop snapshot unavailable");
+                }
+            }
+        }
     }
 
-    fn image(&mut self, display: u32) -> Option<&CGImage> {
-        let (_, snapshot, image) = self.0.iter_mut().find(|(id, _, _)| *id == display)?;
-        if let Some(pending) = snapshot {
+    pub(crate) fn image(&mut self, display_id: u32) -> Option<&CGImage> {
+        let entry = self.0.iter_mut().find(|entry| entry.display_id == display_id)?;
+        if let Some(pending) = &entry.snapshot {
             match pending.take_image() {
                 Ok(Some(captured)) => {
-                    *image = Some(captured);
-                    *snapshot = None;
+                    entry.image = Some(captured);
+                    entry.snapshot = None;
                 }
                 Err(error) => {
-                    tracing::warn!(?error, "Desktop background unavailable");
-                    *snapshot = None;
+                    tracing::warn!(display_id, ?error, "Desktop background unavailable");
+                    entry.snapshot = None;
                 }
                 Ok(None) => {}
             }
         }
-        image.as_deref()
+        entry.image.as_deref()
     }
 }
 
@@ -1742,6 +1771,13 @@ impl OverviewSession {
 
     pub(crate) fn input_bounds(&self) -> Vec<CGRect> {
         self.displays.iter().map(|d| d.bounds).collect()
+    }
+
+    pub(crate) fn set_desktop_background(&self, display: u32, image: &CGImage) {
+        if let Some(d) = self.displays.iter().find(|d| d.info.id.as_u32() == display) {
+            let _tx = LayerTransaction::disabled().flush_on_commit();
+            set_desktop_snapshot(&d.background, image);
+        }
     }
 
     pub(crate) fn is_empty(&self) -> bool { self.displays.is_empty() }
