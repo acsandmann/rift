@@ -11397,6 +11397,247 @@ fn two_displays(
     (apps, reactor, a, b)
 }
 
+/// Two side-by-side 1000x800 displays with settled tiles: two of app 1 on display A, and
+/// `windows_on_b` of app 2 on display B. `dragged` is A's left tile; `on_b` is B's tiles, left
+/// to right.
+struct TwoDisplays {
+    apps: Apps,
+    reactor: Reactor,
+    dragged: WindowId,
+    on_b: Vec<WindowId>,
+    screen_b: CGRect,
+    space_a: SpaceId,
+    space_b: SpaceId,
+}
+
+fn two_displays_with_tiles(windows_on_b: u32) -> TwoDisplays {
+    let (mut apps, mut reactor) = test_context();
+    let screen_a = CGRect::new(CGPoint::ZERO, CGSize::new(1000., 800.));
+    let screen_b = CGRect::new(CGPoint::new(1000., 0.), CGSize::new(1000., 800.));
+    let (space_a, space_b) = (SpaceId::new(1), SpaceId::new(2));
+    reactor.handle_event(space_state_event(vec![screen_a, screen_b], vec![
+        Some(space_a),
+        Some(space_b),
+    ]));
+    apps.make_app_and_settle(&mut reactor, 1, make_windows(2));
+    let windows = (1..=windows_on_b)
+        .map(|idx| {
+            let frame = CGRect::new(
+                CGPoint::new(1000. + 100. * f64::from(idx), 100.),
+                CGSize::new(50., 50.),
+            );
+            make_window_info(
+                frame,
+                Some(WindowServerId::new(20 + idx)),
+                &format!("B{idx}"),
+                None,
+            )
+        })
+        .collect();
+    apps.make_app_and_settle(&mut reactor, 2, windows);
+    apps.simulate_until_quiet(&mut reactor);
+    let x = |wid| reactor.state.windows.window(wid).unwrap().frame_monotonic.origin.x;
+    let mut on_a = vec![WindowId::new(1, 1), WindowId::new(1, 2)];
+    let mut on_b: Vec<_> = (1..=windows_on_b).map(|idx| WindowId::new(2, idx)).collect();
+    on_a.sort_by(|a, b| x(*a).total_cmp(&x(*b)));
+    on_b.sort_by(|a, b| x(*a).total_cmp(&x(*b)));
+    for (windows, space) in [(&on_a, space_a), (&on_b, space_b)] {
+        for wid in windows {
+            assert_eq!(reactor.assigned_space_for_window_id(*wid), Some(space));
+        }
+    }
+    let _ = apps.requests();
+    TwoDisplays {
+        apps,
+        reactor,
+        dragged: on_a[0],
+        on_b,
+        screen_b,
+        space_a,
+        space_b,
+    }
+}
+
+/// The user grabs the dragged window near the right end of its title bar and moves it until its
+/// right edge is 100pt into display B: most of the frame is still on A, while the pointer is on
+/// B over the west edge of B's left tile. macOS has put the window on B's Space.
+fn drag_onto_display_b_with_the_frame_lagging(f: &mut TwoDisplays) {
+    let start = f.apps.windows[&f.dragged].frame;
+    f.reactor.handle_event(Event::DragMotion(crate::actor::drag::DragMotion {
+        point: CGPoint::new(start.max().x - 10., start.origin.y + 10.),
+    }));
+    let moved = CGRect::new(
+        CGPoint::new(start.origin.x + 1100. - start.max().x, 0.),
+        start.size,
+    );
+    f.reactor.handle_event(Event::WindowFrameChanged(
+        f.dragged,
+        moved,
+        Some(f.apps.windows[&f.dragged].last_seen_txid),
+        Requested(false),
+        Some(MouseState::Down),
+    ));
+    f.apps.windows.get_mut(&f.dragged).unwrap().frame = moved;
+    assert!(
+        moved.max().x - 1000. < 1000. - moved.origin.x,
+        "most of the frame is on A"
+    );
+    let point = CGPoint::new(1040., 400.);
+    f.reactor
+        .handle_event(Event::DragMotion(crate::actor::drag::DragMotion { point }));
+    let wsid = f.reactor.test_window_server_id(f.dragged);
+    window_server_appeared(&mut f.reactor, wsid, f.space_b, SpaceEventKind::User);
+}
+
+fn tile(reactor: &Reactor, wid: WindowId) -> CGRect {
+    reactor.state.windows.window(wid).unwrap().frame_monotonic
+}
+
+#[test]
+fn a_native_drag_onto_another_display_previews_a_target_there_while_the_frame_lags() {
+    let mut f = two_displays_with_tiles(2);
+    drag_onto_display_b_with_the_frame_lagging(&mut f);
+    let target = f.reactor.drag_manager.actor.target().expect("a target on display B");
+    assert_eq!(target.intent.space, f.space_b, "{target:?}");
+    assert_eq!(target.intent.window, f.on_b[0], "{target:?}");
+    assert_eq!(
+        target.intent.action,
+        crate::layout_engine::WindowDropAction::Insert(Direction::Left)
+    );
+    // Computed against B's layout: the dragged window would take B's leftmost slot.
+    let area = target.preview_area;
+    assert!(
+        f.screen_b.contains(area.origin) && f.screen_b.contains(area.max()),
+        "{area:?}"
+    );
+    assert!(area.origin.x < tile(&f.reactor, f.on_b[0]).mid().x, "{area:?}");
+}
+
+#[test]
+fn with_the_pointer_on_another_display_no_target_is_on_the_source_display() {
+    for windows_on_b in 0..=2 {
+        let mut f = two_displays_with_tiles(windows_on_b);
+        drag_onto_display_b_with_the_frame_lagging(&mut f);
+        let b = f.screen_b;
+        for y in (b.origin.y as i32 + 5..b.max().y as i32).step_by(83) {
+            for x in (b.origin.x as i32 + 5..b.max().x as i32).step_by(97) {
+                let point = CGPoint::new(x.into(), y.into());
+                f.reactor
+                    .handle_event(Event::DragMotion(crate::actor::drag::DragMotion { point }));
+                let intent = f.reactor.drag_manager.actor.intent();
+                assert!(
+                    intent.is_none_or(|intent| intent.space != f.space_a),
+                    "pointer at {point:?} on B with {windows_on_b} tiles: {intent:?}"
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn a_native_drag_dropped_on_another_display_lands_at_the_previewed_target() {
+    let mut f = two_displays_with_tiles(2);
+    drag_onto_display_b_with_the_frame_lagging(&mut f);
+    let previewed = f.reactor.drag_manager.actor.target().expect("a target on display B");
+    f.reactor.handle_event(Event::MouseUp(crate::actor::drag::MouseButton::Left));
+    f.apps.simulate_until_quiet(&mut f.reactor);
+
+    assert_eq!(
+        f.reactor.assigned_space_for_window_id(f.dragged),
+        Some(f.space_b)
+    );
+    // Inserted left of B's left tile.
+    let x = |wid| tile(&f.reactor, wid).origin.x;
+    assert!(x(f.dragged) < x(f.on_b[0]) && x(f.on_b[0]) < x(f.on_b[1]));
+    // Preview and commit come from one prospective layout, so the window lands exactly where
+    // the preview showed it.
+    assert_eq!(tile(&f.reactor, f.dragged), previewed.preview_area);
+}
+
+/// The drag's first frame is already mostly on display B, with the pointer there too: the drag
+/// starts on B, so it targets B's tiles, not the origin display's.
+#[test]
+fn a_native_drag_whose_first_frame_is_on_another_display_targets_that_display() {
+    let mut f = two_displays_with_tiles(2);
+    let start = f.apps.windows[&f.dragged].frame;
+    let moved = CGRect::new(CGPoint::new(1000. - start.size.width / 4., 0.), start.size);
+    assert!(
+        moved.max().x - 1000. > 1000. - moved.origin.x,
+        "most of the frame is on B"
+    );
+    f.reactor.handle_event(Event::WindowFrameChanged(
+        f.dragged,
+        moved,
+        Some(f.apps.windows[&f.dragged].last_seen_txid),
+        Requested(false),
+        Some(MouseState::Down),
+    ));
+    f.apps.windows.get_mut(&f.dragged).unwrap().frame = moved;
+    assert_eq!(
+        f.reactor.drag_manager.actor.source().and_then(|source| source.current_space),
+        Some(f.space_b)
+    );
+    let point = CGPoint::new(1040., 400.);
+    f.reactor
+        .handle_event(Event::DragMotion(crate::actor::drag::DragMotion { point }));
+
+    let target = f.reactor.drag_manager.actor.target().expect("a target on display B");
+    assert_eq!(target.intent.space, f.space_b, "{target:?}");
+    assert_eq!(target.intent.window, f.on_b[0], "{target:?}");
+}
+
+/// The pointer decides the display a drop lands on: with the pointer still on A, a frame that is
+/// mostly on B does not move the window to B.
+#[test]
+fn a_native_drag_dropped_with_the_pointer_on_its_own_display_stays_there() {
+    let mut f = two_displays_with_tiles(2);
+    let start = f.apps.windows[&f.dragged].frame;
+    f.reactor.handle_event(Event::DragMotion(crate::actor::drag::DragMotion {
+        point: CGPoint::new(start.origin.x + 10., start.origin.y + 10.),
+    }));
+    let moved = CGRect::new(CGPoint::new(980., 0.), start.size);
+    assert!(
+        moved.max().x - 1000. > 1000. - moved.origin.x,
+        "most of the frame is on B"
+    );
+    f.reactor.handle_event(Event::WindowFrameChanged(
+        f.dragged,
+        moved,
+        Some(f.apps.windows[&f.dragged].last_seen_txid),
+        Requested(false),
+        Some(MouseState::Down),
+    ));
+    f.apps.windows.get_mut(&f.dragged).unwrap().frame = moved;
+    f.reactor.handle_event(Event::DragMotion(crate::actor::drag::DragMotion {
+        point: CGPoint::new(990., 10.),
+    }));
+    assert_eq!(
+        f.reactor.drag_manager.actor.source().and_then(|source| source.current_space),
+        Some(f.space_a)
+    );
+    f.reactor.handle_event(Event::MouseUp(crate::actor::drag::MouseButton::Left));
+    f.apps.simulate_until_quiet(&mut f.reactor);
+
+    assert_eq!(
+        f.reactor.assigned_space_for_window_id(f.dragged),
+        Some(f.space_a)
+    );
+}
+
+#[test]
+fn a_native_drag_dropped_with_no_target_lands_on_the_pointers_display() {
+    let mut f = two_displays_with_tiles(0);
+    drag_onto_display_b_with_the_frame_lagging(&mut f);
+    assert!(f.reactor.drag_manager.actor.target().is_none());
+    f.reactor.handle_event(Event::MouseUp(crate::actor::drag::MouseButton::Left));
+    f.apps.simulate_until_quiet(&mut f.reactor);
+
+    assert_eq!(
+        f.reactor.assigned_space_for_window_id(f.dragged),
+        Some(f.space_b)
+    );
+}
+
 fn shared_settings() -> crate::common::config::VirtualWorkspaceSettings {
     crate::common::config::VirtualWorkspaceSettings {
         mode: crate::common::config::WorkspaceMode::Global,

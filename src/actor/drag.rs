@@ -15,7 +15,6 @@ pub use crate::model::drag::{
     DragCancel, DragCommit, DragKind, DragScene, DragSceneTarget, DragSource, DropIntent,
     DropTarget, DropZone,
 };
-use crate::sys::geometry::SameAs;
 use crate::sys::screen::SpaceId;
 
 const HYSTERESIS_POINTS: f64 = 8.0;
@@ -171,17 +170,15 @@ impl DragActor {
 
     pub fn kind(&self) -> Option<DragKind> { self.session().map(|session| session.kind) }
 
-    /// Update reactor-resolved space membership and invalidate destination state.
-    pub fn update_current_space(&mut self, current_space: Option<SpaceId>) -> bool {
+    /// Update reactor-resolved space membership, with that space's scene, and invalidate
+    /// destination state.
+    pub fn update_current_space(&mut self, current_space: Option<SpaceId>, scene: DragScene) {
         let Some(session) = &mut self.session else {
-            return false;
+            return;
         };
-        if session.source.current_space == current_space {
-            return false;
-        }
         session.source.current_space = current_space;
+        session.scene = scene;
         session.invalidate_drop();
-        true
     }
 
     pub fn replace_scene(&mut self, scene: DragScene) {
@@ -191,11 +188,7 @@ impl DragActor {
         let previous = session.target.intent();
         session.scene = scene;
         session.invalidate_drop();
-        if self.settings.enabled
-            && session.source.tiled
-            && matches!(session.kind, DragKind::NativeMove | DragKind::ModifierMove)
-            && session.source.origin_space == session.source.current_space
-        {
+        if self.settings.enabled && session.source.tiled && session.kind.is_move() {
             let next = hit_test_available(
                 &session.scene,
                 session.pointer,
@@ -260,11 +253,7 @@ impl DragActor {
         if self.is_active() {
             return;
         }
-        let kind = if source.origin_frame.size.same_as(source.last_frame.size) {
-            DragKind::NativeMove
-        } else {
-            DragKind::NativeResize
-        };
+        let kind = DragKind::native(source.origin_frame, source.last_frame);
         let pointer = CGPoint::new(
             source.last_frame.origin.x + source.last_frame.size.width / 2.0,
             source.last_frame.origin.y + source.last_frame.size.height / 2.0,
@@ -272,15 +261,11 @@ impl DragActor {
         self.session = Some(Session::new(source, MouseButton::Left, pointer, scene, kind));
     }
 
-    /// Updates an existing native drag without rebuilding its immutable scene.
+    /// Updates an existing native drag's frame. The pointer, not the frame, decides which
+    /// display the drag is on (`update_current_space`).
     ///
     /// Returns `true` when `window` owns the active native drag session.
-    pub fn update_native(
-        &mut self,
-        window: WindowId,
-        frame: CGRect,
-        current_space: Option<SpaceId>,
-    ) -> bool {
+    pub fn update_native(&mut self, window: WindowId, frame: CGRect) -> bool {
         let Some(session) = &mut self.session else {
             return false;
         };
@@ -290,15 +275,7 @@ impl DragActor {
             return false;
         }
         session.source.last_frame = frame;
-        session.kind = if session.source.origin_frame.size.same_as(frame.size) {
-            DragKind::NativeMove
-        } else {
-            DragKind::NativeResize
-        };
-        if session.source.current_space != current_space {
-            session.source.current_space = current_space;
-            session.invalidate_drop();
-        }
+        session.kind = DragKind::native(session.source.origin_frame, frame);
         true
     }
 
@@ -341,7 +318,6 @@ impl DragActor {
         let next = if !self.settings.enabled
             || session.kind == DragKind::NativeResize
             || !session.source.tiled
-            || session.source.origin_space != session.source.current_space
         {
             None
         } else {
@@ -996,7 +972,7 @@ mod tests {
     }
 
     #[test]
-    fn modifier_space_change_invalidates_origin_drop_state() {
+    fn entering_another_space_targets_that_spaces_scene() {
         let destination = SpaceId::new(2);
         let mut actor = modifier(MouseAction::Move, true);
         motion(&mut actor, 100.0, 50.0);
@@ -1004,13 +980,26 @@ mod tests {
         actor.set_preview(intent, Some(rect()));
         assert!(actor.target().is_some());
 
-        assert!(actor.update_current_space(Some(destination)));
+        let there = frame(1000.0, 0.0, 200.0, 100.0);
+        let scene = scene_with(vec![DragSceneTarget {
+            window: w(3),
+            space: destination,
+            frame: there,
+        }]);
+        actor.update_current_space(Some(destination), scene);
         assert_eq!(actor.source().unwrap().current_space, Some(destination));
         assert!(actor.intent().is_none());
         assert!(actor.target().is_none());
+
+        // The origin space's tile is no longer a target; the destination's is.
         motion(&mut actor, 100.0, 50.0);
         assert!(actor.intent().is_none());
-        assert!(actor.finish(MouseButton::Left).unwrap().target.is_none());
+        motion(&mut actor, 1100.0, 50.0);
+        let intent = actor.intent().unwrap();
+        assert_eq!((intent.window, intent.space), (w(3), destination));
+        actor.set_preview(intent, Some(there));
+        let target = actor.finish(MouseButton::Left).unwrap().target.unwrap();
+        assert_eq!((target.intent.window, target.intent.space), (w(3), destination));
     }
 
     #[test]
