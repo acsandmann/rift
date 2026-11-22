@@ -145,16 +145,13 @@ impl TraditionalLayoutSystem {
     }
 
     fn perform_natural_join(&mut self, selection: NodeId, target: NodeId, direction: Direction) {
-        let selection_parent = selection.parent(self.tiles.map());
-        let target_parent = target.parent(self.tiles.map());
-
         // Joining toward a stack joins it, whether the target is one of its windows or the
         // stack itself.
-        let selection_stack_parent = self.tiles.enclosing_stack(selection);
-        let target_stack_parent = self.tiles.enclosing_stack(target);
+        let selection_stack = self.tiles.enclosing_stack(selection);
+        let target_stack = self.tiles.enclosing_stack(target);
 
         let backwards = matches!(direction, Direction::Left | Direction::Up);
-        let join = match (selection_stack_parent, target_stack_parent) {
+        let join = match (selection_stack, target_stack) {
             (Some(stack), None) => Some((stack, target, backwards)),
             (None, Some(stack)) => Some((stack, selection, !backwards)),
             _ => None,
@@ -172,6 +169,8 @@ impl TraditionalLayoutSystem {
         }
 
         let kind = LayoutKind::from(direction.orientation());
+        let selection_parent = selection.parent(self.tiles.map());
+        let target_parent = target.parent(self.tiles.map());
         if let (Some(sp), Some(tp)) = (selection_parent, target_parent) {
             if sp == tp && self.tiles.layout(sp).is_stacked() {
                 self.tiles.set_layout(sp, kind);
@@ -979,5 +978,77 @@ mod tests {
         let stack = system.windows(layout, WindowQuery::Stack(w(1)));
         assert_eq!(stack, [w(1), w(2), w(3)]);
         assert_eq!(system.selected_window(layout), Some(w(3)));
+    }
+
+    #[test]
+    fn join_adds_a_window_to_the_neighboring_stack_in_every_direction() {
+        use crate::common::config::StackDefaultOrientation;
+
+        // The stack holds windows 1 and 2, built by joining them and stacking the pair; window 3
+        // stands alone on one side of it.
+        let build = |root_kind: LayoutKind, lone_first: bool| {
+            let mut system = TraditionalLayoutSystem::default();
+            let layout = system.create_layout();
+            let root = system.tiles.layout_roots[layout].0;
+            system.tiles.set_layout(root, root_kind);
+            let order = if lone_first {
+                [w(3), w(1), w(2)]
+            } else {
+                [w(1), w(2), w(3)]
+            };
+            for window in order {
+                system.add_window_after_selection(layout, window);
+            }
+            let forward = match root_kind {
+                LayoutKind::Horizontal => Direction::Right,
+                _ => Direction::Down,
+            };
+            system.focus(layout, Focus::Select(w(1)));
+            system.edit(layout, LayoutEdit::Group(GroupEdit::Join(forward)));
+            let _ = system.edit(
+                layout,
+                LayoutEdit::Group(GroupEdit::Stack(StackDefaultOrientation::Same)),
+            );
+            assert_eq!(system.windows(layout, WindowQuery::Stack(w(1))), [w(1), w(2)]);
+            (system, layout)
+        };
+
+        // (direction, lone window first, window selected, stack after the join)
+        let beside_the_stack = [
+            (Direction::Left, false, w(3), [w(1), w(2), w(3)]),
+            (Direction::Up, false, w(3), [w(1), w(2), w(3)]),
+            (Direction::Right, true, w(3), [w(3), w(1), w(2)]),
+            (Direction::Down, true, w(3), [w(3), w(1), w(2)]),
+        ];
+        let from_the_stack = [
+            (Direction::Right, false, w(2), [w(1), w(2), w(3)]),
+            (Direction::Down, false, w(2), [w(1), w(2), w(3)]),
+            (Direction::Left, true, w(1), [w(3), w(1), w(2)]),
+            (Direction::Up, true, w(1), [w(3), w(1), w(2)]),
+        ];
+        for (direction, lone_first, selected, expected) in
+            beside_the_stack.into_iter().chain(from_the_stack)
+        {
+            let root_kind = LayoutKind::from(direction.orientation());
+            let (mut system, layout) = build(root_kind, lone_first);
+            system.focus(layout, Focus::Select(selected));
+            system.edit(layout, LayoutEdit::Group(GroupEdit::Join(direction)));
+            let case = format!("join {direction:?} with window {selected:?} selected");
+            assert_eq!(
+                system.windows(layout, WindowQuery::Stack(w(3))),
+                expected,
+                "{case}: stack order"
+            );
+            assert_eq!(
+                system.selected_window(layout),
+                Some(selected),
+                "{case}: selection"
+            );
+            assert_eq!(
+                system.windows(layout, WindowQuery::Visible),
+                [selected],
+                "{case}: visible tab"
+            );
+        }
     }
 }
