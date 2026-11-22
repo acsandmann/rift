@@ -83,13 +83,12 @@ impl Reactor {
         let start = self.best_space_for_frame(&source.origin_frame);
         let landing = self.best_space_for_frame(&source.last_frame);
         // The pointer's display is where the drop lands; the frame can still be mostly on the
-        // display the drag left.
-        let crossing = source
-            .current_space
-            .filter(|space| *space != owner && self.is_space_active(*space))
-            .or_else(|| {
-                landing.filter(|space| Some(*space) != start && self.is_space_active(*space))
-            });
+        // display the drag left. Only a drag with no pointer display falls back to the frame.
+        let crossing = match source.current_space {
+            Some(space) => Some(space).filter(|space| *space != owner),
+            None => landing.filter(|space| Some(*space) != start),
+        }
+        .filter(|space| self.is_space_active(*space));
         let crossing = crossing.or_else(|| {
             // The last AX frame can lag mouse-up. Use a complete membership sample
             // only when current WindowServer membership corroborates its destination.

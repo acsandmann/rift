@@ -11424,6 +11424,44 @@ fn a_native_drag_whose_first_frame_is_on_another_display_targets_that_display() 
     assert_eq!(target.intent.window, f.on_b[0], "{target:?}");
 }
 
+/// The pointer decides the display a drop lands on: with the pointer still on A, a frame that is
+/// mostly on B does not move the window to B.
+#[test]
+fn a_native_drag_dropped_with_the_pointer_on_its_own_display_stays_there() {
+    let mut f = two_displays_with_tiles(2);
+    let start = f.apps.windows[&f.dragged].frame;
+    f.reactor.handle_event(Event::DragMotion(crate::actor::drag::DragMotion {
+        point: CGPoint::new(start.origin.x + 10., start.origin.y + 10.),
+    }));
+    let moved = CGRect::new(CGPoint::new(980., 0.), start.size);
+    assert!(
+        moved.max().x - 1000. > 1000. - moved.origin.x,
+        "most of the frame is on B"
+    );
+    f.reactor.handle_event(Event::WindowFrameChanged(
+        f.dragged,
+        moved,
+        Some(f.apps.windows[&f.dragged].last_seen_txid),
+        Requested(false),
+        Some(MouseState::Down),
+    ));
+    f.apps.windows.get_mut(&f.dragged).unwrap().frame = moved;
+    f.reactor.handle_event(Event::DragMotion(crate::actor::drag::DragMotion {
+        point: CGPoint::new(990., 10.),
+    }));
+    assert_eq!(
+        f.reactor.drag_manager.actor.source().and_then(|source| source.current_space),
+        Some(f.space_a)
+    );
+    f.reactor.handle_event(Event::MouseUp(crate::actor::drag::MouseButton::Left));
+    f.apps.simulate_until_quiet(&mut f.reactor);
+
+    assert_eq!(
+        f.reactor.assigned_space_for_window_id(f.dragged),
+        Some(f.space_a)
+    );
+}
+
 #[test]
 fn a_native_drag_dropped_with_no_target_lands_on_the_pointers_display() {
     let mut f = two_displays_with_tiles(0);
