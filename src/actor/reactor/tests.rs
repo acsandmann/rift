@@ -467,8 +467,8 @@ fn inventory_does_not_replace_geometry_owned_by_pending_rift_transaction() {
         vec![wid],
     );
     assert!(
-        reactor.state.windows.window(wid).unwrap().frame_monotonic.same_as(frame),
-        "after inventory geometry becomes authoritative, arrange must restore the tiled frame"
+        reactor.state.windows.window(wid).unwrap().frame_monotonic.same_as(parked),
+        "the model keeps the reported frame until the app answers the corrective write"
     );
     assert_eq!(
         reactor.tx_store.target(&wsid),

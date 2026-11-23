@@ -71,10 +71,10 @@ pub(crate) struct AppState {
 #[derive(Debug, Clone)]
 pub(crate) struct WindowState {
     pub(crate) info: WindowInfo,
-    /// The last known frame of the window. Always includes the last write.
+    /// The frame the app last reported. A write still in flight lives only in
+    /// `WindowTxStore`; ask `WindowTxStore::heading` for where a window is going.
     ///
-    /// This value only updates monotonically with respect to writes; in other
-    /// words, we only accept reads when we know they come after the last write.
+    /// Reports that predate the latest write are not accepted.
     pub(crate) frame_monotonic: CGRect,
     /// Rift/macOS heuristic result, kept separately from an explicit app-rule
     /// override so every discovered window can remain tracked.

@@ -5,6 +5,7 @@ use dashmap::DashMap;
 use objc2_core_foundation::CGRect;
 use serde::{Deserialize, Serialize};
 
+use crate::model::reactor::WindowState;
 use crate::sys::geometry::SameAs;
 use crate::sys::window_server::WindowServerId;
 
@@ -23,7 +24,6 @@ enum FrameWrite {
     #[default]
     Idle,
     Pending(CGRect),
-    Failed,
     Settled {
         target: CGRect,
         observed: CGRect,
@@ -48,14 +48,11 @@ impl TxRecord {
         match self.write {
             FrameWrite::Idle => current.same_as(desired),
             FrameWrite::Pending(target) => target.same_as(desired),
-            FrameWrite::Failed => false,
             FrameWrite::Settled { target, observed } => {
                 target.same_as(desired) && observed.same_as(current)
             }
         }
     }
-
-    pub fn needs_full_retry(self) -> bool { matches!(self.write, FrameWrite::Failed) }
 
     pub fn refused(self, desired: CGRect, current: CGRect) -> bool {
         matches!(self.write, FrameWrite::Settled { target, observed }
@@ -110,12 +107,20 @@ impl WindowTxStore {
     /// The frame a write in flight is taking the window to.
     pub fn target(&self, id: &WindowServerId) -> Option<CGRect> { self.get(id)?.target() }
 
+    /// Where a window is headed: the target of a write in flight, otherwise
+    /// the frame the app last reported.
+    pub(crate) fn heading(&self, window: &WindowState) -> CGRect {
+        window
+            .info
+            .sys_id
+            .and_then(|id| self.target(&id))
+            .unwrap_or(window.frame_monotonic)
+    }
+
     pub fn remove(&self, id: &WindowServerId) { self.0.records.remove(id); }
 
     pub fn clear_target(&self, id: &WindowServerId) {
-        if let Some(mut record) = self.0.records.get_mut(id)
-            && !record.needs_full_retry()
-        {
+        if let Some(mut record) = self.0.records.get_mut(id) {
             record.write = FrameWrite::Idle;
         }
     }
@@ -123,17 +128,8 @@ impl WindowTxStore {
     pub fn clear_target_if_current(&self, id: &WindowServerId, txid: TransactionId) {
         if let Some(mut record) = self.0.records.get_mut(id)
             && record.txid == txid
-            && !record.needs_full_retry()
         {
             record.write = FrameWrite::Idle;
-        }
-    }
-
-    pub fn fail(&self, id: WindowServerId, txid: TransactionId) {
-        if let Some(mut record) = self.0.records.get_mut(&id)
-            && record.txid == txid
-        {
-            record.write = FrameWrite::Failed;
         }
     }
 

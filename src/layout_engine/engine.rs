@@ -3718,9 +3718,6 @@ impl LayoutEngine {
         window: WindowId,
         frame: CGRect,
     ) {
-        if let Some(state) = windows.window_mut(window) {
-            state.frame_monotonic = frame;
-        }
         if self.is_window_floating(window)
             && let Some(assignment) = windows.workspace_for_window(window)
         {

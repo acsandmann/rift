@@ -693,13 +693,11 @@ impl Reactor {
                     return None;
                 }
                 let window = self.state.windows.window(wid)?;
+                let start = self.tx_store.heading(window);
                 if semantic
                     && let Some(wsid) = window.info.sys_id
                     && let Some(write) = self.tx_store.get(&wsid)
                 {
-                    if write.needs_full_retry() {
-                        return None;
-                    }
                     let target = presentation.target_frame(base_frame, fixed, scale);
                     let target = bound.map_or(target, |bounds| bounds.apply(target));
                     if control.as_ref().is_none_or(|control| !control.frames.contains_key(&wid))
@@ -710,14 +708,12 @@ impl Reactor {
                     }
                 }
                 let app = self.app_manager.apps.get(&wid.pid)?;
-                let frame = control.as_ref().map_or(window.frame_monotonic, |control| {
-                    control.frame(wid, window.frame_monotonic)
-                });
+                let frame = control.as_ref().map_or(start, |control| control.frame(wid, start));
                 Some(PresentedWindow {
                     handle: app.handle.with_scrolling_bounds(bound),
                     wid,
                     wsid: window.info.sys_id,
-                    from: window.frame_monotonic,
+                    from: start,
                     to: base_frame,
                     fixed,
                     announced: false,
@@ -1128,6 +1124,8 @@ impl AnimationManager {
             if write.covers(target_frame, current_frame) {
                 continue;
             }
+            // Queued writes apply in order, so animate on from the one in flight.
+            let start = write.target().unwrap_or(current_frame);
             let Some(app_state) = reactor.app_manager.apps.get(&wid.pid) else {
                 debug!(?wid, "Skipping for window - app no longer exists");
                 continue;
@@ -1141,9 +1139,9 @@ impl AnimationManager {
             let handle = app_state.handle.with_scrolling_bounds(bounds.filter(|_| {
                 is_active && !reactor.layout_manager.layout_engine.is_window_floating(wid)
             }));
-            if is_active && !write.needs_full_retry() {
-                trace!(?wid, ?current_frame, ?target_frame, "Animating visible window");
-                anim.add_window(&handle, wid, current_frame, target_frame, txid);
+            if is_active {
+                trace!(?wid, ?start, ?target_frame, "Animating visible window");
+                anim.add_window(&handle, wid, start, target_frame, txid);
             } else {
                 anim.mark_handled(wid);
                 trace!(
@@ -1158,10 +1156,6 @@ impl AnimationManager {
                     debug!(?wid, ?e, "Failed to send frame request");
                     continue;
                 }
-            }
-
-            if let Some(window) = reactor.state.windows.window_mut(wid) {
-                window.frame_monotonic = target_frame;
             }
         }
 
@@ -1219,8 +1213,7 @@ impl AnimationManager {
             let constrained = bounds.is_some()
                 && reactor.state.windows.workspace_for_window(wid) == active
                 && !reactor.layout_manager.layout_engine.is_window_floating(wid);
-            let window_store = &mut reactor.state.windows;
-            let Some(window) = window_store.window_mut(wid) else {
+            let Some(window) = reactor.state.windows.window(wid) else {
                 debug!(?wid, "Skipping layout - window no longer exists");
                 continue;
             };
@@ -1241,10 +1234,8 @@ impl AnimationManager {
             );
 
             let size_unchanged = !force_frames
-                && !write.needs_full_retry()
                 && write.target().is_none()
                 && current_frame.size.same_as(target_frame.size);
-            window.frame_monotonic = target_frame;
             let (frames, positions) = per_app
                 .entry((wid.pid, constrained))
                 .or_insert_with(|| (Vec::new(), Vec::new()));
@@ -1264,12 +1255,9 @@ impl AnimationManager {
             let handle = app_state.handle.with_scrolling_bounds(bounds.filter(|_| constrained));
 
             let txid = reactor.tx_store.next_id();
-            for wid in frames.iter().map(|(wid, _)| wid).chain(positions.iter().map(|(wid, _)| wid))
-            {
-                if let Some(window) = reactor.state.windows.window(*wid)
-                    && let Some(wsid) = window.info.sys_id
-                {
-                    reactor.tx_store.insert(wsid, txid, window.frame_monotonic);
+            for &(wid, target) in frames.iter().chain(&positions) {
+                if let Some(wsid) = reactor.state.windows.window(wid).and_then(|w| w.info.sys_id) {
+                    reactor.tx_store.insert(wsid, txid, target);
                 }
             }
             let requests = [

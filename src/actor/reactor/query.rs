@@ -428,7 +428,7 @@ impl Reactor {
                         .into_iter()
                         .filter_map(|wid| {
                             predicted.get(&wid).copied().or_else(|| {
-                                self.state.windows.window(wid).map(|w| w.frame_monotonic)
+                                self.state.windows.window(wid).map(|w| self.tx_store.heading(w))
                             })
                         })
                         .collect();
@@ -543,6 +543,11 @@ impl Reactor {
                     if !wd.is_floating {
                         wd.layout_frame = layout_frames.get(&wid).copied();
                         wd.layout_position = logical_positions.get(&wid).copied();
+                    }
+                    // Like the predicted frames of inactive workspaces, report where
+                    // windows are headed, not where an app last left them.
+                    if let Some(window) = self.state.windows.window(wid) {
+                        wd.info.frame = self.tx_store.heading(window);
                     }
                     if !is_active {
                         if let Some(pred) = predicted_map.get(&wid).copied() {

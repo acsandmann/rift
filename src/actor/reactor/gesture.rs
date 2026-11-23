@@ -994,10 +994,13 @@ mod tests {
                                     "flush viewport frames before parking"
                                 );
                             }
-                            assert_eq!(
-                                position.origin,
-                                r.state.windows.window(wid).unwrap().frame_monotonic.origin
-                            );
+                            let screen = r.space_state.screen_by_space(ctx.space).unwrap().frame;
+                            let size = r.state.windows.window(wid).unwrap().frame_monotonic.size;
+                            assert!(crate::model::HiddenWindowPlacement::is_hidden(
+                                screen,
+                                CGRect::new(position.origin, size),
+                                &[],
+                            ));
                             hidden.insert(wid);
                         }
                     }

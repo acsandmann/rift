@@ -1825,9 +1825,10 @@ impl Reactor {
             }
             Event::WindowFrameWriteFailed(wid, txid) => {
                 if let Some(server) = self.state.windows.window(wid).and_then(|w| w.info.sys_id) {
-                    self.tx_store.fail(server, txid);
+                    self.tx_store.clear_target_if_current(&server, txid);
                 }
-                // Retry on the next arrange pass. A busy app must not drive its own retry loop.
+                // The window stayed where the app last reported it, so the next arrange pass
+                // sees the difference and writes again. A busy app must not drive its own retry loop.
                 return Ok(());
             }
             Event::WindowFrameChanged(wid, new_frame, last_seen, requested, mouse_state) => {
@@ -2932,7 +2933,7 @@ impl Reactor {
                 .filter_map(|id| {
                     let state = self.state.windows.window(id)?;
                     (state.is_admitted() && !state.info.is_minimized && state.info.is_standard)
-                        .then_some((id, state.frame_monotonic))
+                        .then(|| (id, self.tx_store.heading(state)))
                 })
                 .collect();
             wm.send(WmEvent::OverviewActivationTarget(OverviewTarget {
@@ -4942,12 +4943,7 @@ impl Reactor {
             CGRect::default()
         };
         let frame = placement.resolve_frame(window.frame_monotonic, screen);
-        let current = window
-            .info
-            .sys_id
-            .and_then(|id| self.tx_store.target(&id))
-            .unwrap_or(window.frame_monotonic);
-        if frame.same_as(current) {
+        if frame.same_as(self.tx_store.heading(window)) {
             return;
         }
         self.state.windows.clear_floating_display_geometry(placement.window);
