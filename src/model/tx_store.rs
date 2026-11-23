@@ -3,10 +3,20 @@ use std::sync::atomic::{AtomicU32, Ordering};
 
 use dashmap::DashMap;
 use objc2_core_foundation::CGRect;
+use serde::{Deserialize, Serialize};
 
-use crate::actor::reactor::transaction_manager::TransactionId;
 use crate::sys::geometry::SameAs;
 use crate::sys::window_server::WindowServerId;
+
+/// The id of a frame write. Every write gets a new one; an app's report of a
+/// frame names the latest write it had applied.
+#[derive(Default, Debug, Copy, Clone, PartialEq, Serialize, Deserialize)]
+pub struct TransactionId(u32);
+
+impl TransactionId {
+    #[cfg(test)]
+    pub fn next(self) -> Self { Self(self.0.wrapping_add(1)) }
+}
 
 #[derive(Clone, Copy, Debug, Default)]
 enum FrameWrite {
@@ -69,7 +79,7 @@ impl WindowTxStore {
     pub fn next_id(&self) -> TransactionId {
         // Zero is reserved for writes to windows with no server identity.
         let id = self.0.sequence.fetch_add(1, Ordering::Relaxed).wrapping_add(1);
-        TransactionId::new(if id == 0 {
+        TransactionId(if id == 0 {
             self.0.sequence.fetch_add(1, Ordering::Relaxed).wrapping_add(1)
         } else {
             id
@@ -96,6 +106,9 @@ impl WindowTxStore {
     pub fn get(&self, id: &WindowServerId) -> Option<TxRecord> {
         self.0.records.get(id).map(|entry| *entry)
     }
+
+    /// The frame a write in flight is taking the window to.
+    pub fn target(&self, id: &WindowServerId) -> Option<CGRect> { self.get(id)?.target() }
 
     pub fn remove(&self, id: &WindowServerId) { self.0.records.remove(id); }
 
@@ -134,14 +147,6 @@ impl WindowTxStore {
     }
 
     #[cfg(test)]
-    fn next_txid(&self, id: WindowServerId) -> TransactionId { self.begin(id, None) }
-
-    #[cfg(test)]
-    pub fn set_last_txid(&self, id: WindowServerId, txid: TransactionId) {
-        self.0.records.insert(id, TxRecord { txid, write: FrameWrite::Idle });
-    }
-
-    #[cfg(test)]
     pub fn last_txid(&self, id: &WindowServerId) -> TransactionId {
         self.get(id).map(|record| record.txid).unwrap_or_default()
     }
@@ -158,7 +163,7 @@ mod tests {
         let store = WindowTxStore::new();
         let wsid = WindowServerId::new(1);
         let target = CGRect::new(CGPoint::new(10.0, 20.0), CGSize::new(30.0, 40.0));
-        let txid = store.next_txid(wsid);
+        let txid = store.begin(wsid, None);
         store.insert(wsid, txid, target);
         assert_eq!(txid, TransactionId::default().next());
         assert_eq!(store.get(&wsid).unwrap().target(), Some(target));
@@ -169,7 +174,7 @@ mod tests {
         assert_eq!(record.txid, txid);
         assert_eq!(record.target(), None);
 
-        let newer = store.next_txid(wsid);
+        let newer = store.begin(wsid, None);
         store.insert(wsid, newer, target);
         store.clear_target_if_current(&wsid, txid);
         assert_eq!(
@@ -187,28 +192,12 @@ mod tests {
         let store = WindowTxStore::new();
         let wsid = WindowServerId::new(2);
 
-        let txid_1 = store.next_txid(wsid);
+        let txid_1 = store.begin(wsid, None);
         let target = CGRect::new(CGPoint::new(1.0, 2.0), CGSize::new(3.0, 4.0));
         store.insert(wsid, txid_1, target);
         store.clear_target(&wsid);
 
-        let txid_2 = store.next_txid(wsid);
+        let txid_2 = store.begin(wsid, None);
         assert_eq!(txid_2, txid_1.next());
-    }
-
-    #[test]
-    fn set_last_txid_clears_any_stale_target() {
-        let store = WindowTxStore::new();
-        let wsid = WindowServerId::new(3);
-        let txid_1 = store.next_txid(wsid);
-        let target = CGRect::new(CGPoint::new(5.0, 6.0), CGSize::new(7.0, 8.0));
-        store.insert(wsid, txid_1, target);
-
-        let txid_2 = txid_1.next();
-        store.set_last_txid(wsid, txid_2);
-
-        let record = store.get(&wsid).expect("tx record should exist");
-        assert_eq!(record.txid, txid_2);
-        assert_eq!(record.target(), None);
     }
 }

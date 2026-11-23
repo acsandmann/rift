@@ -438,8 +438,8 @@ fn inventory_does_not_replace_geometry_owned_by_pending_rift_transaction() {
 
     let mut target = frame;
     target.origin.x = 200.0;
-    let txid = reactor.transaction_manager.generate_next_txid(wsid);
-    reactor.transaction_manager.store_txid(wsid, txid, target);
+    let txid = reactor.tx_store.begin(wsid, None);
+    reactor.tx_store.insert(wsid, txid, target);
 
     let mut parked = frame;
     parked.origin.x += frame.size.width;
@@ -453,14 +453,14 @@ fn inventory_does_not_replace_geometry_owned_by_pending_rift_transaction() {
         reactor.state.windows.window(wid).unwrap().frame_monotonic.same_as(frame),
         "inventory must not feed a transient Rift-owned frame back into model geometry"
     );
-    assert_eq!(reactor.transaction_manager.get_target_frame(wsid), Some(target));
+    assert_eq!(reactor.tx_store.target(&wsid), Some(target));
     assert_eq!(
         reactor.layout_calculations.len(),
         layout_updates,
         "a passive inventory refresh must not schedule another arrange"
     );
 
-    reactor.transaction_manager.clear_target_for_window(wsid);
+    reactor.tx_store.clear_target(&wsid);
     reactor.discover_test_windows(
         wid.pid,
         vec![(wid, make_window_info(parked, Some(wsid), "Window", None))],
@@ -471,7 +471,7 @@ fn inventory_does_not_replace_geometry_owned_by_pending_rift_transaction() {
         "after inventory geometry becomes authoritative, arrange must restore the tiled frame"
     );
     assert_eq!(
-        reactor.transaction_manager.get_target_frame(wsid),
+        reactor.tx_store.target(&wsid),
         Some(frame),
         "the authoritative inventory change must trigger a corrective frame transaction"
     );
@@ -1948,8 +1948,8 @@ fn reactor_with_window_moved_to_space2()
 
     assert!(reactor.assign_test_window_to_workspace(space1, wid, space1_workspace));
     assert!(reactor.assign_test_window_to_workspace(space2, wid, space2_workspace));
-    let txid = reactor.transaction_manager.generate_next_txid(wsid);
-    reactor.transaction_manager.store_txid(wsid, txid, moved_frame);
+    let txid = reactor.tx_store.begin(wsid, None);
+    reactor.tx_store.insert(wsid, txid, moved_frame);
     assert_eq!(reactor.assigned_space_for_window_id(wid), Some(space2));
 
     (reactor, wid, wsid, space1, space2, moved_frame)
@@ -2127,9 +2127,7 @@ fn failed_frame_write_retries_full_geometry_on_next_arrange() {
                 bounds,
             )
         });
-        let txid = reactor
-            .transaction_manager
-            .get_last_sent_txid(reactor.test_window_server_id(wid));
+        let txid = reactor.tx_store.last_txid(&reactor.test_window_server_id(wid));
         apps.requests();
 
         reactor.handle_event(Event::WindowFrameWriteFailed(wid, txid));
@@ -2201,7 +2199,7 @@ fn accepted_frame_settles_the_write_without_retrying_an_adjusted_size() {
     let target = CGRect::new(CGPoint::new(20., 20.), CGSize::new(620., 500.));
     let accepted = CGRect::new(target.origin, CGSize::new(700., 500.));
     assert!(arrange(&mut reactor, target));
-    let txid = reactor.transaction_manager.get_last_sent_txid(wsid);
+    let txid = reactor.tx_store.last_txid(&wsid);
     apps.requests();
 
     let readback = |frame, txid| {
@@ -2212,24 +2210,21 @@ fn accepted_frame_settles_the_write_without_retrying_an_adjusted_size() {
         reactor.state.windows.window(wid).unwrap().frame_monotonic,
         accepted
     );
-    assert_eq!(reactor.transaction_manager.get_target_frame(wsid), None);
+    assert_eq!(reactor.tx_store.target(&wsid), None);
     let mut new_target = target;
     new_target.origin.x += 100.;
     assert!(!arrange(&mut reactor, target));
     assert!(apps.requests().is_empty());
     assert!(arrange(&mut reactor, new_target));
-    let newer = reactor.transaction_manager.get_last_sent_txid(wsid);
+    let newer = reactor.tx_store.last_txid(&wsid);
     reactor.handle_event(readback(accepted, txid));
-    assert_eq!(
-        reactor.transaction_manager.get_target_frame(wsid),
-        Some(new_target)
-    );
+    assert_eq!(reactor.tx_store.target(&wsid), Some(new_target));
     reactor.handle_event(readback(new_target, newer));
     assert_eq!(
         reactor.state.windows.window(wid).unwrap().frame_monotonic,
         new_target
     );
-    assert_eq!(reactor.transaction_manager.get_target_frame(wsid), None);
+    assert_eq!(reactor.tx_store.target(&wsid), None);
 }
 
 #[test]
@@ -2562,8 +2557,8 @@ fn events_that_change_no_managed_layout_do_not_arrange() {
     let moved = |wid, frame, txid, requested| {
         Event::WindowFrameChanged(wid, frame, txid, Requested(requested), Some(MouseState::Up))
     };
-    let txid = reactor.transaction_manager.generate_next_txid(wsid);
-    reactor.transaction_manager.store_txid(wsid, txid, at(40.0));
+    let txid = reactor.tx_store.begin(wsid, None);
+    reactor.tx_store.insert(wsid, txid, at(40.0));
     // Acknowledged, unchanged, and explicitly requested frames.
     for event in [
         moved(wid, at(40.0), Some(txid), true),
@@ -2577,8 +2572,8 @@ fn events_that_change_no_managed_layout_do_not_arrange() {
 
     // A stale transaction while a newer target is pending, duplicate minimize
     // edges, and events for unknown windows.
-    let current = reactor.transaction_manager.generate_next_txid(wsid);
-    reactor.transaction_manager.store_txid(wsid, current, at(40.0));
+    let current = reactor.tx_store.begin(wsid, None);
+    reactor.tx_store.insert(wsid, current, at(40.0));
     let unknown = WindowId::new(wid.pid + 100, wid.idx.get());
     for (case, (event, checked)) in [
         (moved(wid, at(60.0), Some(current.next()), false), true),
@@ -2608,7 +2603,7 @@ fn events_that_change_no_managed_layout_do_not_arrange() {
     let before = reactor.layout_calculations.len();
     reactor.handle_event(Event::WindowCreated(popup, info, None, None));
     reactor.handle_event(Event::WindowDestroyed(popup));
-    reactor.transaction_manager.clear_target_for_window(wsid);
+    reactor.tx_store.clear_target(&wsid);
     reactor.set_active_spaces(&[]);
     reactor.handle_event(moved(wid, at(70.0), None, false));
     assert_eq!(reactor.layout_calculations.len(), before);
@@ -3142,9 +3137,9 @@ fn stale_user_space_appearance_is_ignored_when_server_state_already_matches_pend
 
     assert!(reactor.assign_test_window_to_workspace(space1, wid, space1_workspace));
     reactor.state.windows.set_window_server_space(wsid, Some(space1));
-    let txid = reactor.transaction_manager.generate_next_txid(wsid);
+    let txid = reactor.tx_store.begin(wsid, None);
     let target_frame = CGRect::new(CGPoint::new(100., 100.), CGSize::new(800., 600.));
-    reactor.transaction_manager.store_txid(wsid, txid, target_frame);
+    reactor.tx_store.insert(wsid, txid, target_frame);
 
     window_server_appeared(&mut reactor, wsid, space2, SpaceEventKind::User);
 
@@ -4152,8 +4147,8 @@ fn app_rescue_after_clamped_hide_is_hidden_again() {
     assert!(reactor.assign_test_window_to_workspace(space, wid, workspaces[0]));
     let _ = apps.requests();
     assert!(reactor.arrange_test(true, None));
-    let hidden_target = reactor.transaction_manager.get_target_frame(wsid).unwrap();
-    let txid = reactor.transaction_manager.get_last_sent_txid(wsid);
+    let hidden_target = reactor.tx_store.target(&wsid).unwrap();
+    let txid = reactor.tx_store.last_txid(&wsid);
     let _ = apps.requests();
     let clamped = CGRect::new(
         CGPoint::new(hidden_target.origin.x, hidden_target.origin.y - 41.),
@@ -4237,8 +4232,8 @@ fn topology_change_clears_stale_pending_hide_target_before_next_workspace_layout
         .map(|(_, frame)| frame)
         .expect("inactive-workspace window should still be laid out to a hidden position");
 
-    let txid = reactor.transaction_manager.generate_next_txid(wsid);
-    reactor.transaction_manager.store_txid(wsid, txid, hidden_target);
+    let txid = reactor.tx_store.begin(wsid, None);
+    reactor.tx_store.insert(wsid, txid, hidden_target);
 
     assert!(!reactor.arrange_test(true, None));
     assert!(
@@ -6171,7 +6166,7 @@ fn changed_layout_retargets_window_already_at_new_position_during_animation() {
     });
     manager.handle_message(rx.commands.try_recv().unwrap());
     let wsid = reactor.state.windows.window(right).unwrap().info.sys_id.unwrap();
-    let txid = reactor.transaction_manager.get_last_sent_txid(wsid);
+    let txid = reactor.tx_store.last_txid(&wsid);
     // An intermediate AX frame can coincide with the next layout's target.
     reactor.handle_event(Event::WindowFrameChanged(
         right,
@@ -9115,8 +9110,8 @@ fn overview_cross_display_drop_arranges_only_source_and_destination_spaces() {
     assert_eq!(&reactor.layout_calculations[before..], &[source, destination]);
     assert!(
         reactor
-            .transaction_manager
-            .get_target_frame(reactor.test_window_server_id(window))
+            .tx_store
+            .target(&reactor.test_window_server_id(window))
             .is_some_and(|frame| frame.origin.x >= 1000.0)
     );
     assert_eq!(
@@ -13614,7 +13609,7 @@ fn native_fullscreen_restores_middle_window_exactly_across_notification_ordering
                 reactor.handle_event(Event::WindowFrameChanged(
                     window,
                     CGRect::new(CGPoint::new(0., 1.), CGSize::new(1000., 999.)),
-                    Some(reactor.transaction_manager.get_last_sent_txid(wsid)),
+                    Some(reactor.tx_store.last_txid(&wsid)),
                     Requested(false),
                     Some(if early == 7 {
                         MouseState::Down

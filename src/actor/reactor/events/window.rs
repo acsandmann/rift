@@ -1,7 +1,7 @@
 use objc2_core_foundation::CGRect;
 
 use super::super::*;
-use crate::actor::reactor::transaction_manager::TransactionManager;
+use crate::model::tx_store::WindowTxStore;
 use crate::sys::event::MouseState;
 
 #[derive(Debug)]
@@ -21,7 +21,7 @@ pub struct WindowFrameChangedPayload {
 
 pub fn frame_change_needs_layout(
     state: &mut crate::model::RiftState,
-    transactions: &TransactionManager,
+    transactions: &WindowTxStore,
     wid: WindowId,
     new_frame: CGRect,
     last_seen: Option<TransactionId>,
@@ -32,7 +32,7 @@ pub fn frame_change_needs_layout(
         return false;
     };
     let server = window.info.sys_id;
-    let record = server.and_then(|server| transactions.store.get(&server));
+    let record = server.and_then(|server| transactions.get(&server));
 
     if requested {
         if let (Some(seen), Some(record)) = (last_seen, record)
@@ -42,9 +42,9 @@ pub fn frame_change_needs_layout(
         }
         if let Some(server) = server {
             if let Some(seen) = last_seen {
-                transactions.store.acknowledge(server, seen, new_frame);
+                transactions.acknowledge(server, seen, new_frame);
             } else {
-                transactions.clear_target_for_window(server);
+                transactions.clear_target(&server);
             }
         }
         window.frame_monotonic = new_frame;
@@ -74,7 +74,7 @@ pub fn frame_change_needs_layout(
         }
     }
     if let Some(server) = server {
-        transactions.clear_target_for_window(server);
+        transactions.clear_target(&server);
     }
     true
 }

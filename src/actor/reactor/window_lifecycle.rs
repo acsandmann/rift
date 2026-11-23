@@ -103,7 +103,7 @@ impl Reactor {
         self.drag_manager.forget_window(wid);
         if let Some(wsid) = obsolete_native {
             self.transient_focus.windows.remove(&wsid);
-            self.transaction_manager.remove_for_window(wsid);
+            self.tx_store.remove(&wsid);
         }
     }
 
@@ -119,7 +119,7 @@ impl Reactor {
             && let Some(id) =
                 self.state.windows.record(replacement).and_then(|r| r.window_server_id())
         {
-            self.transaction_manager.clear_target_for_window(id);
+            self.tx_store.clear_target(&id);
         }
         self.layout_manager
             .layout_engine
@@ -207,9 +207,7 @@ impl Reactor {
         }
         let was_admitted = self.state.windows.is_admitted(wid);
         let ax_returned = self.state.windows.validate_ax_identity(wid);
-        let had_target = info
-            .sys_id
-            .is_some_and(|id| self.transaction_manager.get_target_frame(id).is_some());
+        let had_target = info.sys_id.is_some_and(|id| self.tx_store.target(&id).is_some());
         let minimized = info.is_minimized;
         let (new, restored, geometry_changed) =
             if let Some(window) = self.state.windows.window_mut(wid) {

@@ -15,7 +15,6 @@ mod managers;
 mod native_tabs;
 mod query;
 mod replay;
-pub mod transaction_manager;
 mod transient_focus;
 mod utils;
 mod window_lifecycle;
@@ -47,7 +46,6 @@ use serde::{Deserialize, Serialize};
 use serde_with::serde_as;
 use tokio::sync::oneshot;
 use tracing::{debug, instrument, trace, warn};
-use transaction_manager::TransactionId;
 
 use super::input;
 use crate::actor::app::{
@@ -67,7 +65,7 @@ use crate::model::broadcast::{
     BroadcastEvent, BroadcastSender, protocol_window_id, protocol_workspace_id,
 };
 use crate::model::space_activation::{SpaceActivationConfig, SpaceActivationPolicy};
-use crate::model::tx_store::WindowTxStore;
+use crate::model::tx_store::{TransactionId, WindowTxStore};
 use crate::model::window_store::NativeFullscreenTransition;
 use crate::sys::event::MouseState;
 use crate::sys::executor::Executor;
@@ -411,7 +409,7 @@ pub struct Reactor {
     recording_manager: managers::RecordingManager,
     communication_manager: managers::CommunicationManager,
     notification_manager: managers::NotificationManager,
-    transaction_manager: transaction_manager::TransactionManager,
+    tx_store: WindowTxStore,
     menu_manager: managers::MenuManager,
     mission_control_manager: managers::MissionControlManager,
     window_inventory_manager: managers::WindowInventoryManager,
@@ -529,7 +527,7 @@ impl Reactor {
                 last_layout_modes_by_space: HashMap::default(),
                 _window_notify_tx: window_notify_tx,
             },
-            transaction_manager: transaction_manager::TransactionManager::new(window_tx_store),
+            tx_store: window_tx_store,
             menu_manager: managers::MenuManager {
                 menu_state: MenuState::Closed,
                 menu_tx: None,
@@ -995,7 +993,7 @@ impl Reactor {
                 continue;
             }
             if let Some(wsid) = window.info.sys_id {
-                self.transaction_manager.clear_target_for_window(wsid);
+                self.tx_store.clear_target(&wsid);
             }
         }
     }
@@ -1031,7 +1029,7 @@ impl Reactor {
         if let Some(window) = self.state.windows.window_mut(window) {
             window.frame_monotonic = frame;
             if let Some(server) = window.info.sys_id {
-                self.transaction_manager.invalidate_for_window(server);
+                self.tx_store.begin(server, None);
             }
         }
     }
@@ -1827,7 +1825,7 @@ impl Reactor {
             }
             Event::WindowFrameWriteFailed(wid, txid) => {
                 if let Some(server) = self.state.windows.window(wid).and_then(|w| w.info.sys_id) {
-                    self.transaction_manager.store.fail(server, txid);
+                    self.tx_store.fail(server, txid);
                 }
                 // Retry on the next arrange pass. A busy app must not drive its own retry loop.
                 return Ok(());
@@ -1844,16 +1842,16 @@ impl Reactor {
                     && mouse_state != Some(MouseState::Down)
                     && let Some(window) = self.state.windows.window(wid)
                     && let Some(wsid) = window.info.sys_id
-                    && let Some(write) = self.transaction_manager.store.get(&wsid)
+                    && let Some(write) = self.tx_store.get(&wsid)
                     && last_seen == Some(write.txid)
                     && write.target().is_some_and(|target| !new_frame.same_as(target))
                     && self.hidden_assigned_space_for_window_id(wid).is_some()
                 {
-                    self.transaction_manager.clear_target_for_window(wsid);
+                    self.tx_store.clear_target(&wsid);
                 }
                 let needs_layout = window_workflow::frame_change_needs_layout(
                     &mut self.state,
-                    &self.transaction_manager,
+                    &self.tx_store,
                     wid,
                     new_frame,
                     last_seen,
@@ -2780,7 +2778,7 @@ impl Reactor {
         let window_server_id =
             self.state.windows.window(window).and_then(|window| window.info.sys_id);
         let transaction = if let Some(window_server_id) = window_server_id {
-            self.transaction_manager.begin(window_server_id, frame)
+            self.tx_store.begin(window_server_id, Some(frame))
         } else {
             TransactionId::default()
         };
@@ -4533,7 +4531,7 @@ impl Reactor {
         {
             return Some(space);
         }
-        let target_frame = self.transaction_manager.get_target_frame(wsid)?;
+        let target_frame = self.tx_store.target(&wsid)?;
         let assigned_space = self.assigned_space_for_window_id(wid)?;
         let target_space = self
             .hidden_assigned_space_for_frame(Some(wsid), &target_frame)
@@ -4947,7 +4945,7 @@ impl Reactor {
         let current = window
             .info
             .sys_id
-            .and_then(|id| self.transaction_manager.get_target_frame(id))
+            .and_then(|id| self.tx_store.target(&id))
             .unwrap_or(window.frame_monotonic);
         if frame.same_as(current) {
             return;

@@ -21,12 +21,11 @@ use tokio_util::sync::CancellationToken;
 use tracing::{Instrument, Span, debug, info, instrument, trace, warn};
 
 use crate::actor;
-use crate::actor::reactor::transaction_manager::TransactionId;
 use crate::actor::reactor::{self, Event, Requested};
 use crate::actor::wm_controller::{self, WmEvent};
 use crate::common::collections::{HashMap, HashSet};
 use crate::model::hidden_window_placement::ScrollingDisplayBounds;
-use crate::model::tx_store::WindowTxStore;
+use crate::model::tx_store::{TransactionId, WindowTxStore};
 pub use crate::sys::app::{AppInfo, WindowInfo, pid_t};
 use crate::sys::app::{NSRunningApplicationExt, NativeWindowIdentity};
 use crate::sys::axuielement::{AX_STANDARD_WINDOW_SUBROLE, AXUIElement, Error as AxError};

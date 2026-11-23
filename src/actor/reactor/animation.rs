@@ -543,7 +543,7 @@ impl Reactor {
             if let Some(window) = self.state.windows.window_mut(wid) {
                 window.frame_monotonic = frame;
                 if let Some(wsid) = window.info.sys_id {
-                    self.transaction_manager.clear_target_for_window(wsid);
+                    self.tx_store.clear_target(&wsid);
                 }
             }
         }
@@ -695,7 +695,7 @@ impl Reactor {
                 let window = self.state.windows.window(wid)?;
                 if semantic
                     && let Some(wsid) = window.info.sys_id
-                    && let Some(write) = self.transaction_manager.store.get(&wsid)
+                    && let Some(write) = self.tx_store.get(&wsid)
                 {
                     if write.needs_full_retry() {
                         return None;
@@ -751,7 +751,7 @@ impl Reactor {
             display,
             animate,
             scale,
-            store: self.transaction_manager.store.clone(),
+            store: self.tx_store.clone(),
             interval: Duration::from_secs_f64(1.0 / self.config.settings.animation_fps),
             bound,
         };
@@ -1123,9 +1123,8 @@ impl AnimationManager {
             };
             let current_frame = window.frame_monotonic;
             let window_server_id = window.info.sys_id;
-            let transactions = &reactor.transaction_manager;
-            let write =
-                window_server_id.and_then(|id| transactions.store.get(&id)).unwrap_or_default();
+            let transactions = &reactor.tx_store;
+            let write = window_server_id.and_then(|id| transactions.get(&id)).unwrap_or_default();
             if write.covers(target_frame, current_frame) {
                 continue;
             }
@@ -1135,7 +1134,7 @@ impl AnimationManager {
             };
             any_frame_changed = true;
             let txid = window_server_id
-                .map(|wsid| transactions.begin(wsid, target_frame))
+                .map(|wsid| transactions.begin(wsid, Some(target_frame)))
                 .unwrap_or_default();
             let is_active = reactor.state.windows.workspace_for_window(wid) == Some(active_ws);
 
@@ -1227,11 +1226,8 @@ impl AnimationManager {
             };
             let target_frame = target_frame.round();
             let current_frame = window.frame_monotonic;
-            let write = window
-                .info
-                .sys_id
-                .and_then(|id| reactor.transaction_manager.store.get(&id))
-                .unwrap_or_default();
+            let write =
+                window.info.sys_id.and_then(|id| reactor.tx_store.get(&id)).unwrap_or_default();
             if !force_frames && write.covers(target_frame, current_frame) {
                 trace!(?wid, ?target_frame, "Skipping redundant instant layout request");
                 continue;
@@ -1267,13 +1263,13 @@ impl AnimationManager {
 
             let handle = app_state.handle.with_scrolling_bounds(bounds.filter(|_| constrained));
 
-            let txid = reactor.transaction_manager.store.next_id();
+            let txid = reactor.tx_store.next_id();
             for wid in frames.iter().map(|(wid, _)| wid).chain(positions.iter().map(|(wid, _)| wid))
             {
                 if let Some(window) = reactor.state.windows.window(*wid)
                     && let Some(wsid) = window.info.sys_id
                 {
-                    reactor.transaction_manager.store_txid(wsid, txid, window.frame_monotonic);
+                    reactor.tx_store.insert(wsid, txid, window.frame_monotonic);
                 }
             }
             let requests = [

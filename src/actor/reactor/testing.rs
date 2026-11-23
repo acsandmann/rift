@@ -490,7 +490,6 @@ pub struct Apps {
 #[derive(Default, PartialEq, Debug, Clone)]
 pub struct TestWindowState {
     pub last_seen_txid: TransactionId,
-    pub last_sent_txid: TransactionId,
     pub animating: bool,
     pub frame: CGRect,
 }
