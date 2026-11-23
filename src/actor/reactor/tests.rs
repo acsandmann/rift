@@ -13776,3 +13776,92 @@ fn presentation_inventory_tracks_visibility_without_forgetting_layout() {
         assert!(!reactor.state.windows.contains_window(wid));
     }
 }
+
+/// Two tiled windows of one app on a 1000x800 display, settled.
+fn two_settled_tiled_windows() -> (Apps, Reactor, WindowId, WindowId) {
+    let (mut apps, mut reactor) = test_context();
+    let screen = CGRect::new(CGPoint::ZERO, CGSize::new(1000., 800.));
+    apps.make_app_and_settle_on_screen(&mut reactor, screen, SpaceId::new(1), 1, make_windows(2));
+    (apps, reactor, WindowId::new(1, 1), WindowId::new(1, 2))
+}
+
+fn frames_written(requests: &[Request]) -> Vec<(WindowId, CGRect)> {
+    requests
+        .iter()
+        .flat_map(|request| match request {
+            Request::SetWindowFrames(frames, ..) => frames.clone(),
+            _ => Vec::new(),
+        })
+        .collect()
+}
+
+#[test]
+fn a_size_the_app_refused_is_not_asked_for_again_by_later_layout_passes() {
+    let (mut apps, mut reactor, stubborn, _) = two_settled_tiled_windows();
+    // Another window arrives; the stubborn one is asked for a narrower frame and keeps its width.
+    reactor.handle_events(apps.make_app(2, make_windows(1)));
+    let requests = apps.requests();
+    let (_, wanted) = *frames_written(&requests)
+        .iter()
+        .find(|(wid, _)| *wid == stubborn)
+        .expect("the stubborn window is written");
+    let mut events = apps.simulate_events_for_requests(requests);
+    let got = CGRect::new(
+        wanted.origin,
+        CGSize::new(wanted.size.width + 120., wanted.size.height),
+    );
+    apps.windows.get_mut(&stubborn).unwrap().frame = got;
+    for event in &mut events {
+        if let Event::WindowFrameChanged(wid, frame, _, Requested(true), _) = event
+            && *wid == stubborn
+        {
+            *frame = got;
+        }
+    }
+    reactor.handle_events(events);
+    apps.simulate_until_quiet(&mut reactor);
+    // The app reports where it put the window, unprompted, as WindowServer does.
+    let seen = apps.windows[&stubborn].last_seen_txid;
+    reactor.handle_event(Event::WindowFrameChanged(
+        stubborn,
+        got,
+        Some(seen),
+        Requested(false),
+        Some(MouseState::Up),
+    ));
+
+    for _ in 0..3 {
+        let _ = reactor.arrange_test(false, None);
+        let written = frames_written(&apps.requests());
+        assert!(
+            written.iter().all(|(wid, _)| *wid != stubborn),
+            "a refused frame was asked again: {written:?}"
+        );
+    }
+}
+
+#[test]
+fn grabbing_a_window_while_rift_is_moving_it_starts_a_drag_at_once() {
+    let (mut apps, mut reactor, grabbed, _) = two_settled_tiled_windows();
+    // Rift writes new frames that the app has not applied yet.
+    reactor.handle_events(apps.make_app(2, make_windows(1)));
+    let unanswered = apps.requests();
+    assert!(frames_written(&unanswered).iter().any(|(wid, _)| *wid == grabbed));
+
+    let start = apps.windows[&grabbed].frame;
+    let moved = CGRect::new(
+        CGPoint::new(start.origin.x + 60., start.origin.y + 40.),
+        start.size,
+    );
+    reactor.handle_event(Event::WindowFrameChanged(
+        grabbed,
+        moved,
+        Some(apps.windows[&grabbed].last_seen_txid),
+        Requested(false),
+        Some(MouseState::Down),
+    ));
+    assert!(
+        reactor.is_in_drag(),
+        "the first move of the grab was taken for Rift's echo"
+    );
+}
