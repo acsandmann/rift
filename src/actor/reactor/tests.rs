@@ -2922,6 +2922,35 @@ fn new_window_under_a_held_pointer_waits_for_a_frame_change_before_dragging() {
     assert!(!reactor.is_in_drag());
 }
 
+/// #689: a browser tab dragged out of its window becomes a new window while the button is
+/// still held. Rift leaves it under the cursor and tiles it at the release.
+#[test]
+fn a_window_created_while_the_button_is_held_is_tiled_only_at_the_release() {
+    let (mut apps, mut reactor) = test_context();
+    let screen = CGRect::new(CGPoint::ZERO, CGSize::new(1000., 1000.));
+    let space = SpaceId::new(1);
+    apps.make_app_and_settle_on_screen(&mut reactor, screen, space, 1, make_windows(1));
+    apps.requests();
+    let wid = WindowId::new(1, 2);
+    let frame = CGRect::new(CGPoint::new(200., 200.), CGSize::new(500., 500.));
+    crate::sys::event::TEST_MOUSE_STATE.with(|state| state.set(Some(MouseState::Down)));
+    let info = make_window_info(frame, None, "Detached tab", None);
+    reactor.handle_event(Event::WindowCreated(wid, info, None, Some(MouseState::Down)));
+    let held = frame_writes(&mut apps);
+    assert!(
+        held.iter().all(|(window, _)| *window != wid),
+        "the new window moved while the button was held: {held:?}"
+    );
+
+    crate::sys::event::TEST_MOUSE_STATE.with(|state| state.set(Some(MouseState::Up)));
+    reactor.handle_event(Event::MouseUp(crate::actor::drag::MouseButton::Left));
+    let released = frame_writes(&mut apps);
+    assert!(
+        released.iter().any(|(window, _)| *window == wid),
+        "the release did not tile the new window: {released:?}"
+    );
+}
+
 #[test]
 fn unrelated_native_resize_cannot_steal_a_drag_or_revive_its_transfer() {
     let (mut reactor, wid, wsid, space1, space2, frame, screen2) =
