@@ -410,6 +410,28 @@ impl MasterStackLayoutSystem {
         };
         let _ = self.tiles.swap_windows(layout, master_wid, stack_wid);
     }
+
+    pub fn rotate_master_stack(&mut self, layout: LayoutId, backwards: bool) -> bool {
+        let (_, master, stack) = self.region_roots(layout);
+        let mut windows: Vec<_> = self
+            .tiles
+            .windows_from(master, Some(master), true)
+            .chain(self.tiles.windows_from(stack, Some(stack), true))
+            .filter(|&window| self.tiles.window_participates(window))
+            .collect();
+        if windows.len() < 2 {
+            return false;
+        }
+        if backwards {
+            windows.reverse();
+        }
+        let (wrap, rest) = windows.split_first().unwrap();
+        // Carry the wrapping window across the slots without moving their containers.
+        for &window in rest {
+            self.tiles.swap_windows(layout, *wrap, window);
+        }
+        true
+    }
 }
 
 impl LayoutSystem for MasterStackLayoutSystem {

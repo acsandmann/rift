@@ -2283,6 +2283,8 @@ impl LayoutEngine {
                 | LayoutCommand::SetWorkspaceLayout { .. }
                 | LayoutCommand::SnapStrip
                 | LayoutCommand::CenterSelection
+                | LayoutCommand::RotateMasterStackNext
+                | LayoutCommand::RotateMasterStackPrev
         ) && let Some(workspace) =
             space.and_then(|space| self.workspaces.active_workspace(space))
         {
@@ -2723,6 +2725,22 @@ impl LayoutEngine {
                     }
                 }
                 EventResponse::default()
+            }
+            LayoutCommand::RotateMasterStackNext | LayoutCommand::RotateMasterStackPrev => {
+                let backwards = matches!(command, LayoutCommand::RotateMasterStackPrev);
+                let changed = match &mut self.workspaces[workspace_id].layout_system {
+                    LayoutSystemKind::MasterStack(system) => {
+                        system.rotate_master_stack(layout, backwards)
+                    }
+                    _ => false,
+                };
+                if changed {
+                    self.forget_native_layout_for_workspace(workspace_id);
+                }
+                EventResponse {
+                    changed,
+                    ..EventResponse::default()
+                }
             }
             LayoutCommand::ScrollStrip { .. }
             | LayoutCommand::SnapStrip
