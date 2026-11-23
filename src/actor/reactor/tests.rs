@@ -13865,3 +13865,133 @@ fn grabbing_a_window_while_rift_is_moving_it_starts_a_drag_at_once() {
         "the first move of the grab was taken for Rift's echo"
     );
 }
+
+#[test]
+fn readers_see_the_reported_frame_while_a_write_is_in_flight() {
+    let (mut apps, mut reactor, moved, _) = two_settled_tiled_windows();
+    let wsid = reactor.test_window_server_id(moved);
+    let reported = apps.windows[&moved].frame;
+    reactor.handle_events(apps.make_app(2, make_windows(1)));
+    let requests = apps.requests();
+    let (_, written) = *frames_written(&requests)
+        .iter()
+        .find(|(wid, _)| *wid == moved)
+        .expect("the window is written");
+    assert!(!written.same_as(reported));
+
+    assert!(reactor.state.windows.window(moved).unwrap().frame_monotonic.same_as(reported));
+    assert!(reactor.query_window_info(moved).unwrap().info.frame.same_as(reported));
+    assert_eq!(reactor.tx_store.target(&wsid), Some(written));
+
+    reactor.handle_events(apps.simulate_events_for_requests(requests));
+    assert!(reactor.state.windows.window(moved).unwrap().frame_monotonic.same_as(written));
+    assert_eq!(reactor.tx_store.target(&wsid), None);
+}
+
+#[test]
+fn a_failed_write_leaves_the_reported_frame_and_the_next_pass_writes_once() {
+    let (mut apps, mut reactor) = test_context();
+    let screen = CGRect::new(CGPoint::ZERO, CGSize::new(1000., 1000.));
+    let space = SpaceId::new(1);
+    let wid = WindowId::new(1, 1);
+    apps.make_app_and_settle_on_screen(&mut reactor, screen, space, wid.pid, make_windows(1));
+    let wsid = reactor.test_window_server_id(wid);
+    let reported = reactor.state.windows.window(wid).unwrap().frame_monotonic;
+    let target = CGRect::new(CGPoint::new(20., 20.), CGSize::new(620., 500.));
+    let arrange = |reactor: &mut Reactor| {
+        let bounds = super::animation::scrolling_bounds(reactor, space);
+        super::animation::AnimationManager::apply_layout(
+            reactor,
+            space,
+            &[(wid, target)],
+            Presentation::Instant,
+            None,
+            bounds,
+        )
+    };
+    assert!(arrange(&mut reactor));
+    let txid = reactor.tx_store.last_txid(&wsid);
+    apps.requests();
+
+    reactor.handle_event(Event::WindowFrameWriteFailed(wid, txid));
+    assert!(apps.requests().is_empty(), "a failure is not retried on its own");
+    assert_eq!(reactor.tx_store.target(&wsid), None);
+    assert!(reactor.state.windows.window(wid).unwrap().frame_monotonic.same_as(reported));
+
+    // The ordinary comparison of reported and wanted frames writes again.
+    assert!(arrange(&mut reactor));
+    assert_eq!(frames_written(&apps.requests()), vec![(wid, target)]);
+    assert!(
+        !arrange(&mut reactor),
+        "the write in flight covers the next pass"
+    );
+    assert!(apps.requests().is_empty());
+}
+
+#[test]
+fn a_refused_write_is_not_requested_again() {
+    let (mut apps, mut reactor) = test_context();
+    let screen = CGRect::new(CGPoint::ZERO, CGSize::new(1000., 1000.));
+    let space = SpaceId::new(1);
+    let wid = WindowId::new(1, 1);
+    apps.make_app_and_settle_on_screen(&mut reactor, screen, space, wid.pid, make_windows(1));
+    let wsid = reactor.test_window_server_id(wid);
+    let target = CGRect::new(CGPoint::new(20., 20.), CGSize::new(620., 500.));
+    let refused = CGRect::new(target.origin, CGSize::new(700., 500.));
+    let arrange = |reactor: &mut Reactor| {
+        let bounds = super::animation::scrolling_bounds(reactor, space);
+        super::animation::AnimationManager::apply_layout(
+            reactor,
+            space,
+            &[(wid, target)],
+            Presentation::Instant,
+            None,
+            bounds,
+        )
+    };
+    assert!(arrange(&mut reactor));
+    let txid = reactor.tx_store.last_txid(&wsid);
+    apps.requests();
+    reactor.handle_event(Event::WindowFrameChanged(
+        wid,
+        refused,
+        Some(txid),
+        Requested(true),
+        Some(MouseState::Up),
+    ));
+    assert!(reactor.state.windows.window(wid).unwrap().frame_monotonic.same_as(refused));
+    for _ in 0..3 {
+        assert!(!arrange(&mut reactor));
+        assert!(apps.requests().is_empty(), "a refused frame was asked again");
+    }
+}
+
+#[test]
+fn a_drag_right_after_rift_moved_a_window_starts_from_the_reported_frame() {
+    let (mut apps, mut reactor, grabbed, _) = two_settled_tiled_windows();
+    let reported = apps.windows[&grabbed].frame;
+    reactor.handle_events(apps.make_app(2, make_windows(1)));
+    let (_, written) = *frames_written(&apps.requests())
+        .iter()
+        .find(|(wid, _)| *wid == grabbed)
+        .expect("the window is written");
+    assert!(!written.same_as(reported));
+
+    let moved = CGRect::new(
+        CGPoint::new(reported.origin.x + 60., reported.origin.y + 40.),
+        reported.size,
+    );
+    reactor.handle_event(Event::WindowFrameChanged(
+        grabbed,
+        moved,
+        Some(apps.windows[&grabbed].last_seen_txid),
+        Requested(false),
+        Some(MouseState::Down),
+    ));
+    let source = reactor.drag_manager.actor.source().expect("a drag starts");
+    assert!(
+        source.origin_frame.same_as(reported),
+        "drag starts at {:?}, not where the window is ({reported:?})",
+        source.origin_frame
+    );
+}
