@@ -13900,7 +13900,8 @@ fn readers_see_the_reported_frame_while_a_write_is_in_flight() {
     assert!(!written.same_as(reported));
 
     assert!(reactor.state.windows.window(moved).unwrap().actual().rect().same_as(reported));
-    assert!(reactor.query_window_info(moved).unwrap().info.frame.same_as(reported));
+    // Queries keep reporting where rift placed the window, as on main.
+    assert!(reactor.query_window_info(moved).unwrap().info.frame.same_as(written));
     assert_eq!(reactor.tx_store.target(&wsid), Some(written));
 
     reactor.handle_events(apps.simulate_events_for_requests(requests));

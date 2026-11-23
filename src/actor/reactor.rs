@@ -3073,7 +3073,9 @@ impl Reactor {
             app_name,
             info: WindowInfo {
                 title: window_state.info.title.clone(),
-                frame: window_state.actual().rect(),
+                // Queries report where rift has placed the window (its planned frame), as
+                // before actual and planned frames were held apart.
+                frame: self.tx_store.planned(window_state).rect(),
                 bundle_id,
                 ..window_state.info.clone()
             },
