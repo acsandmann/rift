@@ -204,27 +204,34 @@ impl PersistedLayout {
         }
         for workspace in self.workspaces.catalog().collect::<Vec<_>>() {
             let entry = &mut self.workspaces[workspace];
-            let members: Vec<_> = (entry.layout_state.all_layouts())
+            let mut members: Vec<_> = (entry.layout_state.all_layouts())
                 .flat_map(|layout| entry.layout_system.windows(layout, WindowQuery::All))
                 .collect();
-            for window in members {
-                let keep = match pending.entry(window) {
-                    Entry::Occupied(saved) => {
-                        saved.get().workspace == workspace && saved.get().frame.is_none()
+            members.retain(|&window| {
+                match pending.entry(window) {
+                    // A window already retained in this workspace shares participation across
+                    // all its saved layout configurations.
+                    Entry::Occupied(saved)
+                        if saved.get().workspace == workspace && saved.get().frame.is_none() =>
+                    {
+                        return false;
                     }
-                    Entry::Vacant(slot) => windows.remove(&window).is_some_and(|fingerprint| {
-                        slot.insert(SavedWindow {
-                            fingerprint,
-                            workspace,
-                            frame: None,
-                        });
-                        true
-                    }),
-                };
-                if !keep {
-                    entry.layout_system.update(WindowChange::Remove(window));
+                    Entry::Vacant(slot) => {
+                        if let Some(fingerprint) = windows.remove(&window) {
+                            slot.insert(SavedWindow {
+                                fingerprint,
+                                workspace,
+                                frame: None,
+                            });
+                            return true;
+                        }
+                    }
+                    Entry::Occupied(_) => {}
                 }
-            }
+                entry.layout_system.update(WindowChange::Remove(window));
+                false
+            });
+            entry.layout_system.initialize_dormant_windows(members);
             if entry
                 .last_focused()
                 .is_some_and(|window| pending.get(&window).is_none_or(|s| s.workspace != workspace))

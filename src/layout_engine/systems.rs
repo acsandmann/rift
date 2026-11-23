@@ -536,6 +536,17 @@ pub enum LayoutSystemKind {
 }
 
 impl LayoutSystemKind {
+    /// Seed a freshly loaded layout's participation without editing its saved viewport.
+    pub(crate) fn initialize_dormant_windows(&mut self, windows: Vec<WindowId>) {
+        if let Self::Scrolling(system) = self {
+            system.initialize_dormant_windows(windows);
+        } else {
+            for window in windows {
+                self.set_window_participation(window, false);
+            }
+        }
+    }
+
     pub(crate) fn preview_clone(&self) -> Option<Self> {
         match self {
             Self::Traditional(system) => Some(Self::Traditional(system.clone())),

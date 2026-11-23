@@ -147,9 +147,29 @@ impl Config {
         // Attempt to deserialize. If it fails, and the error indicates an unknown enum
         // variant, attempt to provide a helpful suggestion.
         match parse_config_file(buf) {
-            Ok(c) => {
+            Ok(mut c) => {
                 if c.binding_modes.contains_key("default") {
                     bail!("`default` is reserved and cannot be defined in [binding_modes]");
+                }
+
+                let overview = &mut c.settings.ui.mission_control;
+                if let Some(keys) = &overview.keys {
+                    let mut assigned = HashSet::default();
+                    let mut normalized = std::collections::BTreeMap::new();
+                    for (key, action) in keys {
+                        let Some((spec, hotkey)) =
+                            Self::binding_hotkey(key, &c.modifier_combinations)
+                        else {
+                            bail!("Could not parse Overview shortcut `{key}`");
+                        };
+                        for modifiers in hotkey.modifiers.expand_to_specific() {
+                            if !assigned.insert(Hotkey::new(modifiers, hotkey.key_code)) {
+                                bail!("Shortcut `{key}` conflicts with another Overview binding");
+                            }
+                        }
+                        normalized.insert(spec, *action);
+                    }
+                    overview.keys = Some(normalized);
                 }
 
                 let mut binding_sets: Vec<_> = c.binding_modes.into_iter().collect();

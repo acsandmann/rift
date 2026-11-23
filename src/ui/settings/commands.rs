@@ -72,7 +72,7 @@ fn key_glyph(key: &str) -> &str {
     }
 }
 /// A binding key as the recorder shows it, such as ⌃⌥←.
-fn shortcut(hotkey: &Hotkey) -> KeyShortcut {
+pub(super) fn shortcut(hotkey: &Hotkey) -> KeyShortcut {
     KeyShortcut {
         modifiers: from_rift_modifiers(hotkey.modifiers),
         key: Key {
@@ -81,7 +81,7 @@ fn shortcut(hotkey: &Hotkey) -> KeyShortcut {
                     crate::sys::hotkey::cg_keycode_to_keycode(*code) == Some(hotkey.key_code)
                 })
                 .unwrap_or(0),
-            display: key_glyph(&hotkey.key_code.to_string()).into(),
+            display: key_glyph(&crate::sys::hotkey::layout_key_name(hotkey.key_code)).into(),
         },
     }
 }
@@ -126,6 +126,29 @@ fn modifier_flags() -> [(Modifiers, crate::sys::hotkey::Modifiers); 4] {
     ]
 }
 
+pub(super) fn recording_guard(
+    model: Weak<Model>,
+    error: Weak<ValidationMessage>,
+) -> impl FnMut(bool) -> Result<(), String> + 'static {
+    move |recording| {
+        let Some(model) = model.upgrade() else {
+            return Err("Settings has closed".into());
+        };
+        if recording && let Some(mtm) = objc2::MainThreadMarker::new() {
+            crate::sys::hotkey::refresh_virtual_keymap(mtm);
+        }
+        let result = model
+            .env
+            .shortcut_capture
+            .borrow()
+            .as_ref()
+            .map_or(Ok(()), |capture| capture(recording));
+        if recording && result.is_err() {
+            report(&error, &result);
+        }
+        result
+    }
+}
 pub(super) fn recorded_key(key: &KeyShortcut) -> Option<String> {
     let code = crate::sys::hotkey::cg_keycode_to_keycode(key.key.code)?;
     let mut modifiers = Vec::new();
@@ -134,7 +157,7 @@ pub(super) fn recorded_key(key: &KeyShortcut) -> Option<String> {
             modifiers.push(name.to_string());
         }
     }
-    modifiers.push(code.to_string());
+    modifiers.push(crate::sys::hotkey::layout_key_name(code));
     Some(modifiers.join(" + "))
 }
 
@@ -268,28 +291,6 @@ impl Shortcuts {
                 done(result.is_ok());
             }),
         );
-    }
-
-    fn recording_guard(
-        &self,
-        error: Weak<ValidationMessage>,
-    ) -> impl FnMut(bool) -> Result<(), String> + 'static {
-        let model = self.model.clone();
-        move |recording| {
-            let Some(model) = model.upgrade() else {
-                return Err("Settings has closed".into());
-            };
-            let result = model
-                .env
-                .shortcut_capture
-                .borrow()
-                .as_ref()
-                .map_or(Ok(()), |capture| capture(recording));
-            if recording && result.is_err() {
-                report(&error, &result);
-            }
-            result
-        }
     }
 
     fn close_inspector(&self) {
@@ -501,7 +502,7 @@ impl Shortcuts {
         };
         let (page, id) = (Rc::downgrade(self), id.clone());
         let recorder = KeyRecorder::new(&self.ui)
-            .capture(self.recording_guard(error.clone()))
+            .capture(recording_guard(self.model.clone(), error.clone()))
             .on_cancel(move || {
                 if let Some(panel) = cancel_panel.upgrade() {
                     panel.clear();
@@ -630,11 +631,12 @@ impl Shortcuts {
         );
         recorder.accessibility_label(&format!("Shortcut for {title}"));
         let page = Rc::downgrade(self);
-        let another = Button::new(&ui, "").symbol("plus").borderless().on_click(move || {
-            if let Some(page) = page.upgrade() {
-                page.open_editor(draft.borrow().clone());
-            }
-        });
+        let another =
+            Button::new(&ui, "").symbol("plus.circle.fill").borderless().on_click(move || {
+                if let Some(page) = page.upgrade() {
+                    page.open_editor(draft.borrow().clone());
+                }
+            });
         another.accessibility_label(&format!("Add another {action_name} shortcut"));
         another.ns_view().setToolTip(Some(&objc2_foundation::NSString::from_str(
             "Add another shortcut for this action",

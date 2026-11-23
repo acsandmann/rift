@@ -19,6 +19,7 @@ pub enum Event {
         workspaces: Vec<crate::model::server::RuntimeWorkspaceData>,
     },
     PumpPreviews,
+    DesktopBackgroundReady(u32),
     ShowAll,
     Dismiss,
     RefreshCurrentWorkspace,
@@ -42,6 +43,8 @@ pub enum Input {
     Down,
     Activate,
     ZoomStep(i8),
+    FitWorkspace,
+    FitAllWorkspaces,
     Cycle(bool),
     WindowSteps(i64),
     WorkspaceSteps(i64),
@@ -107,14 +110,6 @@ impl Input {
     }
 
     pub(crate) fn from_keycode(keycode: u16, flags: CGEventFlags) -> Option<Self> {
-        if !flags.intersects(CGEventFlags::MaskControl | CGEventFlags::MaskAlternate) {
-            match keycode {
-                24 => return Some(Self::ZoomStep(1)),
-                27 => return Some(Self::ZoomStep(-1)),
-                29 => return Some(Self::ZoomStep(0)),
-                _ => {}
-            }
-        }
         if flags.intersects(
             CGEventFlags::MaskCommand | CGEventFlags::MaskControl | CGEventFlags::MaskAlternate,
         ) {
@@ -232,7 +227,7 @@ pub struct MissionControlActor {
 
 impl MissionControlActor {
     pub fn new(
-        settings: MissionControlSettings,
+        mut settings: MissionControlSettings,
         shared: bool,
         rx: Receiver,
         tx: Sender,
@@ -244,13 +239,16 @@ impl MissionControlActor {
         if settings.enabled && settings.window_previews && CGPreflightScreenCaptureAccess() {
             let _ = cgs::compositor::preview::PreviewCompositor::prepare();
         }
+        settings.keys = None;
+        let mut backgrounds = DesktopBackgrounds::default();
+        backgrounds.sync(mtm, &tx);
         Self {
             settings,
             shared,
             rx,
             tx,
             cache: None,
-            backgrounds: DesktopBackgrounds::new(mtm),
+            backgrounds,
             reactor,
             session: None,
             generation: 0,
@@ -320,6 +318,7 @@ impl MissionControlActor {
                 }
                 self.refresh_pending = false;
                 if let Some(session) = &mut self.session {
+                    self.backgrounds.sync(self.mtm, &self.tx);
                     session.refresh(&displays, &workspaces, moved, &mut self.backgrounds);
                     self.stack_line_tx
                         .send(super::stack_line::Event::OverviewBounds(session.input_bounds()));
@@ -340,6 +339,13 @@ impl MissionControlActor {
                         // prepared and verified underneath the cover.
                         self.close();
                     }
+                }
+            }
+            Event::DesktopBackgroundReady(display) => {
+                if let Some(image) = self.backgrounds.image(display)
+                    && let Some(session) = &self.session
+                {
+                    session.set_desktop_background(display, image);
                 }
             }
             Event::ActivationTarget(target) => {
@@ -378,6 +384,7 @@ impl MissionControlActor {
                     if self.settings.window_previews {
                         let _ = cgs::compositor::preview::PreviewCompositor::prepare();
                     }
+                    self.backgrounds.sync(self.mtm, &self.tx);
                     self.session = OverviewSession::new(
                         &self.reactor,
                         self.mtm,
@@ -405,11 +412,12 @@ impl MissionControlActor {
             Event::RefreshCurrentWorkspace => {
                 self.request_refresh(None);
             }
-            Event::Configure(settings, shared) => {
+            Event::Configure(mut settings, shared) => {
                 self.close();
                 if !settings.enabled || !settings.window_previews {
                     self.cache = None;
                 }
+                settings.keys = None;
                 self.settings = settings;
                 self.shared = shared;
             }

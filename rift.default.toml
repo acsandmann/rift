@@ -212,6 +212,8 @@ activate_on_hotkey_release = false
 enabled = false
 # Include empty workspaces as navigation and drag destinations.
 show_empty_workspaces = true
+# Hide the camera and navigation controls in the corner of Overview.
+# hide_toolbar = true
 
 [settings.ui.menu_bar]
 # enable menu bar workspace indicators
@@ -493,6 +495,8 @@ comb1 = "Alt + Shift"
 # the following commands *only* work when the master stack layout is active
 # - adjust_master_ratio = 0.05 / adjust_master_count = { delta = 1 }
 # - promote_to_master / swap_master_stack
+# - rotate_master_stack_next shifts windows one slot toward the first master slot
+# - rotate_master_stack_prev shifts windows one slot in the opposite direction
 
 # the following commands *only* work when the scrolling layout is active
 # - scroll_strip = { delta = 0.5 }

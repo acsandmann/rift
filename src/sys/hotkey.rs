@@ -820,17 +820,17 @@ impl fmt::Display for Hotkey {
 }
 
 fn parse_mods_and_optional_key(s: &str) -> Result<(Modifiers, Option<KeyCode>), anyhow::Error> {
-    let parts: Vec<&str> = s.split('+').map(|p| p.trim()).filter(|p| !p.is_empty()).collect();
-
     let mut mods = Modifiers::empty();
     let mut key_opt: Option<KeyCode> = None;
 
-    for part in parts {
+    for part in s.split('+').map(str::trim) {
         if mods.insert_from_token(part) {
             continue;
         }
         let code = KeyCode::from_str(part)?;
-        key_opt = Some(code);
+        if key_opt.replace(code).is_some() {
+            return Err(anyhow!("Multiple keys specified in hotkey: {}", s));
+        }
     }
 
     Ok((mods, key_opt))
@@ -1320,6 +1320,21 @@ pub fn keycode_from_char(ch: &str) -> Option<KeyCode> {
         .get(&ch.to_lowercase())
         .copied()
         .or_else(|| fallback_keycode_from_char(ch))
+}
+
+/// The unmodified character of a recorded key, using the same layout as the parser.
+pub fn layout_key_name(key: KeyCode) -> String {
+    VIRTUAL_KEYMAP
+        .read()
+        .iter()
+        .filter(|(name, code)| {
+            **code == key
+                && name.chars().count() == 1
+                && !name.starts_with(|c: char| c == '+' || c.is_whitespace() || c.is_control())
+        })
+        .map(|(name, _)| name)
+        .min()
+        .map_or_else(|| key.to_string(), |name| name.to_ascii_uppercase())
 }
 
 fn fallback_keycode_from_char(ch: &str) -> Option<KeyCode> {

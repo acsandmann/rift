@@ -166,6 +166,10 @@ pub enum LayoutCommand {
     PromoteToMaster,
     #[command(group = 4, label = "Swap master and stack", order = 28)]
     SwapMasterStack,
+    #[command(group = 4, label = "Rotate master and stack forward", order = 29)]
+    RotateMasterStackNext,
+    #[command(group = 4, label = "Rotate master and stack backward", order = 30)]
+    RotateMasterStackPrev,
 }
 
 #[derive(

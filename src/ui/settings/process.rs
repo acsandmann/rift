@@ -149,6 +149,7 @@ pub fn run(config_path: PathBuf) -> ! {
         tracing::warn!(error = %std::io::Error::last_os_error(), "Could not name the Settings process");
     }
     let mtm = MainThreadMarker::new().expect("Settings runs on the main thread");
+    crate::sys::hotkey::refresh_virtual_keymap(mtm);
     let appkit = super::timing::start();
     let app = NSApplication::sharedApplication(mtm);
     super::timing::finish(appkit, "NSApplication::sharedApplication");

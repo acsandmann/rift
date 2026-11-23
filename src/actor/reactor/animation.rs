@@ -254,13 +254,13 @@ enum Sample<'a> {
 }
 
 impl PresentedWindow {
-    fn begin(&mut self) {
+    fn begin(&mut self, immediate_target: Option<CGRect>) {
         // Reconcile size at the semantic boundary. Subsequent scrolling samples
         // move the accepted AX size without reading or resizing on display ticks.
         if self.handle.constrains_scrolling() && !self.from.size.same_as(self.to.size) {
             let _ = self.handle.send(Request::set_window_frame(
                 self.wid,
-                CGRect::new(self.from.origin, self.to.size),
+                immediate_target.unwrap_or_else(|| CGRect::new(self.from.origin, self.to.size)),
                 self.txid,
                 true,
             ));
@@ -465,18 +465,19 @@ impl CameraAnimation {
 
     fn begin(&mut self) {
         self.windows.sort_unstable_by_key(|w| w.wid.pid);
+        let semantic = self.gesture.is_none() && !self.presentation.gesturing();
         for window in &mut self.windows {
             window.announced = false;
-            window.txid = window.wsid.map_or_else(TransactionId::default, |wsid| {
-                let target =
-                    (self.gesture.is_none() && !self.presentation.gesturing()).then(|| {
-                        let frame =
-                            self.presentation.target_frame(window.to, window.fixed, self.scale);
-                        self.bound.map_or(frame, |bounds| bounds.apply(frame))
-                    });
-                self.store.begin(wsid, target)
+            let target = semantic.then(|| {
+                let frame = self.presentation.target_frame(window.to, window.fixed, self.scale);
+                self.bound.map_or(frame, |bounds| bounds.apply(frame))
             });
-            window.begin();
+            window.txid = window
+                .wsid
+                .map_or_else(TransactionId::default, |wsid| self.store.begin(wsid, target));
+            // Growing at the old origin can push a visible window past the display
+            // edge and trigger parking before the first sample places it.
+            window.begin(target.filter(|_| !self.animate));
         }
     }
 
@@ -511,10 +512,15 @@ impl CameraAnimation {
 }
 
 impl Reactor {
-    pub(super) fn cancel_window_presentations(&mut self, mut windows: Vec<WindowId>) {
+    pub(super) fn cancel_window_presentations(&mut self, windows: Vec<WindowId>) {
         if windows.is_empty() {
             return;
         }
+        self.cancel_window_frame_writes(windows);
+        self.commit_presentations();
+    }
+
+    pub(super) fn cancel_window_frame_writes(&mut self, mut windows: Vec<WindowId>) {
         windows.sort_unstable();
         let mut frames = Vec::new();
         for camera in self.presentations.values_mut() {
@@ -541,7 +547,6 @@ impl Reactor {
                 }
             }
         }
-        self.commit_presentations();
     }
 
     pub(super) fn commit_presentations(&mut self) {
@@ -1437,7 +1442,7 @@ impl ActiveAnimation {
                 window.frame = old.frame;
                 window.leased = old.leased;
             } else {
-                window.begin();
+                window.begin(None);
             }
         }
         for mut old in self.animation.windows {
@@ -1533,7 +1538,7 @@ impl Animation {
 
     fn begin(&mut self) {
         for window in &mut self.windows {
-            window.begin();
+            window.begin(None);
         }
     }
 

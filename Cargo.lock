@@ -178,9 +178,9 @@ checksum = "613afe47fcd5fac7ccf1db93babcb082c5994d996f20b8b159f2ad1658eb5724"
 
 [[package]]
 name = "cgs"
-version = "0.5.2"
+version = "0.5.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6f6d56081e7292f8abacfe3871475ae1d0d7a63fdceafa74105597dbe2a826fa"
+checksum = "dfd126a2177e1ce5434405ac87b5805f810c5a81eb5a21797efa276fb058c243"
 dependencies = [
  "block2",
  "dispatch2",
@@ -808,9 +808,9 @@ dependencies = [
 
 [[package]]
 name = "multitouch"
-version = "0.3.2"
+version = "0.3.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "62f941afce817b0c3a8ac770c6f5e4026b581b49cd4092a8f9b10beae1110a1a"
+checksum = "6efddeac278500280a08c003d0c981ae85715c475f3bda26785b0d6941531476"
 dependencies = [
  "objc2-core-foundation",
 ]
@@ -1358,7 +1358,7 @@ dependencies = [
 
 [[package]]
 name = "rift-wm"
-version = "0.8.5"
+version = "0.8.6"
 dependencies = [
  "anyhow",
  "ascii_tree",

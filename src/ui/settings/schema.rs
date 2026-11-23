@@ -334,7 +334,6 @@ fn slider_options(key: &str, source: &ConfigSource) -> Option<(f64, f64, Option<
         "swipe_vertical_tolerance" | "vertical_tolerance" => (0.0, 1.0, None),
         "thickness" => (20.0, 64.0, None),
         "spacing" | "stack_offset" => (0.0, 100.0, None),
-        "fade_duration_ms" => (0.0, 1000.0, None),
         _ => return None,
     })
 }
@@ -347,7 +346,6 @@ fn slider_step(key: &str) -> Option<f64> {
             5.0
         }
         "thickness" => 4.0,
-        "fade_duration_ms" => 50.0,
         "swipe_vertical_tolerance" | "vertical_tolerance" => 0.05,
         _ => return None,
     })

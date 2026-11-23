@@ -22,7 +22,8 @@ use crate::actor::spaces::ForwardedSpaceState;
 use crate::actor::wm_controller::{self, WmCommand, WmEvent};
 use crate::common::collections::{HashMap, HashSet};
 use crate::common::config::{
-    BindingModeSpecs, Config, DragDropSettings, HorizontalMouseWarp, MouseAction, MouseModifier,
+    BindingModeSpecs, Config, DragDropSettings, HorizontalMouseWarp, MissionControlSettings,
+    MouseAction, MouseModifier, OverviewCommand,
 };
 use crate::sys::event::{self, Hotkey, KeyCode};
 use crate::sys::hotkey::{
@@ -51,7 +52,7 @@ pub enum Request {
     SetFocusFollowsMouseEnabled(bool),
     EnableHotkeys,
     SetBindingMode(String),
-    KeyboardLayoutChanged,
+    KeyboardLayoutChanged(MissionControlSettings),
     ConfigUpdated(Config),
     /// Complete gesture routes for visible spaces with Rift management enabled.
     LayoutModesChanged(Vec<(SpaceId, crate::common::config::LayoutMode)>),
@@ -95,6 +96,7 @@ pub struct Input {
     mission_control_active: Cell<bool>,
     activate_on_hotkey_release: Cell<bool>,
     overview_hotkey: Cell<Option<OverviewHotkey>>,
+    overview_keys: RefCell<HashMap<Hotkey, OverviewCommand>>,
     mission_control_bounds: RefCell<Vec<CGRect>>,
     overview_buttons: Cell<u8>,
     mouse_move_last_timestamp: Cell<Option<u64>>,
@@ -354,6 +356,7 @@ impl Input {
                 config.settings.ui.mission_control.activate_on_hotkey_release,
             ),
             overview_hotkey: Cell::new(None),
+            overview_keys: RefCell::default(),
             mission_control_bounds: RefCell::new(Vec::new()),
             overview_buttons: Cell::new(0),
             mouse_move_last_timestamp: Cell::new(None),
@@ -378,6 +381,7 @@ impl Input {
             mission_control_tx: RefCell::new(mission_control_tx),
         };
         input.install_binding_specs(config.binding_mode_specs);
+        input.rebuild_overview_keys(&config.settings.ui.mission_control);
         input
     }
 
@@ -579,13 +583,15 @@ impl Input {
                 }
             }
             Request::SetBindingMode(target) => self.transition_binding_mode(&target),
-            Request::KeyboardLayoutChanged => {
+            Request::KeyboardLayoutChanged(overview) => {
+                self.rebuild_overview_keys(&overview);
                 if self.hotkeys_active.get() {
                     self.rebuild_binding_maps();
                     should_rebuild_mask = true;
                 }
             }
             Request::ConfigUpdated(new_config) => {
+                self.rebuild_overview_keys(&new_config.settings.ui.mission_control);
                 self.activate_on_hotkey_release
                     .set(new_config.settings.ui.mission_control.activate_on_hotkey_release);
                 self.overview_hotkey.set(None);
@@ -818,43 +824,6 @@ impl Input {
                         .borrow_mut()
                         .reconcile_after_event_tap_reenabled(CGEvent::flags(Some(event)));
                     return true;
-                }
-                if event_type == CGEventType::KeyDown && self.mission_control_active.get() {
-                    let keycode = CGEvent::integer_value_field(
-                        Some(event),
-                        CGEventField::KeyboardEventKeycode,
-                    ) as u16;
-                    if let Some(input) = super::mission_control::Input::from_keycode(
-                        keycode,
-                        CGEvent::flags(Some(event)),
-                    ) {
-                        let configured_hotkey =
-                            key_code_from_event(event).is_some_and(|key_code| {
-                                let state = self.state.borrow();
-                                let hotkey = Hotkey::new(
-                                    modifiers_from_flags_with_keys(
-                                        CGEvent::flags(Some(event)),
-                                        &state.pressed_keys,
-                                    ),
-                                    key_code,
-                                );
-                                self.hotkeys
-                                    .borrow()
-                                    .get(self.active_mode.get())
-                                    .is_some_and(|bindings| bindings.contains_key(&hotkey))
-                            });
-                        if !configured_hotkey {
-                            if matches!(
-                                input,
-                                super::mission_control::Input::Dismiss
-                                    | super::mission_control::Input::Activate
-                            ) {
-                                self.overview_hotkey.set(None);
-                            }
-                            self.send_overview(super::mission_control::Event::Input(input));
-                            return false;
-                        }
-                    }
                 }
                 self.handle_keyboard_event(event_type, event, &mut self.state.borrow_mut())
             }
@@ -1163,11 +1132,23 @@ impl Input {
         self.refresh_disable_hotkey_state(state);
 
         if event_type == CGEventType::KeyDown {
+            use super::mission_control::{Event as OverviewEvent, Input as OverviewInput};
+            let overview_active = self.mission_control_active.get();
             if let Some(key_code) = key_code_opt {
                 let hotkey = Hotkey::new(
                     modifiers_from_flags_with_keys(state.current_flags, &state.pressed_keys),
                     key_code,
                 );
+                if overview_active && let Some(command) = self.overview_keys.borrow().get(&hotkey) {
+                    self.send_overview(OverviewEvent::Input(match command {
+                        OverviewCommand::ZoomIn => OverviewInput::ZoomStep(1),
+                        OverviewCommand::ZoomOut => OverviewInput::ZoomStep(-1),
+                        OverviewCommand::ActualSize => OverviewInput::ZoomStep(0),
+                        OverviewCommand::FitWorkspace => OverviewInput::FitWorkspace,
+                        OverviewCommand::FitAllWorkspaces => OverviewInput::FitAllWorkspaces,
+                    }));
+                    return false;
+                }
                 let active_mode = self.active_mode.get();
                 let bindings = self.hotkeys.borrow();
                 if let Some(commands) = bindings.get(active_mode).and_then(|map| map.get(&hotkey)) {
@@ -1222,6 +1203,19 @@ impl Input {
                     return false;
                 }
             }
+            if overview_active
+                && let Some(input) = OverviewInput::from_keycode(
+                    CGEvent::integer_value_field(Some(event), CGEventField::KeyboardEventKeycode)
+                        as u16,
+                    flags,
+                )
+            {
+                if matches!(input, OverviewInput::Dismiss | OverviewInput::Activate) {
+                    self.overview_hotkey.set(None);
+                }
+                self.send_overview(OverviewEvent::Input(input));
+                return false;
+            }
         }
 
         true
@@ -1263,6 +1257,30 @@ impl Input {
             let previous_mode = self.active_binding_mode();
             self.active_mode.set(index);
             self.notify_binding_mode_changed(previous_mode);
+        }
+    }
+
+    fn rebuild_overview_keys(&self, settings: &MissionControlSettings) {
+        let mut bindings = self.overview_keys.borrow_mut();
+        bindings.clear();
+        if !settings.enabled {
+            return;
+        }
+        for (spec, command) in settings.keymap() {
+            let Ok(hotkey) = Hotkey::from_str(spec) else {
+                warn!(%spec, "Skipping Overview shortcut that no longer resolves for current keyboard layout");
+                continue;
+            };
+            let modifiers = hotkey.modifiers.expand_to_specific();
+            if modifiers
+                .iter()
+                .any(|&m| bindings.contains_key(&Hotkey::new(m, hotkey.key_code)))
+            {
+                warn!(%spec, "Skipping overlapping Overview shortcut for current keyboard layout");
+                continue;
+            }
+            bindings
+                .extend(modifiers.into_iter().map(|m| (Hotkey::new(m, hotkey.key_code), *command)));
         }
     }
 
@@ -2250,6 +2268,72 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn overview_shortcuts_override_global_bindings_only_while_open() {
+        use super::super::mission_control::{Event as OverviewEvent, Input as OverviewInput};
+        let (input, mut wm_rx, _) = input();
+        let (overview, mut rx) = actor::channel();
+        *input.mission_control_tx.borrow_mut() = Some(overview);
+        let (recovery, _) = tokio::sync::mpsc::unbounded_channel();
+        let config = |enabled, keymap: &str| {
+            Config::parse(&format!(
+                "[keys]\nF2 = \"show_mission_control_all\"\n[settings.ui.mission_control]\nenabled = {enabled}\n{keymap}"
+            )).unwrap()
+        };
+        let section = "[settings.ui.mission_control.keys]\n";
+        let initial = config(true, &format!("{section}F2 = \"fit_workspace\""));
+        let overview_settings = initial.settings.ui.mission_control.clone();
+        input.on_request(Request::ConfigUpdated(initial), &recovery);
+        input.on_request(Request::EnableHotkeys, &recovery);
+        let key = |code| {
+            let event = CGEvent::new_keyboard_event(None, code, true).unwrap();
+            input.on_event(CGEventType::KeyDown, &event, None)
+        };
+        let global = |event| {
+            assert!(matches!(
+                event,
+                WmEvent::Command(WmCommand::Wm(wm_controller::WmCmd::ShowMissionControlAll))
+            ))
+        };
+        assert!(!key(120));
+        global(wm_rx.try_recv().unwrap().1);
+        assert!(rx.try_recv().is_err());
+
+        input.on_request(Request::SetMissionControlActive(true, vec![]), &recovery);
+        input.on_request(Request::KeyboardLayoutChanged(overview_settings), &recovery);
+        assert!(!key(120));
+        assert!(matches!(
+            rx.try_recv().unwrap().1,
+            OverviewEvent::Input(OverviewInput::FitWorkspace)
+        ));
+        assert!(wm_rx.try_recv().is_err());
+
+        input.on_request(
+            Request::ConfigUpdated(config(true, &format!("{section}F3 = \"fit_all_workspaces\""))),
+            &recovery,
+        );
+        assert!(!key(99));
+        assert!(matches!(
+            rx.try_recv().unwrap().1,
+            OverviewEvent::Input(OverviewInput::FitAllWorkspaces)
+        ));
+        assert!(!key(120));
+        global(wm_rx.try_recv().unwrap().1);
+        assert!(rx.try_recv().is_err());
+
+        input.on_request(Request::ConfigUpdated(config(true, section)), &recovery);
+        assert!(key(99));
+        assert!(key(24), "an empty map disables the former built-in zoom key");
+        assert!(rx.try_recv().is_err());
+
+        input.on_request(
+            Request::ConfigUpdated(config(false, &format!("{section}F3 = \"fit_all_workspaces\""))),
+            &recovery,
+        );
+        assert!(key(99));
+        assert!(rx.try_recv().is_err());
     }
 
     #[test]

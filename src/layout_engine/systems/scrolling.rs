@@ -886,6 +886,22 @@ impl Arrangement {
         Some((self.active_column, row))
     }
 
+    fn select_available_column(
+        &mut self,
+        preferred: Option<ColumnId>,
+        inactive: &HashSet<WindowId>,
+    ) -> Option<ColumnId> {
+        let bookmarked =
+            preferred.and_then(|id| self.columns.iter().position(|column| column.id == id));
+        let candidate = bookmarked
+            .into_iter()
+            .chain(self.active_column..self.columns.len())
+            .chain((0..self.active_column).rev())
+            .find(|&index| self.columns[index].windows().any(|w| !inactive.contains(w)))?;
+        self.active_column = candidate;
+        Some(self.columns[candidate].id)
+    }
+
     fn locate(&self, wid: WindowId) -> Option<(usize, usize)> {
         self.columns.iter().enumerate().find_map(|(col, column)| {
             column.windows().position(|&w| w == wid).map(|row| (col, row))
@@ -1066,7 +1082,9 @@ impl LayoutState {
             g.constraint_revision = revision;
             return;
         }
-        let bookmark = self.camera.restored_view.take().or_else(|| self.bookmark());
+        if self.camera.restored_view.is_none() {
+            self.camera.restored_view = self.bookmark();
+        }
         let initial = matches!(self.camera.viewport, Viewport::Uninitialized);
         if settings.preserve_window_sizes {
             let tiling = compute_tiling_area(screen, gaps);
@@ -1102,12 +1120,7 @@ impl LayoutState {
             revision,
             gaps.clone(),
         ));
-        if let Some(bookmark) = bookmark
-            && let Some(column) = self.geometry.as_ref().unwrap().column(bookmark.column)
-        {
-            let old = self.camera.viewport.offset();
-            self.camera.viewport.rebase(column.world_x + bookmark.relative_offset - old);
-        }
+        self.apply_restored_view();
         self.reconcile_camera_bounds();
         if initial {
             self.camera.viewport = Viewport::Static(0.0);
@@ -1118,6 +1131,25 @@ impl LayoutState {
                 self.reveal(settings);
             }
             self.camera.viewport = Viewport::Static(self.camera.viewport.offset());
+        }
+    }
+
+    fn apply_restored_view(&mut self) {
+        let (Some(bookmark), Some(geometry)) = (&self.camera.restored_view, &self.geometry) else {
+            return;
+        };
+        if let Some(column) = geometry.column(bookmark.column) {
+            let offset = self.camera.viewport.offset();
+            self.camera.viewport.rebase(column.world_x + bookmark.relative_offset - offset);
+            self.camera.restored_view = None;
+        } else {
+            // A dormant column has no geometry. Keep its bookmark for readmission,
+            // and use the available strip bounds for the current projection.
+            let offset = self.camera.viewport.offset().clamp(geometry.bounds.0, geometry.bounds.1);
+            self.camera.viewport = Viewport::Static(offset);
+            if !self.arrangement.columns.iter().any(|column| column.id == bookmark.column) {
+                self.camera.restored_view = None;
+            }
         }
     }
 
@@ -1227,6 +1259,7 @@ impl LayoutState {
             {
                 self.camera.viewport.rebase(new.world_x - old_x);
             }
+            self.apply_restored_view();
         }
         self.reconcile_camera_bounds();
         if self.arrangement.columns.is_empty() {
@@ -1246,6 +1279,10 @@ pub struct ScrollingLayoutSystem {
 }
 
 impl ScrollingLayoutSystem {
+    pub(super) fn initialize_dormant_windows(&mut self, windows: Vec<WindowId>) {
+        self.inactive.extend(windows);
+    }
+
     fn selected_mut<'a>(
         layouts: &'a mut slotmap::SlotMap<LayoutId, LayoutState>,
         layout: LayoutId,
@@ -1302,6 +1339,7 @@ impl ScrollingLayoutSystem {
             return;
         }
         let bookmark = state.bookmark();
+        state.camera.restored_view = None;
         state.mutate(&self.settings, &self.inactive, |state| {
             let index = if self.settings.base.window_insertion_point.unwrap_or_default()
                 == WindowInsertionPoint::EndOfTree
@@ -1336,10 +1374,20 @@ impl ScrollingLayoutSystem {
             None
         };
         let was_fullscreen = state.arrangement.fullscreen.remove(&wid).is_some();
-        state.mutate(settings, inactive, |state| {
+        let selected_column = state.mutate(settings, inactive, |state| {
             state.arrangement.detach(wid, inactive);
+            if active_removed {
+                state.arrangement.select_available_column(
+                    restore.as_ref().map(|bookmark| bookmark.column),
+                    inactive,
+                )
+            } else {
+                None
+            }
         });
-        let restored = restore.is_some_and(|bookmark| state.restore(bookmark));
+        let restored = restore
+            .filter(|bookmark| Some(bookmark.column) == selected_column)
+            .is_some_and(|bookmark| state.restore(bookmark));
         let restored_fullscreen = was_fullscreen && state.restore_fullscreen_view();
         if active_removed && !restored && !restored_fullscreen {
             state.reveal(settings);
@@ -1826,25 +1874,34 @@ impl LayoutSystem for ScrollingLayoutSystem {
         if !changed {
             return false;
         }
-        for state in self
-            .layouts
-            .values_mut()
-            .filter(|state| state.arrangement.locate(window).is_some())
-        {
+        // Before the first projection, discovery order must not replace the saved selection.
+        for state in self.layouts.values_mut().filter(|state| {
+            (!participates || state.geometry.is_some())
+                && state.arrangement.locate(window).is_some()
+        }) {
+            let previous_column = state.arrangement.active_column;
             state.mutate(&self.settings, &self.inactive, |state| {
-                if state.arrangement.selected(&self.inactive).is_none()
-                    && let Some((col, row)) =
-                        state.arrangement.columns.iter().enumerate().find_map(|(col, column)| {
-                            column
-                                .windows()
-                                .position(|w| !self.inactive.contains(w))
-                                .map(|row| (col, row))
-                        })
+                if state.camera.restored_view.is_none()
+                    && state.arrangement.selected(&self.inactive).is_none()
                 {
-                    state.arrangement.active_column = col;
-                    state.arrangement.columns[col].active_window = row;
+                    state.arrangement.select_available_column(
+                        state.camera.transient_restore.as_ref().map(|bookmark| bookmark.column),
+                        &self.inactive,
+                    );
                 }
             });
+            if state.arrangement.active_column != previous_column {
+                let selected_column = state.arrangement.columns[state.arrangement.active_column].id;
+                let restored = state
+                    .camera
+                    .transient_restore
+                    .take()
+                    .filter(|bookmark| bookmark.column == selected_column)
+                    .is_some_and(|bookmark| state.restore(bookmark));
+                if !restored {
+                    state.reveal(&self.settings);
+                }
+            }
         }
         true
     }
@@ -2239,6 +2296,7 @@ impl ScrollingLayoutSystem {
         if !state.arrangement.activate(wid) {
             return false;
         }
+        state.camera.restored_view = None;
         state.camera.transient_restore = None;
         if state.camera.fullscreen_restore.as_ref().is_some_and(|b| {
             b.column != state.arrangement.columns[state.arrangement.active_column].id
@@ -2617,6 +2675,18 @@ pub(crate) mod tests {
                 Some(vec![usize::from(direction == Direction::Right), 0])
             );
         }
+    }
+
+    #[test]
+    fn removing_selected_column_skips_suspended_neighbor() {
+        let mut f = Fixture::new(3);
+        f.select(3);
+        f.system.set_window_participation(wid(2), false);
+
+        f.system.update(WindowChange::Remove(wid(3)));
+
+        assert_eq!(f.selected(), Some(wid(1)));
+        assert_eq!(f.frame(1).origin.x, f.screen.origin.x);
     }
 
     #[test]

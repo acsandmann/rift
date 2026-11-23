@@ -8,6 +8,7 @@ use objc2_core_foundation::{CGPoint, CGRect, CGSize};
 
 use super::app::running_apps;
 use super::axuielement::{AX_WINDOW_ROLE, AXUIElement};
+use super::enhanced_ui::EnhancedUi;
 use super::screen::ScreenCache;
 use crate::model::hidden_window_placement::HiddenWindowPlacement;
 
@@ -60,9 +61,11 @@ fn recover(mtm: MainThreadMarker) {
     unsafe { AXUIElement::system_wide().set_messaging_timeout(1.0) };
     let mut index = 0;
     for (pid, _) in running_apps(None) {
-        let Ok(windows) = AXUIElement::application(pid).windows() else {
+        let app = AXUIElement::application(pid);
+        let Ok(windows) = app.windows() else {
             continue;
         };
+        let mut enhanced_ui = EnhancedUi::default();
         for window in windows {
             let Ok(attributes) = window.window_attributes() else {
                 continue;
@@ -76,13 +79,16 @@ fn recover(mtm: MainThreadMarker) {
             if window.fullscreen().unwrap_or(false) {
                 continue;
             }
+            enhanced_ui.acquire(&app);
             if frame.size != attributes.frame.size {
                 let _ = window.set_size(frame.size);
             }
             if window.set_position(frame.origin).is_ok() {
                 index += 1;
             }
+            enhanced_ui.release(&app);
         }
+        enhanced_ui.restore_if_needed(&app);
     }
 }
 

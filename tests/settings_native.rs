@@ -39,6 +39,9 @@ fn main() {
             }),
             &args[index + 1],
         );
+    } else if args.iter().any(|arg| arg == "--overview") {
+        objc2::rc::autoreleasepool(|_| settings::native_tests::run_overview(ui));
+        println!("Overview native shortcut editing and toolbar preference passed");
     } else if args.iter().any(|arg| arg == "--keyboard") {
         objc2::rc::autoreleasepool(|_| settings::native_tests::run_keyboard(ui));
         println!("Keyboard manager native controls, recording, conflicts and catalog passed");
