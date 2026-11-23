@@ -212,11 +212,11 @@ impl Reactor {
         let (new, restored, geometry_changed) =
             if let Some(window) = self.state.windows.window_mut(wid) {
                 let restored = window.info.is_minimized && !minimized;
-                let old_frame = window.frame_monotonic;
+                let old_frame = window.actual().rect();
                 if !had_target && (info.frame.size.width != 0.0 || info.frame.size.height != 0.0) {
-                    window.frame_monotonic = info.frame;
+                    window.record_actual(info.frame);
                 }
-                let geometry_changed = !old_frame.same_as(window.frame_monotonic)
+                let geometry_changed = !old_frame.same_as(window.actual().rect())
                     || window.info.is_resizable != info.is_resizable
                     || window.info.min_size != info.min_size
                     || window.info.max_size != info.max_size;
@@ -335,7 +335,7 @@ impl Reactor {
         let assigned_space = self.assigned_space_for_window_id(window);
         let active_space = assigned_space.or_else(|| {
             let state = self.state.windows.window(window)?;
-            self.best_space_for_window(&state.frame_monotonic, state.info.sys_id)
+            self.best_space_for_window(&state.actual().rect(), state.info.sys_id)
                 .filter(|space| self.is_space_active(*space))
                 .or_else(|| {
                     state.info.sys_id.is_none().then(|| self.workspace_command_space()).flatten()

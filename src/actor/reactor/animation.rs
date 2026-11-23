@@ -541,7 +541,7 @@ impl Reactor {
         }
         for (wid, frame) in frames {
             if let Some(window) = self.state.windows.window_mut(wid) {
-                window.frame_monotonic = frame;
+                window.record_actual(frame);
                 if let Some(wsid) = window.info.sys_id {
                     self.tx_store.clear_target(&wsid);
                 }
@@ -582,7 +582,7 @@ impl Reactor {
                 if let Some(frame) = frame
                     && let Some(model) = self.state.windows.window_mut(wid)
                 {
-                    model.frame_monotonic = frame;
+                    model.record_actual(frame);
                 }
             }
             if let Some(session) = &mut self.viewport_gesture
@@ -623,7 +623,7 @@ impl Reactor {
             };
             for (wid, frame) in frames {
                 if let Some(window) = self.state.windows.window_mut(wid) {
-                    window.frame_monotonic = frame;
+                    window.record_actual(frame);
                 }
             }
             if let Some(tx) = &self.animation_tx {
@@ -693,7 +693,7 @@ impl Reactor {
                     return None;
                 }
                 let window = self.state.windows.window(wid)?;
-                let start = self.tx_store.heading(window);
+                let start = self.tx_store.planned(window).rect();
                 if semantic
                     && let Some(wsid) = window.info.sys_id
                     && let Some(write) = self.tx_store.get(&wsid)
@@ -701,7 +701,7 @@ impl Reactor {
                     let target = presentation.target_frame(base_frame, fixed, scale);
                     let target = bound.map_or(target, |bounds| bounds.apply(target));
                     if control.as_ref().is_none_or(|control| !control.frames.contains_key(&wid))
-                        && write.refused(target, window.frame_monotonic)
+                        && write.refused(target, window.actual())
                     {
                         covered.insert(wid);
                         return None;
@@ -1117,15 +1117,16 @@ impl AnimationManager {
             let Some(window) = reactor.state.windows.window(wid) else {
                 continue;
             };
-            let current_frame = window.frame_monotonic;
+            let actual = window.actual();
             let window_server_id = window.info.sys_id;
             let transactions = &reactor.tx_store;
             let write = window_server_id.and_then(|id| transactions.get(&id)).unwrap_or_default();
-            if write.covers(target_frame, current_frame) {
+            if write.covers(target_frame, actual) {
                 continue;
             }
-            // Queued writes apply in order, so animate on from the one in flight.
-            let start = write.target().unwrap_or(current_frame);
+            // Queued writes apply in order, so animate on from where the window
+            // is headed.
+            let start = transactions.planned(window).rect();
             let Some(app_state) = reactor.app_manager.apps.get(&wid.pid) else {
                 debug!(?wid, "Skipping for window - app no longer exists");
                 continue;
@@ -1144,12 +1145,7 @@ impl AnimationManager {
                 anim.add_window(&handle, wid, start, target_frame, txid);
             } else {
                 anim.mark_handled(wid);
-                trace!(
-                    ?wid,
-                    ?current_frame,
-                    ?target_frame,
-                    "Reconciling window directly"
-                );
+                trace!(?wid, ?actual, ?target_frame, "Reconciling window directly");
                 if let Err(e) =
                     handle.send(Request::set_window_frame(wid, target_frame, txid, true))
                 {
@@ -1218,24 +1214,19 @@ impl AnimationManager {
                 continue;
             };
             let target_frame = target_frame.round();
-            let current_frame = window.frame_monotonic;
+            let actual = window.actual();
             let write =
                 window.info.sys_id.and_then(|id| reactor.tx_store.get(&id)).unwrap_or_default();
-            if !force_frames && write.covers(target_frame, current_frame) {
+            if !force_frames && write.covers(target_frame, actual) {
                 trace!(?wid, ?target_frame, "Skipping redundant instant layout request");
                 continue;
             }
             any_frame_changed = true;
-            trace!(
-                ?wid,
-                ?current_frame,
-                ?target_frame,
-                "Instant workspace positioning"
-            );
+            trace!(?wid, ?actual, ?target_frame, "Instant workspace positioning");
 
             let size_unchanged = !force_frames
                 && write.target().is_none()
-                && current_frame.size.same_as(target_frame.size);
+                && actual.rect().size.same_as(target_frame.size);
             let (frames, positions) = per_app
                 .entry((wid.pid, constrained))
                 .or_insert_with(|| (Vec::new(), Vec::new()));

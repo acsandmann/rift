@@ -6,6 +6,7 @@ use objc2_core_foundation::CGRect;
 use serde::{Deserialize, Serialize};
 
 use crate::model::reactor::WindowState;
+use crate::model::window_frame::{ActualFrame, PlannedFrame};
 use crate::sys::geometry::SameAs;
 use crate::sys::window_server::WindowServerId;
 
@@ -44,19 +45,23 @@ impl TxRecord {
         }
     }
 
-    pub fn covers(self, desired: CGRect, current: CGRect) -> bool {
+    /// Whether this write already takes a window that is at `actual` to `desired`.
+    pub(crate) fn covers(self, desired: CGRect, actual: ActualFrame) -> bool {
+        let actual = actual.rect();
         match self.write {
-            FrameWrite::Idle => current.same_as(desired),
+            FrameWrite::Idle => actual.same_as(desired),
             FrameWrite::Pending(target) => target.same_as(desired),
             FrameWrite::Settled { target, observed } => {
-                target.same_as(desired) && observed.same_as(current)
+                target.same_as(desired) && observed.same_as(actual)
             }
         }
     }
 
-    pub fn refused(self, desired: CGRect, current: CGRect) -> bool {
+    /// Whether the app answered a write to `desired` with another frame, and
+    /// the window is still at what it answered.
+    pub(crate) fn refused(self, desired: CGRect, actual: ActualFrame) -> bool {
         matches!(self.write, FrameWrite::Settled { target, observed }
-            if !target.same_as(observed) && self.covers(desired, current))
+            if !target.same_as(observed) && self.covers(desired, actual))
     }
 }
 
@@ -107,14 +112,16 @@ impl WindowTxStore {
     /// The frame a write in flight is taking the window to.
     pub fn target(&self, id: &WindowServerId) -> Option<CGRect> { self.get(id)?.target() }
 
-    /// Where a window is headed: the target of a write in flight, otherwise
-    /// the frame the app last reported.
-    pub(crate) fn heading(&self, window: &WindowState) -> CGRect {
-        window
-            .info
-            .sys_id
-            .and_then(|id| self.target(&id))
-            .unwrap_or(window.frame_monotonic)
+    /// Where a window will be: the target of a write in flight, otherwise
+    /// where the window is.
+    pub(crate) fn planned(&self, window: &WindowState) -> PlannedFrame {
+        PlannedFrame::new(
+            window
+                .info
+                .sys_id
+                .and_then(|id| self.target(&id))
+                .unwrap_or(window.actual().rect()),
+        )
     }
 
     pub fn remove(&self, id: &WindowServerId) { self.0.records.remove(id); }

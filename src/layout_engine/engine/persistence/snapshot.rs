@@ -307,7 +307,7 @@ impl LayoutEngine {
                     self.workspaces.active_workspace(self.workspaces[workspace].space)
                         != Some(workspace)
                 });
-                floating.store(workspace, window, stored.unwrap_or(state.frame_monotonic));
+                floating.store(workspace, window, stored.unwrap_or(state.actual().rect()));
             }
         }
         ron::ser::to_string(&PersistedLayoutRef {

@@ -219,7 +219,7 @@ fn claimed_floating_window_keeps_its_classification_and_adopts_owner_geometry() 
         Requested(false),
         None,
     ));
-    assert_eq!(reactor.state.windows.window(wid).unwrap().frame_monotonic, moved);
+    assert_eq!(reactor.state.windows.window(wid).unwrap().actual().rect(), moved);
     assert!(!reactor.is_in_drag(), "an owner move is not a Rift drag");
     let stored = |r: &Reactor| r.layout_manager.layout_engine.get_floating_position(workspace, wid);
     assert_eq!(stored(&reactor), Some(floating_frame));
@@ -676,7 +676,8 @@ fn discovering_an_owner_moved_claimed_window_arranges_nothing() {
                 .windows
                 .window(window)
                 .unwrap()
-                .frame_monotonic
+                .actual()
+                .rect()
                 .same_as(info.frame)
         );
     }
@@ -730,7 +731,7 @@ fn minimize_and_lose_admission_while_claimed(reactor: &mut Reactor, window: Wind
     reactor.discover_test_windows(window.pid, vec![(window, info.clone())], visible.clone());
 
     let wsid = info.sys_id.unwrap();
-    let frame = reactor.state.windows.window(window).unwrap().frame_monotonic;
+    let frame = reactor.state.windows.window(window).unwrap().actual().rect();
     let server_info = |layer| WindowServerInfo {
         id: wsid,
         pid: window.pid,

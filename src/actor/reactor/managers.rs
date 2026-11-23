@@ -373,7 +373,7 @@ impl LayoutManager {
                     &gaps,
                     reactor.config.settings.ui.stack_line.reserve(),
                     // Layout must not undo a write the app has not answered yet.
-                    |wid| reactor.state.windows.window(wid).map(|w| reactor.tx_store.heading(w)),
+                    |wid| reactor.state.windows.window(wid).map(|w| reactor.tx_store.planned(w)),
                     all_screen_frames,
                     collect_groups.then_some(&mut update.groups),
                     matches!(presentation, Presentation::Instant | Presentation::Force),

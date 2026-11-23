@@ -69,8 +69,8 @@ impl WindowFingerprint {
         Self {
             window_server_id: window.info.sys_id.map(|id| id.as_u32()),
             title: Some(window.info.title.clone()).filter(|title| !title.trim().is_empty()),
-            width: window.frame_monotonic.size.width,
-            height: window.frame_monotonic.size.height,
+            width: window.actual().rect().size.width,
+            height: window.actual().rect().size.height,
             app_id: (window.info.bundle_id.clone())
                 .or_else(|| crate::sys::app::bundle_info_for_pid(id.pid).0),
         }

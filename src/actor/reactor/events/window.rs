@@ -47,11 +47,11 @@ pub fn frame_change_needs_layout(
                 transactions.clear_target(&server);
             }
         }
-        window.frame_monotonic = new_frame;
+        window.record_actual(new_frame);
         return false;
     }
 
-    if window.frame_monotonic.same_as(new_frame) {
+    if window.actual().rect().same_as(new_frame) {
         return false;
     }
     if mouse_state.is_none() {
@@ -61,14 +61,14 @@ pub fn frame_change_needs_layout(
         && let Some(target) = record.target()
     {
         if new_frame.same_as(target) {
-            window.frame_monotonic = new_frame;
+            window.record_actual(new_frame);
             return false;
         }
         if *mouse_state != Some(MouseState::Down) && last_seen.is_some() {
             // Native notifications can describe an intermediate AX frame. Only
             // the app's readback completes a write.
             if last_seen == Some(record.txid) {
-                window.frame_monotonic = new_frame;
+                window.record_actual(new_frame);
             }
             return false;
         }
@@ -102,7 +102,7 @@ impl Reactor {
             return;
         };
         let server_id = window.info.sys_id;
-        let old_frame = window.frame_monotonic;
+        let old_frame = window.actual().rect();
 
         if !old_space_active && !new_space_active {
             return;
@@ -111,7 +111,7 @@ impl Reactor {
             return;
         }
         if let Some(window) = self.state.windows.window_mut(wid) {
-            window.frame_monotonic = new_frame;
+            window.record_actual(new_frame);
         }
         // The external owner has geometry authority; keep only native facts current.
         if self.state.windows.is_claimed(wid) {
