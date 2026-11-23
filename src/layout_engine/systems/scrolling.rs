@@ -1082,7 +1082,9 @@ impl LayoutState {
             g.constraint_revision = revision;
             return;
         }
-        let bookmark = self.camera.restored_view.take().or_else(|| self.bookmark());
+        if self.camera.restored_view.is_none() {
+            self.camera.restored_view = self.bookmark();
+        }
         let initial = matches!(self.camera.viewport, Viewport::Uninitialized);
         if settings.preserve_window_sizes {
             let tiling = compute_tiling_area(screen, gaps);
@@ -1118,12 +1120,7 @@ impl LayoutState {
             revision,
             gaps.clone(),
         ));
-        if let Some(bookmark) = bookmark
-            && let Some(column) = self.geometry.as_ref().unwrap().column(bookmark.column)
-        {
-            let old = self.camera.viewport.offset();
-            self.camera.viewport.rebase(column.world_x + bookmark.relative_offset - old);
-        }
+        self.apply_restored_view();
         self.reconcile_camera_bounds();
         if initial {
             self.camera.viewport = Viewport::Static(0.0);
@@ -1134,6 +1131,25 @@ impl LayoutState {
                 self.reveal(settings);
             }
             self.camera.viewport = Viewport::Static(self.camera.viewport.offset());
+        }
+    }
+
+    fn apply_restored_view(&mut self) {
+        let (Some(bookmark), Some(geometry)) = (&self.camera.restored_view, &self.geometry) else {
+            return;
+        };
+        if let Some(column) = geometry.column(bookmark.column) {
+            let offset = self.camera.viewport.offset();
+            self.camera.viewport.rebase(column.world_x + bookmark.relative_offset - offset);
+            self.camera.restored_view = None;
+        } else {
+            // A dormant column has no geometry. Keep its bookmark for readmission,
+            // and use the available strip bounds for the current projection.
+            let offset = self.camera.viewport.offset().clamp(geometry.bounds.0, geometry.bounds.1);
+            self.camera.viewport = Viewport::Static(offset);
+            if !self.arrangement.columns.iter().any(|column| column.id == bookmark.column) {
+                self.camera.restored_view = None;
+            }
         }
     }
 
@@ -1243,6 +1259,7 @@ impl LayoutState {
             {
                 self.camera.viewport.rebase(new.world_x - old_x);
             }
+            self.apply_restored_view();
         }
         self.reconcile_camera_bounds();
         if self.arrangement.columns.is_empty() {
@@ -1262,6 +1279,10 @@ pub struct ScrollingLayoutSystem {
 }
 
 impl ScrollingLayoutSystem {
+    pub(super) fn initialize_dormant_windows(&mut self, windows: Vec<WindowId>) {
+        self.inactive.extend(windows);
+    }
+
     fn selected_mut<'a>(
         layouts: &'a mut slotmap::SlotMap<LayoutId, LayoutState>,
         layout: LayoutId,
@@ -1318,6 +1339,7 @@ impl ScrollingLayoutSystem {
             return;
         }
         let bookmark = state.bookmark();
+        state.camera.restored_view = None;
         state.mutate(&self.settings, &self.inactive, |state| {
             let index = if self.settings.base.window_insertion_point.unwrap_or_default()
                 == WindowInsertionPoint::EndOfTree
@@ -1841,14 +1863,16 @@ impl LayoutSystem for ScrollingLayoutSystem {
         if !changed {
             return false;
         }
-        for state in self
-            .layouts
-            .values_mut()
-            .filter(|state| state.arrangement.locate(window).is_some())
-        {
+        // Before the first projection, discovery order must not replace the saved selection.
+        for state in self.layouts.values_mut().filter(|state| {
+            (!participates || state.geometry.is_some())
+                && state.arrangement.locate(window).is_some()
+        }) {
             let previous_column = state.arrangement.active_column;
             state.mutate(&self.settings, &self.inactive, |state| {
-                if state.arrangement.selected(&self.inactive).is_none() {
+                if state.camera.restored_view.is_none()
+                    && state.arrangement.selected(&self.inactive).is_none()
+                {
                     state.arrangement.select_available_column(
                         state.camera.transient_restore.as_ref().map(|bookmark| bookmark.column),
                         &self.inactive,
@@ -2258,6 +2282,7 @@ impl ScrollingLayoutSystem {
         if !state.arrangement.activate(wid) {
             return false;
         }
+        state.camera.restored_view = None;
         state.camera.transient_restore = None;
         if state.camera.fullscreen_restore.as_ref().is_some_and(|b| {
             b.column != state.arrangement.columns[state.arrangement.active_column].id
