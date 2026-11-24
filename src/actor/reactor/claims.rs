@@ -8,23 +8,24 @@ use rift_protocol::WindowClaimFlags;
 use super::{Changes, LayoutEvent, Reactor};
 use crate::actor::app::WindowId;
 use crate::layout_engine::systems::{LayoutSystem, WindowChange};
-use crate::model::window_store::ClaimOwner;
+use crate::model::window_store::{ClaimHolder, ClaimOwner};
 
 const OWNED_ELSEWHERE: &str = "Window owned by another external manager";
 
 impl Reactor {
+    /// A session (by its Mach client port) claims a window.
     pub(crate) fn claim_window(
         &mut self,
         wid: WindowId,
-        owner: ClaimOwner,
+        port: u32,
         flags: WindowClaimFlags,
     ) -> Result<(), &'static str> {
         if !flags.is_supported() {
             return Err("Unsupported window claim flags");
         }
-        let wid = self.state.windows.resolve_claim_target(owner, wid).ok_or("Window not found")?;
+        let wid = self.state.windows.resolve_claim_target(port, wid).ok_or("Window not found")?;
         match self.state.windows.claim(wid) {
-            Some(claim) if claim.owner != owner => return Err(OWNED_ELSEWHERE),
+            Some(claim) if claim.owner() != ClaimOwner::Ipc(port) => return Err(OWNED_ELSEWHERE),
             // Flags only affect focus policy, never layout.
             Some(_) => {
                 self.with_claim_focus_policy(|r| r.state.windows.set_claim_flags(wid, flags));
@@ -43,22 +44,19 @@ impl Reactor {
             // claim takes the assignment, but arrange only after: no write may target it.
             let mut changes = Changes::default();
             reactor.reconcile_layout_event(&mut changes, LayoutEvent::WindowSuspended(wid));
-            reactor.state.windows.insert_claim(wid, owner, flags);
+            let holder = ClaimHolder::Ipc { port, flags, original: wid };
+            reactor.state.windows.insert_claim(wid, holder);
             changes.refresh_menu = true;
             reactor.finish(changes, None, None);
         });
         Ok(())
     }
 
-    pub(crate) fn release_window(
-        &mut self,
-        wid: WindowId,
-        owner: ClaimOwner,
-    ) -> Result<(), &'static str> {
-        let wid = self.state.windows.resolve_claim_target(owner, wid).ok_or("Window not found")?;
+    pub(crate) fn release_window(&mut self, wid: WindowId, port: u32) -> Result<(), &'static str> {
+        let wid = self.state.windows.resolve_claim_target(port, wid).ok_or("Window not found")?;
         match self.state.windows.claim(wid) {
             None => Ok(()),
-            Some(claim) if claim.owner != owner => Err(OWNED_ELSEWHERE),
+            Some(claim) if claim.owner() != ClaimOwner::Ipc(port) => Err(OWNED_ELSEWHERE),
             Some(_) => {
                 self.release_claims_of([wid]);
                 Ok(())
@@ -66,9 +64,9 @@ impl Reactor {
         }
     }
 
-    /// The owner's session ended: return all of its windows, arranging each space once.
-    pub(crate) fn release_claims(&mut self, owner: ClaimOwner) {
-        let windows = self.state.windows.owner_claims(owner).to_vec();
+    /// The session ended: return all of its windows, arranging each space once.
+    pub(crate) fn release_claims(&mut self, port: u32) {
+        let windows = self.state.windows.owner_claims(ClaimOwner::Ipc(port)).to_vec();
         if !windows.is_empty() {
             self.release_claims_of(windows);
         }

@@ -3,18 +3,27 @@ use test_log::test;
 
 use super::*;
 use crate::layout_engine::systems::LayoutSystem;
-use crate::model::window_store::ClaimOwner;
+use crate::model::window_store::{ClaimHolder, ClaimOwner, WindowClaim};
 
 const OWNED_ELSEWHERE: &str = "Window owned by another external manager";
 
-const OWNER: ClaimOwner = ClaimOwner::Ipc(101);
-const OTHER: ClaimOwner = ClaimOwner::Ipc(202);
+/// Sessions, by their Mach client ports.
+const OWNER: u32 = 101;
+const OTHER: u32 = 202;
 const NONE: WindowClaimFlags = WindowClaimFlags::empty();
 const SUPPRESS: WindowClaimFlags = WindowClaimFlags::SUPPRESS_FOCUS_FOLLOWS_MOUSE;
 const SCREEN: CGRect = CGRect {
     origin: CGPoint { x: 0., y: 0. },
     size: CGSize { width: 1200., height: 1000. },
 };
+
+/// The session holding a claim, and its flags.
+fn session(claim: WindowClaim) -> (u32, WindowClaimFlags) {
+    match claim.holder {
+        ClaimHolder::Ipc { port, flags, .. } => (port, flags),
+        ClaimHolder::Press => panic!("expected a session's claim, found the press's"),
+    }
+}
 
 fn settled(count: usize) -> (Apps, Reactor, SpaceId) {
     let (mut apps, mut reactor) = test_context();
@@ -142,9 +151,14 @@ fn ownership_is_exclusive_idempotent_and_validated() {
         Ok(()),
         "releasing an unclaimed window"
     );
-    assert_eq!(reactor.state.windows.claim(wid(1)).unwrap().owner, OWNER);
-    assert_eq!(reactor.state.windows.owner_claims(OWNER), &[wid(1)]);
-    assert!(reactor.state.windows.owner_claims(OTHER).is_empty());
+    assert_eq!(
+        reactor.state.windows.claim(wid(1)).unwrap().owner(),
+        ClaimOwner::Ipc(OWNER)
+    );
+    assert_eq!(reactor.state.windows.owner_claims(ClaimOwner::Ipc(OWNER)), &[
+        wid(1)
+    ]);
+    assert!(reactor.state.windows.owner_claims(ClaimOwner::Ipc(OTHER)).is_empty());
 }
 
 #[test]
@@ -162,7 +176,7 @@ fn claims_cost_one_arrangement_and_flag_updates_cost_none() {
             0
         );
     }
-    assert_eq!(reactor.state.windows.claim(wid(1)).unwrap().flags, NONE);
+    assert_eq!(session(reactor.state.windows.claim(wid(1)).unwrap()).1, NONE);
     assert!(apps.requests().is_empty());
     assert_eq!(apps.windows, frames);
 
@@ -182,7 +196,7 @@ fn claims_cost_one_arrangement_and_flag_updates_cost_none() {
     assert_eq!(layout_updates(&mut reactor, |r| r.release_claims(OWNER)), 1);
     apps.simulate_until_quiet(&mut reactor);
     assert_eq!(tiled(&mut reactor, space), vec![wid(1), wid(3)]);
-    assert!(reactor.state.windows.owner_claims(OWNER).is_empty());
+    assert!(reactor.state.windows.owner_claims(ClaimOwner::Ipc(OWNER)).is_empty());
     assert!(
         !reactor.state.windows.is_admitted(wid(2)),
         "rules still govern a released window"
@@ -198,8 +212,13 @@ fn disconnect_releases_only_that_owners_claims() {
     reactor.release_claims(OWNER);
     apps.simulate_until_quiet(&mut reactor);
     assert_eq!(tiled(&mut reactor, space), vec![wid(1), wid(3)]);
-    assert_eq!(reactor.state.windows.claim(wid(2)).unwrap().owner, OTHER);
-    assert_eq!(reactor.state.windows.owner_claims(OTHER), &[wid(2)]);
+    assert_eq!(
+        reactor.state.windows.claim(wid(2)).unwrap().owner(),
+        ClaimOwner::Ipc(OTHER)
+    );
+    assert_eq!(reactor.state.windows.owner_claims(ClaimOwner::Ipc(OTHER)), &[
+        wid(2)
+    ]);
 }
 
 #[test]
@@ -283,14 +302,19 @@ fn claim_follows_ax_rekey_and_release_accepts_the_original_id() {
     reactor.discover_test_windows(1, vec![(replacement, info)], vec![replacement, wid(2)]);
     apps.simulate_until_quiet(&mut reactor);
     let claim = reactor.state.windows.claim(replacement).unwrap();
-    assert_eq!((claim.owner, claim.flags), (OWNER, SUPPRESS));
+    assert_eq!(session(claim), (OWNER, SUPPRESS));
     assert!(!reactor.state.windows.contains_window(wid(1)));
     assert!(!tiled(&mut reactor, space).contains(&replacement));
-    assert_eq!(reactor.state.windows.owner_claims(OWNER), &[replacement]);
+    assert_eq!(reactor.state.windows.owner_claims(ClaimOwner::Ipc(OWNER)), &[
+        replacement
+    ]);
 
     // The client only knows the id it claimed.
     assert_eq!(reactor.claim_window(wid(1), OWNER, NONE), Ok(()));
-    assert_eq!(reactor.state.windows.claim(replacement).unwrap().flags, NONE);
+    assert_eq!(
+        session(reactor.state.windows.claim(replacement).unwrap()).1,
+        NONE
+    );
     assert_eq!(reactor.release_window(wid(1), OTHER), Err("Window not found"));
     assert_eq!(reactor.release_window(wid(1), OWNER), Ok(()));
     apps.simulate_until_quiet(&mut reactor);
@@ -314,7 +338,7 @@ fn destroying_a_claimed_window_removes_its_preserved_layout() {
         reactor.release_claims(OWNER);
 
         assert!(reactor.state.windows.record(window).is_none());
-        assert!(reactor.state.windows.owner_claims(OWNER).is_empty());
+        assert!(reactor.state.windows.owner_claims(ClaimOwner::Ipc(OWNER)).is_empty());
         let engine = &mut reactor.layout_manager.layout_engine;
         assert!(!engine.is_window_floating(window));
         assert_eq!(engine.get_floating_position(workspace, window), None);
@@ -522,17 +546,20 @@ fn original_id_reused_by_another_window_still_reaches_the_owners_claim() {
 
     // The owner's id still means its own window, never the newcomer.
     reactor.claim_window(wid(1), OWNER, SUPPRESS).unwrap();
-    assert_eq!(reactor.state.windows.claim(replacement).unwrap().flags, SUPPRESS);
+    assert_eq!(
+        session(reactor.state.windows.claim(replacement).unwrap()).1,
+        SUPPRESS
+    );
     assert_eq!(reactor.release_window(wid(1), OWNER), Ok(()));
     apps.simulate_until_quiet(&mut reactor);
     assert!(!reactor.state.windows.is_claimed(replacement));
     assert_eq!(tiled(&mut reactor, space), vec![replacement, wid(2)]);
     let other = reactor.state.windows.claim(wid(1)).unwrap();
-    assert_eq!((other.owner, other.flags), (OTHER, NONE));
+    assert_eq!(session(other), (OTHER, NONE));
 
     // With the owner's claim gone the id names the newcomer, which only its owner may release.
-    for session in [OWNER, ClaimOwner::Ipc(303)] {
-        assert_eq!(reactor.release_window(wid(1), session), Err(OWNED_ELSEWHERE));
+    for port in [OWNER, 303] {
+        assert_eq!(reactor.release_window(wid(1), port), Err(OWNED_ELSEWHERE));
     }
     assert_eq!(reactor.release_window(wid(1), OTHER), Ok(()));
     reactor.state.windows.debug_assert_invariants();
@@ -555,8 +582,8 @@ fn merging_two_claimed_identities_keeps_the_recognized_owner() {
     apps.simulate_until_quiet(&mut reactor);
     assert!(!reactor.state.windows.contains_window(wid(1)));
     let claim = reactor.state.windows.claim(replacement).unwrap();
-    assert_eq!((claim.owner, claim.flags), (OWNER, SUPPRESS));
-    assert!(reactor.state.windows.owner_claims(OTHER).is_empty());
+    assert_eq!(session(claim), (OWNER, SUPPRESS));
+    assert!(reactor.state.windows.owner_claims(ClaimOwner::Ipc(OTHER)).is_empty());
     assert!(!tiled(&mut reactor, space).contains(&replacement));
     reactor.state.windows.debug_assert_invariants();
 
@@ -570,7 +597,10 @@ fn merging_two_claimed_identities_keeps_the_recognized_owner() {
     }
     // Its disconnect touches nothing; the surviving owner's returns the window.
     assert_eq!(layout_updates(&mut reactor, |r| r.release_claims(OTHER)), 0);
-    assert_eq!(reactor.state.windows.claim(replacement).unwrap().owner, OWNER);
+    assert_eq!(
+        reactor.state.windows.claim(replacement).unwrap().owner(),
+        ClaimOwner::Ipc(OWNER)
+    );
     assert_eq!(layout_updates(&mut reactor, |r| r.release_claims(OWNER)), 1);
     apps.simulate_until_quiet(&mut reactor);
     assert_eq!(tiled(&mut reactor, space), vec![replacement, wid(2)]);
@@ -643,7 +673,7 @@ fn rekeying_a_claimed_window_schedules_no_rift_work() {
     assert!(apps.requests().is_empty());
     assert_eq!(apps.windows, frames);
     let claim = reactor.state.windows.claim(replacement).unwrap();
-    assert_eq!((claim.owner, claim.flags), (OWNER, SUPPRESS));
+    assert_eq!(session(claim), (OWNER, SUPPRESS));
     assert!(!tiled(&mut reactor, space).contains(&replacement));
 
     // Release restores normal eligibility for the new identity.
@@ -669,7 +699,10 @@ fn discovering_an_owner_moved_claimed_window_arranges_nothing() {
         apps.simulate_until_quiet(&mut reactor);
         assert_eq!(arrangements, 0, "{previous:?} -> {window:?}");
         assert!(apps.requests().is_empty());
-        assert_eq!(reactor.state.windows.claim(window).unwrap().owner, OWNER);
+        assert_eq!(
+            reactor.state.windows.claim(window).unwrap().owner(),
+            ClaimOwner::Ipc(OWNER)
+        );
         assert!(
             reactor
                 .state

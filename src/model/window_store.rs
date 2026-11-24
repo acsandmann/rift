@@ -66,14 +66,36 @@ pub enum ClaimOwner {
 /// window while native identity, visibility and fullscreen tracking continue.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct WindowClaim {
-    pub owner: ClaimOwner,
-    pub flags: WindowClaimFlags,
-    /// The id the owner claimed; release accepts it across AX identity changes.
-    original: WindowId,
+    pub holder: ClaimHolder,
     workspace: Option<VirtualWorkspaceId>,
 }
 
+/// Who holds a claim, with what only that kind of holder has.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ClaimHolder {
+    /// An external manager's session.
+    Ipc {
+        port: u32,
+        flags: WindowClaimFlags,
+        /// The id the session claimed; release accepts it across AX identity changes.
+        original: WindowId,
+    },
+    /// The held left button.
+    Press,
+}
+
+impl ClaimHolder {
+    pub fn owner(&self) -> ClaimOwner {
+        match *self {
+            ClaimHolder::Ipc { port, .. } => ClaimOwner::Ipc(port),
+            ClaimHolder::Press => ClaimOwner::Press,
+        }
+    }
+}
+
 impl WindowClaim {
+    pub fn owner(&self) -> ClaimOwner { self.holder.owner() }
+
     pub fn workspace(&self) -> Option<VirtualWorkspaceId> { self.workspace }
 }
 
@@ -275,48 +297,52 @@ impl WindowStore {
 
     pub fn suppresses_focus_follows_mouse(&self, wid: Option<WindowId>) -> bool {
         !self.claims.is_empty()
-            && wid.and_then(|wid| self.claim(wid)).is_some_and(|claim| {
-                claim.flags.contains(WindowClaimFlags::SUPPRESS_FOCUS_FOLLOWS_MOUSE)
+            && wid.and_then(|wid| self.claim(wid)).is_some_and(|claim| match claim.holder {
+                ClaimHolder::Ipc { flags, .. } => {
+                    flags.contains(WindowClaimFlags::SUPPRESS_FOCUS_FOLLOWS_MOUSE)
+                }
+                ClaimHolder::Press => false,
             })
     }
 
     /// The window `owner` means by `wid`: its own claim by current, then original, id (an
     /// id reused after a rekey still reaches the claim), otherwise the window tracked as `wid`.
-    pub fn resolve_claim_target(&self, owner: ClaimOwner, wid: WindowId) -> Option<WindowId> {
-        let owned = self.owner_claims(owner);
+    pub fn resolve_claim_target(&self, port: u32, wid: WindowId) -> Option<WindowId> {
+        let owned = self.owner_claims(ClaimOwner::Ipc(port));
         if owned.contains(&wid) {
             return Some(wid);
         }
-        let original = owned
-            .iter()
-            .copied()
-            .find(|current| self.claim(*current).is_some_and(|claim| claim.original == wid));
+        let original = owned.iter().copied().find(|current| {
+            self.claim(*current).is_some_and(|claim| {
+                    matches!(claim.holder, ClaimHolder::Ipc { original, .. } if original == wid)
+                })
+        });
         original.or_else(|| self.contains_window(wid).then_some(wid))
     }
 
     /// Claim a tracked window, holding its assignment until release.
-    pub fn insert_claim(&mut self, wid: WindowId, owner: ClaimOwner, flags: WindowClaimFlags) {
+    pub fn insert_claim(&mut self, wid: WindowId, holder: ClaimHolder) {
         debug_assert!(self.contains_window(wid) && !self.is_claimed(wid));
         let workspace = self.take_assignment(wid);
-        self.windows.get_mut(&wid).unwrap().claim = Some(WindowClaim {
-            owner,
-            flags,
-            original: wid,
-            workspace,
-        });
-        self.claims.entry(owner).or_default().push(wid);
+        self.windows.get_mut(&wid).unwrap().claim = Some(WindowClaim { holder, workspace });
+        self.claims.entry(holder.owner()).or_default().push(wid);
     }
 
+    /// A session's new focus policy for a window it already holds.
     pub fn set_claim_flags(&mut self, wid: WindowId, flags: WindowClaimFlags) {
-        if let Some(claim) = self.windows.get_mut(&wid).and_then(|record| record.claim.as_mut()) {
-            claim.flags = flags;
+        if let Some(WindowClaim {
+            holder: ClaimHolder::Ipc { flags: held, .. },
+            ..
+        }) = self.windows.get_mut(&wid).and_then(|record| record.claim.as_mut())
+        {
+            *held = flags;
         }
     }
 
     /// End a claim. The caller restores the returned assignment if it is still valid.
     pub fn remove_claim(&mut self, wid: WindowId) -> Option<WindowClaim> {
         let claim = self.windows.get_mut(&wid)?.claim.take()?;
-        self.unindex_claim(claim.owner, wid);
+        self.unindex_claim(claim.owner(), wid);
         self.prune_window_record(wid);
         Some(claim)
     }
@@ -1399,13 +1425,13 @@ impl WindowStore {
             source.floating_display_geometry = None;
         }
         if let Some(mut claim) = self.windows.get_mut(&from).and_then(|r| r.claim.take()) {
-            self.unindex_claim(claim.owner, from);
+            self.unindex_claim(claim.owner(), from);
             // The recognized identity's claim wins. A claim taken on the provisional
             // replacement ends; its owner's requests then resolve to the surviving claim.
             if let Some(displaced) = self.windows.get_mut(&to).and_then(|r| r.claim.take()) {
-                self.unindex_claim(displaced.owner, to);
+                self.unindex_claim(displaced.owner(), to);
                 claim.workspace = claim.workspace.or(displaced.workspace);
-                if displaced.owner != claim.owner {
+                if displaced.owner() != claim.owner() {
                     tracing::warn!(
                         ?from,
                         ?to,
@@ -1415,7 +1441,7 @@ impl WindowStore {
                 }
             }
             self.windows.get_mut(&to).unwrap().claim = Some(claim);
-            self.claims.entry(claim.owner).or_default().push(to);
+            self.claims.entry(claim.owner()).or_default().push(to);
         }
         // A replacement admitted before its predecessor was recognized yields to the claim.
         if self.is_claimed(to) {
@@ -1471,7 +1497,7 @@ impl WindowStore {
             return None;
         };
         if let Some(claim) = record.claim {
-            self.unindex_claim(claim.owner, window_id);
+            self.unindex_claim(claim.owner(), window_id);
         }
         if let Some(assignment) = record.workspace {
             self.remove_window_from_workspace_index(window_id, assignment);
@@ -1757,12 +1783,14 @@ impl WindowStore {
             }
             if let Some(claim) = record.claim {
                 debug_assert!(record.workspace.is_none());
-                debug_assert!(self.owner_claims(claim.owner).contains(&wid));
+                debug_assert!(self.owner_claims(claim.owner()).contains(&wid));
             }
         }
         for (&owner, ids) in &self.claims {
             debug_assert!(!ids.is_empty());
-            debug_assert!(ids.iter().all(|wid| self.claim(*wid).is_some_and(|c| c.owner == owner)));
+            debug_assert!(
+                ids.iter().all(|wid| self.claim(*wid).is_some_and(|c| c.owner() == owner))
+            );
         }
         for (&pid, ids) in &self.app_windows {
             debug_assert!(ids.iter().all(|wid| wid.pid == pid && self.windows.contains_key(wid)));
@@ -1958,7 +1986,7 @@ mod tests {
         let mut workspaces = WorkspaceStore::new();
         let [home, moved, replaced] = ["Home", "Moved", "Replaced"]
             .map(|name| workspaces.create_workspace(space, Some(name.into())).unwrap());
-        let (owner, other) = (ClaimOwner::Ipc(7), ClaimOwner::Ipc(8));
+        let (owner, other) = (7, 8);
         let (wid, rekeyed, sibling) =
             (WindowId::new(1, 1), WindowId::new(1, 2), WindowId::new(1, 3));
         store.insert_window(wid, admitted(wid, WindowServerId::new(1)));
@@ -1966,7 +1994,11 @@ mod tests {
         store.assign_window_to_workspace(wid, home);
         store.assign_window_to_workspace(sibling, home);
 
-        store.insert_claim(wid, owner, WindowClaimFlags::empty());
+        store.insert_claim(wid, ClaimHolder::Ipc {
+            port: owner,
+            flags: WindowClaimFlags::empty(),
+            original: wid,
+        });
         assert!(!store.is_admitted(wid) && !store.can_reconcile_admission(wid));
         assert!(
             store.window(wid).unwrap().is_admitted(),
@@ -1989,7 +2021,7 @@ mod tests {
             store.reconcile_ax_identity(rekeyed, Some(WindowServerId::new(1))),
             Some(wid)
         );
-        assert_eq!(store.owner_claims(owner), &[rekeyed]);
+        assert_eq!(store.owner_claims(ClaimOwner::Ipc(owner)), &[rekeyed]);
         assert_eq!(store.claim(rekeyed).unwrap().workspace(), Some(replaced));
         assert_eq!(store.workspace_windows(home), vec![sibling]);
         assert_eq!(store.resolve_claim_target(owner, wid), Some(rekeyed));
@@ -1997,8 +2029,13 @@ mod tests {
         store.debug_assert_invariants();
 
         let claim = store.remove_claim(rekeyed).unwrap();
-        assert_eq!((claim.owner, claim.workspace()), (owner, Some(replaced)));
-        assert!(store.is_admitted(rekeyed) && store.owner_claims(owner).is_empty());
+        assert_eq!(
+            (claim.owner(), claim.workspace()),
+            (ClaimOwner::Ipc(owner), Some(replaced))
+        );
+        assert!(
+            store.is_admitted(rekeyed) && store.owner_claims(ClaimOwner::Ipc(owner)).is_empty()
+        );
     }
 
     #[test]
@@ -2008,7 +2045,7 @@ mod tests {
         let mut workspaces = WorkspaceStore::new();
         let [home, provisional] = ["Home", "Provisional"]
             .map(|name| workspaces.create_workspace(space, Some(name.into())).unwrap());
-        let (a, b, c) = (ClaimOwner::Ipc(1), ClaimOwner::Ipc(2), ClaimOwner::Ipc(3));
+        let (a, b, c) = (1, 2, 3);
         let id = |idx| WindowId::new(1, idx);
         let wsid = WindowServerId::new;
         let add = |store: &mut WindowStore, idx: u32, server: u32, workspace| {
@@ -2019,13 +2056,21 @@ mod tests {
 
         // A's window is rekeyed and its old id reused by an unrelated window B claims.
         add(&mut store, 1, 1, home);
-        store.insert_claim(id(1), a, flags);
+        store.insert_claim(id(1), ClaimHolder::Ipc {
+            port: a,
+            flags,
+            original: id(1),
+        });
         add(&mut store, 2, 2, provisional);
         store.reconcile_ax_identity(id(2), Some(wsid(1)));
         add(&mut store, 1, 9, home);
         assert_eq!(store.resolve_claim_target(a, id(1)), Some(id(2)));
         assert_eq!(store.resolve_claim_target(c, id(1)), Some(id(1)));
-        store.insert_claim(id(1), b, flags);
+        store.insert_claim(id(1), ClaimHolder::Ipc {
+            port: b,
+            flags,
+            original: id(1),
+        });
         assert_eq!(store.resolve_claim_target(a, id(1)), Some(id(2)));
         assert_eq!(store.resolve_claim_target(b, id(1)), Some(id(1)));
         assert_eq!(store.resolve_claim_target(a, id(2)), Some(id(2)));
@@ -2035,12 +2080,19 @@ mod tests {
         // Both identities of one window claimed by different owners: the recognized
         // identity's claim survives with its original id and workspace; the other ends.
         add(&mut store, 3, 3, provisional);
-        store.insert_claim(id(3), a, flags);
+        store.insert_claim(id(3), ClaimHolder::Ipc {
+            port: a,
+            flags,
+            original: id(3),
+        });
         store.reconcile_ax_identity(id(3), Some(wsid(9)));
         let merged = store.claim(id(3)).unwrap();
-        assert_eq!((merged.owner, merged.workspace()), (b, Some(home)));
-        assert_eq!(store.owner_claims(a), &[id(2)]);
-        assert_eq!(store.owner_claims(b), &[id(3)]);
+        assert_eq!(
+            (merged.owner(), merged.workspace()),
+            (ClaimOwner::Ipc(b), Some(home))
+        );
+        assert_eq!(store.owner_claims(ClaimOwner::Ipc(a)), &[id(2)]);
+        assert_eq!(store.owner_claims(ClaimOwner::Ipc(b)), &[id(3)]);
         assert_eq!(store.resolve_claim_target(b, id(1)), Some(id(3)));
         assert_eq!(
             store.resolve_claim_target(a, id(3)),
@@ -2051,10 +2103,16 @@ mod tests {
 
         // The same owner on both identities keeps one claim reachable by either id.
         add(&mut store, 4, 4, provisional);
-        store.insert_claim(id(4), a, WindowClaimFlags::SUPPRESS_FOCUS_FOLLOWS_MOUSE);
+        store.insert_claim(id(4), ClaimHolder::Ipc {
+            port: a,
+            flags: WindowClaimFlags::SUPPRESS_FOCUS_FOLLOWS_MOUSE,
+            original: id(4),
+        });
         store.reconcile_ax_identity(id(4), Some(wsid(1)));
-        assert_eq!(store.owner_claims(a), &[id(4)]);
-        assert_eq!(store.claim(id(4)).unwrap().flags, flags);
+        assert_eq!(store.owner_claims(ClaimOwner::Ipc(a)), &[id(4)]);
+        assert!(
+            matches!(store.claim(id(4)).unwrap().holder, ClaimHolder::Ipc { flags: held, .. } if held == flags)
+        );
         for requested in [id(1), id(4)] {
             assert_eq!(store.resolve_claim_target(a, requested), Some(id(4)));
         }
@@ -2072,7 +2130,7 @@ mod tests {
 
         // Destruction ends a claim and its original-id mapping.
         store.remove_window(id(3));
-        assert!(store.owner_claims(b).is_empty());
+        assert!(store.owner_claims(ClaimOwner::Ipc(b)).is_empty());
         assert_eq!(store.resolve_claim_target(b, id(1)), None);
         store.debug_assert_invariants();
     }
