@@ -2884,44 +2884,6 @@ fn cross_display_drag_relocates_the_window_once_and_preserves_floating() {
     }
 }
 
-#[test]
-fn new_window_under_a_held_pointer_waits_for_a_frame_change_before_dragging() {
-    let (mut apps, mut reactor) = test_context();
-    let screen = CGRect::new(CGPoint::ZERO, CGSize::new(1000., 1000.));
-    let space = SpaceId::new(1);
-    apps.make_app_and_settle_on_screen(&mut reactor, screen, space, 1, make_windows(1));
-    apps.requests();
-    let wid = WindowId::new(1, 2);
-    let frame = CGRect::new(CGPoint::new(200., 200.), CGSize::new(500., 500.));
-    window_server::set_cursor_location_override(Some(frame.mid()));
-    reactor.handle_event(Event::WindowCreated(
-        wid,
-        make_window_info(frame, None, "Detached tab", None),
-        None,
-        Some(MouseState::Down),
-    ));
-    window_server::set_cursor_location_override(None);
-    assert!(reactor.state.windows.is_admitted(wid));
-    assert!(
-        !reactor.is_in_drag(),
-        "creation alone must not acquire drag ownership"
-    );
-
-    let original = reactor.state.windows.window(wid).unwrap().frame_monotonic;
-    let frame_changed = |frame| {
-        Event::WindowFrameChanged(wid, frame, None, Requested(false), Some(MouseState::Down))
-    };
-    reactor.handle_event(frame_changed(original));
-    assert!(!reactor.is_in_drag());
-
-    let mut moved = original;
-    moved.origin.x += 25.;
-    reactor.handle_event(frame_changed(moved));
-    assert!(reactor.is_dragging_window(wid));
-    reactor.handle_event(Event::MouseUp(crate::actor::drag::MouseButton::Left));
-    assert!(!reactor.is_in_drag());
-}
-
 /// #689: a browser tab dragged out of its window becomes a new window while the left
 /// button is still held. The window server reports it first; Rift then hears of it
 /// through the created notification or a window-list refresh, whichever comes first.
@@ -2984,6 +2946,37 @@ impl TornTab {
 fn release_left_button(reactor: &mut Reactor) {
     crate::sys::event::TEST_MOUSE_STATE.with(|state| state.set(Some(MouseState::Up)));
     reactor.handle_event(Event::MouseUp(crate::actor::drag::MouseButton::Left));
+}
+
+/// The app drags its own new window: Rift neither takes drag ownership of it while the
+/// button is held nor shows a drop target, and it joins the layout at the release.
+#[test]
+fn a_window_that_appears_under_the_press_is_not_a_rift_drag_and_joins_at_the_release() {
+    let tab = torn_tab_under_held_button();
+    window_server::set_cursor_location_override(Some(tab.info.frame.mid()));
+    let mut tab = tab.created();
+    assert!(
+        !tab.reactor.is_in_drag(),
+        "creation alone must not acquire drag ownership"
+    );
+
+    let mut moved = tab.info.frame;
+    moved.origin.x += 25.;
+    let event =
+        Event::WindowFrameChanged(tab.wid, moved, None, Requested(false), Some(MouseState::Down));
+    tab.reactor.handle_event(event);
+    window_server::set_cursor_location_override(None);
+    assert!(
+        !tab.reactor.is_in_drag(),
+        "a move under the press must not become a Rift drag"
+    );
+
+    release_left_button(&mut tab.reactor);
+    assert!(!tab.reactor.is_in_drag());
+    assert_eq!(
+        tab.reactor.assigned_space_for_window_id(tab.wid),
+        Some(tab.space)
+    );
 }
 
 #[test]
