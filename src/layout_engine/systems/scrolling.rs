@@ -1223,6 +1223,8 @@ impl LayoutState {
         }
     }
 
+    /// A bookmarked column that is dormant has no geometry: its bookmark waits
+    /// for readmission, and the settle that follows keeps the view in bounds.
     fn apply_restored_view(&mut self) {
         let (Some(bookmark), Some(geometry)) = (&self.camera.restored_view, &self.geometry) else {
             return;
@@ -1231,14 +1233,8 @@ impl LayoutState {
             let offset = self.camera.viewport.offset();
             self.camera.viewport.rebase(column.world_x + bookmark.relative_offset - offset);
             self.camera.restored_view = None;
-        } else {
-            // A dormant column has no geometry. Keep its bookmark for readmission,
-            // and use the available strip bounds for the current projection.
-            let offset = geometry.clamp(self.camera.viewport.offset());
-            self.camera.viewport = Viewport::at(offset);
-            if !self.arrangement.columns.iter().any(|column| column.id == bookmark.column) {
-                self.camera.restored_view = None;
-            }
+        } else if !self.arrangement.columns.iter().any(|column| column.id == bookmark.column) {
+            self.camera.restored_view = None;
         }
     }
 
