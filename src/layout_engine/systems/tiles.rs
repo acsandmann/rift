@@ -1,6 +1,6 @@
 use objc2_core_foundation::CGRect;
 
-use super::groups::GroupLayouts;
+use super::groups::{GroupLayouts, Seat};
 use super::{EditResult, WindowLayoutConstraints};
 use crate::actor::app::WindowId;
 use crate::common::collections::HashMap;
@@ -433,9 +433,8 @@ pub(super) fn resize_selection(
         ResizeOrientation::Smart => {
             let mut node = selection;
             while let Some(parent) = node.parent(tiles.map()) {
-                let kind = tiles.layout(parent);
-                if !kind.is_group() {
-                    let directions = match kind.orientation() {
+                if let Seat::Pane { orientation, .. } = tiles.seat(node) {
+                    let directions = match orientation {
                         Orientation::Horizontal => [Direction::Right, Direction::Left],
                         Orientation::Vertical => [Direction::Down, Direction::Up],
                     };
@@ -466,14 +465,11 @@ pub(super) fn resize_internal(
     let exchange_rate = resizing_node
         .ancestors(&tiles.tree.map)
         .skip(1)
-        .try_fold(1.0, |r, node| match node.parent(&tiles.tree.map) {
-            Some(parent)
-                if tiles.tree.map.kind(parent).orientation() == direction.orientation()
-                    && !tiles.tree.map.kind(parent).is_group() =>
-            {
+        .try_fold(1.0, |r, node| match tiles.seat(node) {
+            Seat::Pane { orientation, .. } if orientation == direction.orientation() => {
                 tiles.tree.map.proportion(node).map(|p| r * p)
             }
-            _ => Some(r),
+            Seat::Pane { .. } | Seat::Tab { .. } | Seat::Root => Some(r),
         })
         .unwrap_or(1.0);
     let local_ratio = f64::from(screen_ratio)
@@ -489,11 +485,11 @@ fn resize_pair(
     direction: Direction,
 ) -> Option<(NodeId, NodeId)> {
     let map = tiles.map();
-    node.ancestors_with_parent(map).find_map(|(candidate, parent)| {
-        if map.kind(parent?).is_group() {
-            return None;
+    node.ancestors(map).find_map(|candidate| match tiles.seat(candidate) {
+        Seat::Pane { .. } => {
+            tiles.move_over(candidate, direction).map(|sibling| (candidate, sibling))
         }
-        tiles.move_over(candidate, direction).map(|sibling| (candidate, sibling))
+        Seat::Tab { .. } | Seat::Root => None,
     })
 }
 
@@ -558,18 +554,16 @@ pub(super) fn apply_explicit_window_drop(
     };
 
     if action == crate::layout_engine::WindowDropAction::Stack {
-        if let Some(parent) = target_node.parent(tiles.map())
-            && tiles.layout(parent).is_group()
-        {
-            tiles.tree.move_node(source_node, Placement::After(target_node));
-            tiles.select(source_node);
-            return true;
-        }
-        let parent_kind = target_node
-            .parent(tiles.map())
-            .map(|parent| tiles.layout(parent))
-            .unwrap_or(LayoutKind::Horizontal);
-        let stack_kind = match parent_kind.orientation() {
+        let orientation = match tiles.seat(target_node) {
+            Seat::Tab { .. } => {
+                tiles.tree.move_node(source_node, Placement::After(target_node));
+                tiles.select(source_node);
+                return true;
+            }
+            Seat::Pane { orientation, .. } => orientation,
+            Seat::Root => Orientation::Horizontal,
+        };
+        let stack_kind = match orientation {
             Orientation::Horizontal => LayoutKind::HorizontalStack,
             Orientation::Vertical => LayoutKind::VerticalStack,
         };
@@ -585,19 +579,18 @@ pub(super) fn apply_explicit_window_drop(
     let crate::layout_engine::WindowDropAction::Insert(direction) = action else {
         unreachable!()
     };
-    let target_anchor = target_node
-        .parent(tiles.map())
-        .filter(|parent| tiles.layout(*parent).is_group())
-        .unwrap_or(target_node);
+    let target_anchor = match tiles.seat(target_node) {
+        Seat::Tab { stack } => stack,
+        Seat::Pane { .. } | Seat::Root => target_node,
+    };
     if target_anchor == source_node
         || target_anchor.ancestors(tiles.map()).any(|node| node == source_node)
     {
         return false;
     }
     let before = matches!(direction, Direction::Left | Direction::Up);
-    if let Some(parent) = target_anchor.parent(tiles.map())
-        && !tiles.layout(parent).is_group()
-        && tiles.layout(parent).orientation() == direction.orientation()
+    if let Seat::Pane { orientation, .. } = tiles.seat(target_anchor)
+        && orientation == direction.orientation()
     {
         let placement = if before {
             Placement::Before(target_anchor)

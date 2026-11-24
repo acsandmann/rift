@@ -1102,4 +1102,61 @@ mod tests {
         assert_eq!(system.windows(layout, WindowQuery::Stack(w(1))), [w(1)]);
         assert_eq!(system.windows(layout, WindowQuery::Stack(w(3))), []);
     }
+
+    #[test]
+    fn dropping_onto_a_stacked_window_targets_its_stack_and_onto_a_pane_targets_the_pane() {
+        use crate::common::config::StackDefaultOrientation;
+        use crate::layout_engine::WindowDropAction::{Insert, Stack};
+
+        // Windows 1 and 2 are a stack; windows 3 and 4 are panes of the root split beside it.
+        let build = || {
+            let mut system = TraditionalLayoutSystem::default();
+            let layout = system.create_layout();
+            for window in [w(1), w(2), w(3), w(4)] {
+                system.add_window_after_selection(layout, window);
+            }
+            system.focus(layout, Focus::Select(w(1)));
+            system.edit(layout, LayoutEdit::Group(GroupEdit::Join(Direction::Right)));
+            let _ = system.edit(
+                layout,
+                LayoutEdit::Group(GroupEdit::Stack(StackDefaultOrientation::Same)),
+            );
+            assert_eq!(system.windows(layout, WindowQuery::Stack(w(1))), [w(1), w(2)]);
+            (system, layout)
+        };
+        let drop = |system: &mut TraditionalLayoutSystem, layout, source, target, action| {
+            let edit = LayoutEdit::Drop { source, target, action };
+            assert!(system.edit(layout, edit).changed());
+        };
+        let parent = |system: &TraditionalLayoutSystem, layout, window| {
+            let tiles = &system.tiles;
+            tiles.window_node(layout, window).and_then(|node| node.parent(tiles.map()))
+        };
+
+        // Stacking onto a tab adds a tab right after it.
+        let (mut system, layout) = build();
+        drop(&mut system, layout, w(4), w(1), Stack);
+        assert_eq!(system.windows(layout, WindowQuery::Stack(w(1))), [
+            w(1),
+            w(4),
+            w(2)
+        ]);
+
+        // Stacking onto a pane of a horizontal split makes a new horizontal stack of the two.
+        let (mut system, layout) = build();
+        drop(&mut system, layout, w(4), w(3), Stack);
+        assert_eq!(system.windows(layout, WindowQuery::Stack(w(3))), [w(3), w(4)]);
+        let new_stack = parent(&system, layout, w(3)).unwrap();
+        assert_eq!(system.tiles.layout(new_stack), LayoutKind::HorizontalStack);
+
+        // Inserting beside a tab, along the split's axis, inserts beside its whole stack.
+        let (mut system, layout) = build();
+        drop(&mut system, layout, w(4), w(2), Insert(Direction::Left));
+        let root = Some(system.tiles.root(layout));
+        assert_eq!(parent(&system, layout, w(4)), root);
+        assert_eq!(system.windows(layout, WindowQuery::Stack(w(1))), [w(1), w(2)]);
+        let stack = parent(&system, layout, w(1)).unwrap();
+        let window_4 = system.tiles.window_node(layout, w(4)).unwrap();
+        assert_eq!(window_4.next_sibling(system.tiles.map()), Some(stack));
+    }
 }
