@@ -1206,7 +1206,7 @@ impl LayoutState {
         if !same_constraints {
             snapshot.clone_from(constraints);
         }
-        self.geometry = Some(Geometry::build(
+        let geometry = Geometry::build(
             self,
             settings,
             inactive,
@@ -1214,8 +1214,8 @@ impl LayoutState {
             snapshot,
             revision,
             gaps.clone(),
-        ));
-        self.apply_restored_view();
+        );
+        self.set_geometry(geometry, None);
         if initial {
             self.camera.viewport = Viewport::at(0.0);
             if self.geometry.as_ref().unwrap().columns.len() == 1 {
@@ -1247,8 +1247,22 @@ impl LayoutState {
         }
     }
 
-    /// After an edit the viewport comes to rest within the strip bounds, or, when
-    /// centred, centred on whichever column is selected now.
+    /// Every geometry change, whether an edit, a screen or gap change or new
+    /// constraints, goes through here, so none can skip settling the viewport.
+    /// `anchor` is a column that keeps its place on screen, with its old world x.
+    fn set_geometry(&mut self, geometry: Geometry, anchor: Option<(ColumnId, f64)>) {
+        if let Some((id, old_x)) = anchor
+            && let Some(new) = geometry.column(id)
+        {
+            self.camera.viewport.rebase(new.world_x - old_x);
+        }
+        self.geometry = Some(geometry);
+        self.apply_restored_view();
+        self.settle_viewport();
+    }
+
+    /// After the geometry changes the viewport comes to rest within the strip
+    /// bounds, or, when centred, centred on whichever column is selected now.
     fn settle_viewport(&mut self) {
         let (Some(g), Viewport::Resting(rest, motion)) = (&self.geometry, &self.camera.viewport)
         else {
@@ -1336,7 +1350,7 @@ impl LayoutState {
         let old_x = id.and_then(|id| self.geometry.as_ref()?.column(id)).map(|c| c.world_x);
         let result = edit(self);
         if let Some(old) = self.geometry.take() {
-            self.geometry = Some(Geometry::build(
+            let geometry = Geometry::build(
                 self,
                 settings,
                 inactive,
@@ -1344,19 +1358,13 @@ impl LayoutState {
                 old.constraints,
                 old.constraint_revision,
                 old.gaps,
-            ));
+            );
             let anchor = window
                 .and_then(|wid| self.arrangement.locate(wid))
                 .map(|(col, _)| self.arrangement.columns[col].id)
                 .or_else(|| id.filter(|id| self.arrangement.columns.iter().any(|c| c.id == *id)));
-            if let (Some(old_x), Some(new)) =
-                (old_x, anchor.and_then(|id| self.geometry.as_ref()?.column(id)))
-            {
-                self.camera.viewport.rebase(new.world_x - old_x);
-            }
-            self.apply_restored_view();
+            self.set_geometry(geometry, anchor.zip(old_x));
         }
-        self.settle_viewport();
         if self.arrangement.columns.is_empty() {
             self.camera.viewport = Viewport::at(0.0);
         }
@@ -2930,6 +2938,79 @@ pub(crate) mod tests {
         assert_eq!(f.frame(8).origin.x, 750.0);
     }
 
+    /// Four 500px columns, the last one selected and at rest at the end of the
+    /// strip (offset 1000 on a 1000px screen).
+    fn fixed_width_strip_scrolled_to_the_end() -> Fixture {
+        let mut f = Fixture::new(4);
+        for column in &mut f.system.layouts[f.layout].arrangement.columns {
+            column.width = ColumnWidth::Fixed(500.0);
+        }
+        f.select(4);
+        f.system.finish_viewport(f.layout);
+        f.prepare();
+        assert_eq!(f.system.layouts[f.layout].camera.viewport.target(), 1000.0);
+        f
+    }
+
+    #[test]
+    fn a_resize_leaves_no_empty_space_past_the_last_column() {
+        let mut f = fixed_width_strip_scrolled_to_the_end();
+
+        f.screen.size.width = 1500.0;
+
+        assert_eq!(f.frame(4).origin.x, 1000.0);
+        assert_eq!(f.system.layouts[f.layout].camera.viewport.target(), 500.0);
+    }
+
+    #[test]
+    fn a_resize_mid_scroll_settles_in_bounds() {
+        let mut f = fixed_width_strip_scrolled_to_the_end();
+        let now = Instant::now();
+        f.system.layouts[f.layout].camera.viewport = Viewport::Resting(
+            Rest::At,
+            Motion::Animation(CameraSpring::new(900.0, 1000.0, 0.0, now)),
+        );
+
+        f.screen.size.width = 1500.0;
+        f.prepare();
+
+        assert_eq!(f.system.layouts[f.layout].camera.viewport.target(), 500.0);
+    }
+
+    #[test]
+    fn a_resize_during_a_gesture_leaves_the_bounds_to_its_release() {
+        let mut f = fixed_width_strip_scrolled_to_the_end();
+        f.system.begin_viewport_gesture(f.layout, Instant::now());
+
+        f.screen.size.width = 1500.0;
+        f.prepare();
+
+        let viewport = &f.system.layouts[f.layout].camera.viewport;
+        assert!(matches!(viewport, Viewport::Gesture(_)));
+        assert_eq!(viewport.offset(), 1000.0);
+        let release = f
+            .system
+            .end_viewport_gesture(f.layout, Duration::from_millis(220), false)
+            .unwrap();
+        assert_eq!(release.offset, 500.0);
+    }
+
+    #[test]
+    fn a_centred_column_stays_centred_when_the_screen_resizes() {
+        let mut f = Fixture::new(4);
+        f.select(4);
+        f.system.center_selected_column(f.layout);
+        f.system.finish_viewport(f.layout);
+        assert_eq!(f.frame(4).origin.x, 250.0);
+
+        f.screen.size.width = 1200.0;
+
+        assert_eq!(f.frame(4).size.width, 600.0);
+        assert_eq!(f.frame(4).origin.x, 300.0);
+        f.system.update(WindowChange::Remove(wid(1)));
+        assert_eq!(f.frame(4).origin.x, 300.0, "an unrelated close does not move it");
+    }
+
     #[test]
     fn persistence_and_clone_preserve_column_state() {
         let mut f = Fixture::new(3);
@@ -2971,7 +3052,11 @@ pub(crate) mod tests {
             .1
             .origin
             .x;
-        assert_eq!(new_x, old_x);
+        // On the wider screen the whole strip fits (bounds 0..0). Keeping the
+        // column's old screen x would leave empty space after the last column, so
+        // the restored view settles into bounds like any other geometry change.
+        assert_eq!(old_x, 250.0);
+        assert_eq!(new_x, 800.0);
 
         f.system.update(WindowChange::Add(f.layout, wid(4), None));
         let ids: Vec<_> =
