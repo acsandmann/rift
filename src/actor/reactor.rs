@@ -68,7 +68,7 @@ use crate::model::broadcast::{
 };
 use crate::model::space_activation::{SpaceActivationConfig, SpaceActivationPolicy};
 use crate::model::tx_store::WindowTxStore;
-use crate::model::window_store::NativeFullscreenTransition;
+use crate::model::window_store::{ClaimOwner, NativeFullscreenTransition};
 use crate::sys::event::MouseState;
 use crate::sys::executor::Executor;
 use crate::sys::geometry::{CGRectDef, CGRectExt, SameAs};
@@ -2707,7 +2707,7 @@ impl Reactor {
         button: crate::actor::drag::MouseButton,
     ) {
         if button == crate::actor::drag::MouseButton::Left {
-            self.release_press(changes);
+            self.release_owner_claims(changes, ClaimOwner::Press);
         }
         if self.is_mission_control_active()
             || (self.is_in_drag() && !self.drag_manager.actor.owns_button(button))

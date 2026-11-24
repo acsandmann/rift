@@ -58,7 +58,9 @@ impl Reactor {
             None => Ok(()),
             Some(claim) if claim.owner() != ClaimOwner::Ipc(port) => Err(OWNED_ELSEWHERE),
             Some(_) => {
-                self.release_claims_of([wid]);
+                self.finish_claim_release(|reactor, changes| {
+                    reactor.release_claims_of(changes, [wid]);
+                });
                 Ok(())
             }
         }
@@ -66,29 +68,35 @@ impl Reactor {
 
     /// The session ended: return all of its windows, arranging each space once.
     pub(crate) fn release_claims(&mut self, port: u32) {
-        let windows = self.state.windows.owner_claims(ClaimOwner::Ipc(port)).to_vec();
-        if !windows.is_empty() {
-            self.release_claims_of(windows);
-        }
-    }
-
-    /// The left button was released: return the windows that appeared under it.
-    pub(super) fn release_press(&mut self, changes: &mut Changes) {
-        let windows = self.state.windows.owner_claims(ClaimOwner::Press).to_vec();
-        for window in windows {
-            self.readmit(changes, window);
-        }
-    }
-
-    fn release_claims_of(&mut self, windows: impl IntoIterator<Item = WindowId>) {
-        self.with_claim_focus_policy(|reactor| {
-            let mut changes = Changes::default();
-            for window in windows {
-                reactor.readmit(&mut changes, window);
-            }
-            changes.refresh_menu = true;
-            reactor.finish(changes, None, None);
+        self.finish_claim_release(|reactor, changes| {
+            reactor.release_owner_claims(changes, ClaimOwner::Ipc(port));
         });
+    }
+
+    /// Return every window `owner` holds: a session's at its end, the press's at the release.
+    pub(super) fn release_owner_claims(&mut self, changes: &mut Changes, owner: ClaimOwner) {
+        let windows = self.state.windows.owner_claims(owner).to_vec();
+        self.release_claims_of(changes, windows);
+    }
+
+    fn release_claims_of(
+        &mut self,
+        changes: &mut Changes,
+        windows: impl IntoIterator<Item = WindowId>,
+    ) {
+        self.with_claim_focus_policy(|reactor| {
+            for window in windows {
+                changes.refresh_menu = true;
+                reactor.readmit(changes, window);
+            }
+        });
+    }
+
+    /// A release outside event dispatch reconciles on its own.
+    fn finish_claim_release(&mut self, release: impl FnOnce(&mut Self, &mut Changes)) {
+        let mut changes = Changes::default();
+        release(self, &mut changes);
+        self.finish(changes, None, None);
     }
 
     /// Replays normal reconciliation for a released window.
