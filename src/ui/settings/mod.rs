@@ -29,6 +29,7 @@ use crate::sys::screen::ScreenInfo;
 
 mod applications;
 mod commands;
+mod editing;
 mod editors;
 mod interface;
 mod interface_preview;
@@ -373,6 +374,7 @@ pub struct Settings {
     window: SettingsWindow,
     router: Rc<Router>,
     activation: Rc<SettingsActivation>,
+    _editing: editing::EndEditing,
 }
 
 /// Keep menu-bar ownership for the whole window lifetime, including its sheets.
@@ -474,6 +476,7 @@ impl Settings {
         });
         timing::finish(attachment_timing, "toolbar attachment");
         window.ns_window().center();
+        let editing = editing::EndEditing::new(window.ns_window());
         let content_timing = timing::start();
         let navigation =
             NavigationSplitView::new(&ui, sidebar_pane(ui, &router, sidebar.clone()), host);
@@ -518,7 +521,12 @@ impl Settings {
         *env.window.borrow_mut() = window.handle();
         timing::finish(navigation_timing, "navigation/menu");
         router.show(Category::General);
-        Self { window, router, activation }
+        Self {
+            window,
+            router,
+            activation,
+            _editing: editing,
+        }
     }
 
     fn model(&self) -> &Rc<Model> { &self.router.model }

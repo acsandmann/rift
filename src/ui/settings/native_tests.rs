@@ -275,6 +275,94 @@ pub fn run(ui: Ui) {
         }
         assert_eq!(edited.settings.animate, original);
 
+        // A field commits on a click elsewhere in the window, and when the window resigns key.
+        {
+            use objc2_app_kit::{NSEvent, NSEventModifierFlags, NSEventType};
+            let before = settings.model().source.borrow().as_ref().clone();
+            let mut enabled = before.clone();
+            enabled.settings.ui.mission_control.enabled = true;
+            // The fade's duration is the page's first text field.
+            enabled.settings.ui.mission_control.fade_enabled = true;
+            settings.router.model.replace_source(enabled);
+            let page = super::interface::overview(ui, &settings.router.model);
+            page.synchronize(&settings.router.model);
+            settings.router.host.set_cached_page(page.view.clone());
+            let window = settings.window.ns_window();
+            let field = editable(page.view.ns_view()).unwrap();
+            let edit = |text: &str| {
+                assert!(window.makeFirstResponder(Some(&field)));
+                field
+                    .currentEditor()
+                    .unwrap()
+                    .setString(&objc2_foundation::NSString::from_str(text));
+            };
+            let commit = |pending: &mut tokio::sync::mpsc::UnboundedReceiver<Request>| {
+                let request = pending.try_recv().expect("ending the editing commits the value");
+                let Action::Edit(edit) = request.action else {
+                    panic!("source edit")
+                };
+                let mut source = settings.router.model.source.borrow().as_ref().clone();
+                edit(&mut source).unwrap();
+                settings.router.model.replace_source(source);
+                page.synchronize(&settings.router.model);
+                settings
+                    .router
+                    .model
+                    .source
+                    .borrow()
+                    .settings
+                    .ui
+                    .mission_control
+                    .fade_duration_ms
+            };
+
+            edit("3");
+            // The window is never shown; lay the page out so the field has a frame.
+            window.contentView().unwrap().layoutSubtreeIfNeeded();
+            let center = field.convertPoint_toView(
+                CGPoint::new(field.bounds().size.width / 2., field.bounds().size.height / 2.),
+                None,
+            );
+            assert!(
+                !editing::ends_editing(window, center),
+                "a click in the field keeps editing"
+            );
+            // A corner of the window, away from every field.
+            let corner = CGPoint::new(2.0, 2.0);
+            assert!(editing::ends_editing(window, corner));
+            let app = NSApplication::sharedApplication(ui.mtm());
+            for kind in [NSEventType::LeftMouseDown, NSEventType::LeftMouseUp] {
+                let event = NSEvent::mouseEventWithType_location_modifierFlags_timestamp_windowNumber_context_eventNumber_clickCount_pressure(
+                    kind,
+                    corner,
+                    NSEventModifierFlags::empty(),
+                    0.0,
+                    window.windowNumber(),
+                    None,
+                    0,
+                    1,
+                    1.0,
+                )
+                .unwrap();
+                // Local monitors see an event as it is sent.
+                app.sendEvent(&event);
+            }
+            assert!(field.currentEditor().is_none(), "a click elsewhere ends editing");
+            assert_eq!(commit(&mut pending), 3.0);
+
+            edit("4");
+            unsafe {
+                objc2_foundation::NSNotificationCenter::defaultCenter()
+                    .postNotificationName_object(
+                        objc2_app_kit::NSWindowDidResignKeyNotification,
+                        Some(window),
+                    );
+            }
+            assert!(field.currentEditor().is_none(), "resigning key ends editing");
+            assert_eq!(commit(&mut pending), 4.0);
+            settings.router.model.replace_source(before);
+        }
+
         let root = settings.window.ns_window().contentView().unwrap();
         assert_eq!(
             settings
