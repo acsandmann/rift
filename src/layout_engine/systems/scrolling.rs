@@ -647,6 +647,9 @@ impl Geometry {
         }
     }
 
+    /// The nearest resting position within the strip bounds.
+    fn clamp(&self, offset: f64) -> f64 { offset.clamp(self.bounds.0, self.bounds.1) }
+
     fn column(&self, id: ColumnId) -> Option<ColumnGeometry> {
         self.columns.iter().find(|c| c.id == id).copied()
     }
@@ -827,9 +830,7 @@ impl Serialize for LayoutState {
             self.camera.viewport,
             Viewport::Gesture(_) | Viewport::Resting(_, Motion::Animation(_))
         ) {
-            self.geometry
-                .as_ref()
-                .map_or(current, |g| current.clamp(g.bounds.0, g.bounds.1))
+            self.geometry.as_ref().map_or(current, |g| g.clamp(current))
         } else {
             current
         };
@@ -1233,7 +1234,7 @@ impl LayoutState {
         } else {
             // A dormant column has no geometry. Keep its bookmark for readmission,
             // and use the available strip bounds for the current projection.
-            let offset = self.camera.viewport.offset().clamp(geometry.bounds.0, geometry.bounds.1);
+            let offset = geometry.clamp(self.camera.viewport.offset());
             self.camera.viewport = Viewport::at(offset);
             if !self.arrangement.columns.iter().any(|column| column.id == bookmark.column) {
                 self.camera.restored_view = None;
@@ -1266,7 +1267,7 @@ impl LayoutState {
         let Viewport::Resting(rest, motion) = &mut self.camera.viewport else {
             return;
         };
-        let clamped = motion.target().clamp(g.bounds.0, g.bounds.1);
+        let clamped = g.clamp(motion.target());
         let target = match rest {
             Rest::At => clamped,
             Rest::Centred => centred.unwrap_or(clamped),
@@ -1647,7 +1648,7 @@ impl ScrollingLayoutSystem {
         let column = state.active_column_geometry(g)?;
         let step = column.width + g.gaps.inner.horizontal;
         let raw = state.camera.viewport.offset() + delta * step;
-        state.camera.viewport.set_target(raw.clamp(g.bounds.0, g.bounds.1));
+        state.camera.viewport.set_target(g.clamp(raw));
         if raw < g.bounds.0 {
             Some((Direction::Left, (g.bounds.0 - raw) / step))
         } else if raw > g.bounds.1 {
@@ -1753,8 +1754,7 @@ impl ScrollingLayoutSystem {
             )
         {
             let offset = state.camera.viewport.offset();
-            let offset =
-                state.geometry.as_ref().map_or(offset, |g| offset.clamp(g.bounds.0, g.bounds.1));
+            let offset = state.geometry.as_ref().map_or(offset, |g| g.clamp(offset));
             state.camera.viewport = Viewport::at(offset);
             state.camera.motion = MotionHistory::default();
         }
@@ -2014,9 +2014,8 @@ impl LayoutSystem for ScrollingLayoutSystem {
         } else if matches!(state.camera.viewport, Viewport::Resting(_, Motion::Animation(_))) {
             // An in-flight clone stops where it is, so it no longer rests centred.
             let offset = state.camera.viewport.offset();
-            state.camera.viewport = Viewport::at(
-                state.geometry.as_ref().map_or(offset, |g| offset.clamp(g.bounds.0, g.bounds.1)),
-            );
+            state.camera.viewport =
+                Viewport::at(state.geometry.as_ref().map_or(offset, |g| g.clamp(offset)));
         }
         self.layouts.insert(state)
     }
