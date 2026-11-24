@@ -485,12 +485,13 @@ fn resize_pair(
     direction: Direction,
 ) -> Option<(NodeId, NodeId)> {
     let map = tiles.map();
-    node.ancestors(map).find_map(|candidate| match tiles.seat(candidate) {
-        Seat::Pane { .. } => {
-            tiles.move_over(candidate, direction).map(|sibling| (candidate, sibling))
-        }
-        Seat::Tab { .. } | Seat::Root => None,
-    })
+    node.ancestors_with_parent(map)
+        .find_map(|(candidate, parent)| match tiles.seat_under(parent) {
+            Seat::Pane { .. } => {
+                tiles.move_over(candidate, direction).map(|sibling| (candidate, sibling))
+            }
+            Seat::Tab { .. } | Seat::Root => None,
+        })
 }
 
 pub(super) fn set_frame_from_resize(
@@ -579,10 +580,7 @@ pub(super) fn apply_explicit_window_drop(
     let crate::layout_engine::WindowDropAction::Insert(direction) = action else {
         unreachable!()
     };
-    let target_anchor = match tiles.seat(target_node) {
-        Seat::Tab { stack } => stack,
-        Seat::Pane { .. } | Seat::Root => target_node,
-    };
+    let target_anchor = tiles.seat(target_node).stack().unwrap_or(target_node);
     if target_anchor == source_node
         || target_anchor.ancestors(tiles.map()).any(|node| node == source_node)
     {

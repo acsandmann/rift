@@ -136,8 +136,21 @@ impl TraditionalLayoutSystem {
     fn perform_natural_join(&mut self, selection: NodeId, target: NodeId, direction: Direction) {
         // Joining toward a stack joins it, whether the target is one of its tabs or the stack
         // itself.
+        let selection_seat = self.tiles.seat(selection);
+        let target_seat = self.tiles.seat(target);
+        // A side's stack: the node itself if it is one, else the stack it is a tab of.
+        let stack_of = |node: NodeId, seat: Seat| {
+            if self.tiles.is_stack(node) {
+                Some(node)
+            } else {
+                seat.stack()
+            }
+        };
         let backwards = matches!(direction, Direction::Left | Direction::Up);
-        let join = match (self.tiles.stack_of(selection), self.tiles.stack_of(target)) {
+        let join = match (
+            stack_of(selection, selection_seat),
+            stack_of(target, target_seat),
+        ) {
             (Some(stack), None) => Some((stack, target, backwards)),
             (None, Some(stack)) => Some((stack, selection, !backwards)),
             _ => None,
@@ -156,9 +169,9 @@ impl TraditionalLayoutSystem {
 
         let axis = direction.orientation();
         let kind = LayoutKind::from(axis);
-        match (self.tiles.seat(selection), self.tiles.seat(target)) {
+        match (selection_seat, target_seat) {
             // Two tabs of one stack: lay the stack out as a split.
-            (Seat::Tab { stack }, Seat::Tab { stack: other }) if stack == other => {
+            (Seat::Tab { stack, .. }, Seat::Tab { stack: other, .. }) if stack == other => {
                 self.tiles.set_layout(stack, kind);
                 self.tiles.select(stack);
                 return;
@@ -636,13 +649,12 @@ impl TraditionalLayoutSystem {
             };
             (target, target != sibling)
         } else {
+            // A stack's axis counts here as a split's does.
             let target_ancestor = moving_node
                 .ancestors_with_parent(&self.tiles.tree.map)
                 .skip(1)
-                .find(|(_node, parent)| {
-                    parent
-                        .map(|p| self.tiles.layout(p).orientation() == direction.orientation())
-                        .unwrap_or(false)
+                .find(|&(_, parent)| {
+                    self.tiles.seat_under(parent).axis() == Some(direction.orientation())
                 });
             if let Some((target, _parent)) = target_ancestor {
                 (target, false)
