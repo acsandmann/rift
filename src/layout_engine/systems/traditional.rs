@@ -1,7 +1,7 @@
 use objc2_core_foundation::CGRect;
 use serde::{Deserialize, Serialize};
 
-use super::groups::GroupLayouts;
+use super::groups::{GroupLayouts, Seat};
 use super::{EditResult, Focus, FocusResult, GroupEdit, LayoutEdit, WindowChange, WindowQuery};
 use crate::actor::app::{WindowId, pid_t};
 use crate::common::collections::HashMap;
@@ -145,13 +145,10 @@ impl TraditionalLayoutSystem {
     }
 
     fn perform_natural_join(&mut self, selection: NodeId, target: NodeId, direction: Direction) {
-        // Joining toward a stack joins it, whether the target is one of its windows or the
-        // stack itself.
-        let selection_stack = self.tiles.enclosing_stack(selection);
-        let target_stack = self.tiles.enclosing_stack(target);
-
+        // Joining toward a stack joins it, whether the target is one of its tabs or the stack
+        // itself.
         let backwards = matches!(direction, Direction::Left | Direction::Up);
-        let join = match (selection_stack, target_stack) {
+        let join = match (self.tiles.stack_of(selection), self.tiles.stack_of(target)) {
             (Some(stack), None) => Some((stack, target, backwards)),
             (None, Some(stack)) => Some((stack, selection, !backwards)),
             _ => None,
@@ -168,42 +165,35 @@ impl TraditionalLayoutSystem {
             return;
         }
 
-        let kind = LayoutKind::from(direction.orientation());
-        let selection_parent = selection.parent(self.tiles.map());
-        let target_parent = target.parent(self.tiles.map());
-        if let (Some(sp), Some(tp)) = (selection_parent, target_parent) {
-            if sp == tp && self.tiles.layout(sp).is_stacked() {
-                self.tiles.set_layout(sp, kind);
-                self.tiles.select(sp);
+        let axis = direction.orientation();
+        let kind = LayoutKind::from(axis);
+        match (self.tiles.seat(selection), self.tiles.seat(target)) {
+            // Two tabs of one stack: lay the stack out as a split.
+            (Seat::Tab { stack }, Seat::Tab { stack: other }) if stack == other => {
+                self.tiles.set_layout(stack, kind);
+                self.tiles.select(stack);
                 return;
             }
-            if sp != tp && self.are_containers_mergeable(sp, tp, direction) {
-                let parent = self.find_or_create_smart_common_parent(sp, tp, direction);
+            // Panes of two splits along the join's axis: merge the splits.
+            (
+                Seat::Pane { split, orientation },
+                Seat::Pane {
+                    split: other,
+                    orientation: other_orientation,
+                },
+            ) if split != other && orientation == axis && other_orientation == axis => {
+                let parent = self.find_or_create_smart_common_parent(split, other, direction);
                 self.tiles.set_layout(parent, kind);
                 self.tiles.select(parent);
                 return;
             }
+            _ => {}
         }
         let parent = self.find_or_create_smart_common_parent(selection, target, direction);
         if !self.tiles.layout(parent).is_stacked() {
             self.tiles.set_layout(parent, kind);
         }
         self.tiles.select(parent);
-    }
-
-    fn are_containers_mergeable(
-        &self,
-        container1: NodeId,
-        container2: NodeId,
-        direction: Direction,
-    ) -> bool {
-        let layout1 = self.tiles.layout(container1);
-        let layout2 = self.tiles.layout(container2);
-
-        layout1.orientation() == direction.orientation()
-            && layout2.orientation() == direction.orientation()
-            && !layout1.is_group()
-            && !layout2.is_group()
     }
 }
 
@@ -1020,5 +1010,29 @@ mod tests {
                 "{case}: visible tab"
             );
         }
+    }
+
+    #[test]
+    fn joining_two_tabs_of_one_stack_lays_the_stack_out_as_a_split() {
+        use crate::common::config::StackDefaultOrientation;
+
+        let mut system = TraditionalLayoutSystem::default();
+        let layout = system.create_layout();
+        for window in [w(1), w(2), w(3)] {
+            system.add_window_after_selection(layout, window);
+        }
+        system.focus(layout, Focus::Select(w(1)));
+        system.edit(layout, LayoutEdit::Group(GroupEdit::Join(Direction::Right)));
+        let _ = system.edit(
+            layout,
+            LayoutEdit::Group(GroupEdit::Stack(StackDefaultOrientation::Same)),
+        );
+        assert_eq!(system.windows(layout, WindowQuery::Stack(w(1))), [w(1), w(2)]);
+
+        system.focus(layout, Focus::Select(w(1)));
+        system.edit(layout, LayoutEdit::Group(GroupEdit::Join(Direction::Right)));
+
+        assert_eq!(system.windows(layout, WindowQuery::Stack(w(1))), []);
+        assert_eq!(system.windows(layout, WindowQuery::Visible), [w(1), w(2), w(3)]);
     }
 }

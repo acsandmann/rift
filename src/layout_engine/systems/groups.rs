@@ -135,6 +135,21 @@ pub(super) fn deserialize_tile_tree<'de, D: serde::Deserializer<'de>>(
     })
 }
 
+/// Where a node sits in the tree: the one place that reads a node's parent to decide whether it
+/// is a tab of a stack or a pane of a split.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) enum Seat {
+    /// The node has no parent: it is a layout root.
+    Root,
+    /// One tab of `stack`, shown only while it is the stack's selected child.
+    Tab { stack: NodeId },
+    /// One pane of `split`, laid out beside its siblings along `orientation`.
+    Pane {
+        split: NodeId,
+        orientation: Orientation,
+    },
+}
+
 #[derive(Clone, Copy)]
 enum BranchLimit {
     All,
@@ -684,13 +699,31 @@ impl GroupLayouts {
         self.visible_windows_under_internal(container)
     }
 
-    /// The stack `node` is shown in: `node` itself if it is a stacked container, else its parent
-    /// if that is stacked. Every node stores a layout kind, but only a container's means anything.
-    pub(super) fn enclosing_stack(&self, node: NodeId) -> Option<NodeId> {
-        let container = self.window_at(node).is_none();
-        Some(node)
-            .filter(|&node| container && self.layout(node).is_stacked())
-            .or_else(|| node.parent(self.map()).filter(|&parent| self.layout(parent).is_stacked()))
+    /// Where `node` sits: a tab of a stack, a pane of a split, or a layout root.
+    pub(super) fn seat(&self, node: NodeId) -> Seat {
+        let Some(parent) = node.parent(self.map()) else {
+            return Seat::Root;
+        };
+        let kind = self.layout(parent);
+        if kind.is_stacked() {
+            Seat::Tab { stack: parent }
+        } else {
+            Seat::Pane {
+                split: parent,
+                orientation: kind.orientation(),
+            }
+        }
+    }
+
+    /// The stack `node` belongs to: `node` itself if it is a stack, else the stack it is a tab
+    /// of. Every node stores a layout kind, but only a container's means anything.
+    pub(super) fn stack_of(&self, node: NodeId) -> Option<NodeId> {
+        let is_stack = self.window_at(node).is_none() && self.layout(node).is_stacked();
+        match self.seat(node) {
+            _ if is_stack => Some(node),
+            Seat::Tab { stack } => Some(stack),
+            Seat::Pane { .. } | Seat::Root => None,
+        }
     }
 
     fn stacked_selection_container(&self, layout: LayoutId) -> Option<NodeId> {
