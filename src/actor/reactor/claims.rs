@@ -122,13 +122,6 @@ impl Reactor {
             self.restore_native_fullscreen(changes, None, wid, None);
             return;
         }
-        // A press only delays a first admission: place the window as any new one.
-        if claim.owner == ClaimOwner::Press
-            && self.state.windows.workspace_for_window(wid).is_none()
-        {
-            self.admit_ax_window(changes, wid);
-            return;
-        }
         if let Some(space) = self.best_space_for_window_id(wid) {
             self.reassign_window_to_authoritative_space(changes, wid, space, false);
         }

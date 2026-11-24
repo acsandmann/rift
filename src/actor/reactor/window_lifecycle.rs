@@ -331,7 +331,7 @@ impl Reactor {
         !was_admitted && admitted
     }
 
-    pub(super) fn admit_ax_window(&mut self, changes: &mut Changes, window: WindowId) {
+    fn admit_ax_window(&mut self, changes: &mut Changes, window: WindowId) {
         if !self.state.windows.can_reconcile_admission(window) {
             return;
         }
