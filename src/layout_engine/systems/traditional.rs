@@ -46,12 +46,12 @@ impl TraditionalLayoutSystem {
         wid: WindowId,
     ) -> NodeId {
         let mut placement = Placement::After(selection);
-        if let Some(parent) = selection.parent(self.tiles.map()) {
-            let kind = self.tiles.layout(parent);
-            if !kind.is_group() && parent.children(self.tiles.map()).nth(3).is_some() {
-                placement =
-                    Placement::Back(self.tiles.nest_in_container_internal(layout, selection, kind));
-            }
+        if let Seat::Pane { split, orientation } = self.tiles.seat(selection)
+            && split.children(self.tiles.map()).nth(3).is_some()
+        {
+            let kind = LayoutKind::from(orientation);
+            placement =
+                Placement::Back(self.tiles.nest_in_container_internal(layout, selection, kind));
         }
         let node = self.tiles.tree.insert(placement);
         self.split_new_sibling_from_selection(selection, node);
@@ -65,21 +65,13 @@ impl TraditionalLayoutSystem {
         node2: NodeId,
         direction: Direction,
     ) -> NodeId {
-        let parent1 = node1.parent(self.tiles.map());
-        let parent2 = node2.parent(self.tiles.map());
-
-        if let (Some(p1), Some(p2)) = (parent1, parent2) {
-            if p1 == p2 {
-                let parent_layout = self.tiles.layout(p1);
-                let sibling_count = p1.children(self.tiles.map()).count();
-
-                if parent_layout.orientation() == direction.orientation()
-                    && !parent_layout.is_group()
-                    && sibling_count == 2
-                {
-                    return p1;
-                }
-            }
+        if let (Seat::Pane { split, orientation }, Seat::Pane { split: other, .. }) =
+            (self.tiles.seat(node1), self.tiles.seat(node2))
+            && split == other
+            && orientation == direction.orientation()
+            && split.children(self.tiles.map()).count() == 2
+        {
+            return split;
         }
 
         self.find_or_create_common_parent_internal(node1, node2)
@@ -87,15 +79,12 @@ impl TraditionalLayoutSystem {
 
     fn find_natural_join_target(&self, from: NodeId, direction: Direction) -> Option<NodeId> {
         let sibling = self.find_direct_sibling_target(from, direction);
-        if let Some(parent) = from.parent(self.tiles.map()) {
-            let kind = self.tiles.layout(parent);
-            if !kind.is_group()
-                && kind.orientation() == direction.orientation()
-                && (sibling.is_none() || parent.children(self.tiles.map()).count() == 2)
-                && let Some(neighbor) = self.find_direct_sibling_target(parent, direction)
-            {
-                return Some(neighbor);
-            }
+        if let Seat::Pane { split, orientation } = self.tiles.seat(from)
+            && orientation == direction.orientation()
+            && (sibling.is_none() || split.children(self.tiles.map()).count() == 2)
+            && let Some(neighbor) = self.find_direct_sibling_target(split, direction)
+        {
+            return Some(neighbor);
         }
         sibling
             .or_else(|| {
@@ -455,15 +444,13 @@ impl TraditionalLayoutSystem {
 
         // If the selection is a leaf at the edge of a container that matches the direction,
         // lift the selection to that container so we can merge whole groups.
-        if let Some(parent) = selection.parent(map) {
-            let parent_layout = self.tiles.layout(parent);
+        if let Seat::Pane { split: parent, orientation } = self.tiles.seat(selection) {
             let is_edge = match direction {
                 Direction::Right | Direction::Down => selection.next_sibling(map).is_none(),
                 Direction::Left | Direction::Up => selection.prev_sibling(map).is_none(),
             };
 
-            if parent_layout.orientation() == direction.orientation()
-                && !parent_layout.is_group()
+            if orientation == direction.orientation()
                 && (is_edge || parent.children(map).count() == 2)
                 && target.parent(map) != Some(parent)
                 && !target.ancestors(map).any(|a| a == parent)
@@ -1034,5 +1021,39 @@ mod tests {
 
         assert_eq!(system.windows(layout, WindowQuery::Stack(w(1))), []);
         assert_eq!(system.windows(layout, WindowQuery::Visible), [w(1), w(2), w(3)]);
+    }
+
+    #[test]
+    fn a_new_window_nests_beside_the_selection_in_a_crowded_split_but_not_in_a_stack() {
+        use crate::common::config::StackDefaultOrientation;
+
+        let mut system = TraditionalLayoutSystem::default();
+        let layout = system.create_layout();
+        for window in [w(1), w(2), w(3), w(4)] {
+            system.add_window_after_selection(layout, window);
+        }
+        let mut stacked = system.clone();
+
+        // A split already holding four panes: the new window nests with the selection.
+        system.add_window_after_selection(layout, w(5));
+        let tiles = &system.tiles;
+        let parent = |window| tiles.window_node(layout, window).and_then(|n| n.parent(tiles.map()));
+        assert_eq!(parent(w(4)), parent(w(5)));
+        assert_ne!(parent(w(5)), Some(tiles.root(layout)));
+
+        // A stack of four tabs: the new window is a fifth tab.
+        let _ = stacked.edit(
+            layout,
+            LayoutEdit::Group(GroupEdit::Stack(StackDefaultOrientation::Same)),
+        );
+        stacked.focus(layout, Focus::Select(w(4)));
+        stacked.add_window_after_selection(layout, w(5));
+        assert_eq!(stacked.windows(layout, WindowQuery::Stack(w(5))), [
+            w(1),
+            w(2),
+            w(3),
+            w(4),
+            w(5)
+        ]);
     }
 }
