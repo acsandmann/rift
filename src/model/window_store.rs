@@ -49,9 +49,12 @@ pub struct WindowRecord {
     claim: Option<WindowClaim>,
 }
 
-/// The Mach client port (session) holding external claims.
+/// Who holds a claim.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct ClaimOwner(pub u32);
+pub enum ClaimOwner {
+    /// An external manager's session, by its Mach client port.
+    Ipc(u32),
+}
 
 /// Temporary exclusion of a tracked window from Rift management.
 ///
@@ -1952,7 +1955,7 @@ mod tests {
         let mut workspaces = WorkspaceStore::new();
         let [home, moved, replaced] = ["Home", "Moved", "Replaced"]
             .map(|name| workspaces.create_workspace(space, Some(name.into())).unwrap());
-        let (owner, other) = (ClaimOwner(7), ClaimOwner(8));
+        let (owner, other) = (ClaimOwner::Ipc(7), ClaimOwner::Ipc(8));
         let (wid, rekeyed, sibling) =
             (WindowId::new(1, 1), WindowId::new(1, 2), WindowId::new(1, 3));
         store.insert_window(wid, admitted(wid, WindowServerId::new(1)));
@@ -2002,7 +2005,7 @@ mod tests {
         let mut workspaces = WorkspaceStore::new();
         let [home, provisional] = ["Home", "Provisional"]
             .map(|name| workspaces.create_workspace(space, Some(name.into())).unwrap());
-        let (a, b, c) = (ClaimOwner(1), ClaimOwner(2), ClaimOwner(3));
+        let (a, b, c) = (ClaimOwner::Ipc(1), ClaimOwner::Ipc(2), ClaimOwner::Ipc(3));
         let id = |idx| WindowId::new(1, idx);
         let wsid = WindowServerId::new;
         let add = |store: &mut WindowStore, idx: u32, server: u32, workspace| {

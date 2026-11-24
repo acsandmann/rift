@@ -7,8 +7,8 @@ use crate::model::window_store::ClaimOwner;
 
 const OWNED_ELSEWHERE: &str = "Window owned by another external manager";
 
-const OWNER: ClaimOwner = ClaimOwner(101);
-const OTHER: ClaimOwner = ClaimOwner(202);
+const OWNER: ClaimOwner = ClaimOwner::Ipc(101);
+const OTHER: ClaimOwner = ClaimOwner::Ipc(202);
 const NONE: WindowClaimFlags = WindowClaimFlags::empty();
 const SUPPRESS: WindowClaimFlags = WindowClaimFlags::SUPPRESS_FOCUS_FOLLOWS_MOUSE;
 const SCREEN: CGRect = CGRect {
@@ -531,7 +531,7 @@ fn original_id_reused_by_another_window_still_reaches_the_owners_claim() {
     assert_eq!((other.owner, other.flags), (OTHER, NONE));
 
     // With the owner's claim gone the id names the newcomer, which only its owner may release.
-    for session in [OWNER, ClaimOwner(303)] {
+    for session in [OWNER, ClaimOwner::Ipc(303)] {
         assert_eq!(reactor.release_window(wid(1), session), Err(OWNED_ELSEWHERE));
     }
     assert_eq!(reactor.release_window(wid(1), OTHER), Ok(()));

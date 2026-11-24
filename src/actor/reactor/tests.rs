@@ -5955,7 +5955,7 @@ fn reloading_management_rules_rejects_and_readmits_an_existing_window() {
                 manage: Some(false),
                 ..Default::default()
             });
-        let owner = crate::model::window_store::ClaimOwner(1);
+        let owner = crate::model::window_store::ClaimOwner::Ipc(1);
         if claimed {
             reactor
                 .claim_window(window, owner, rift_protocol::WindowClaimFlags::empty())

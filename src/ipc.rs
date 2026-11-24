@@ -55,7 +55,7 @@ impl std::fmt::Debug for ReleaseClaims {
 impl ReleaseClaims {
     /// The claims lease outlives the claims, so the port name cannot be reused before this.
     pub(crate) fn apply(self, reactor: &mut reactor::Reactor) {
-        reactor.release_claims(ClaimOwner(self.port));
+        reactor.release_claims(ClaimOwner::Ipc(self.port));
         self.server_state.set_lease(self.port, PortLease::Claims, false);
     }
 }
@@ -158,7 +158,7 @@ impl IpcRequestHandler {
         let Ok(mut reactor) = self.reactor.try_borrow_mut() else {
             return encode_error(serde_json::json!({ "message": "Reactor is busy" }));
         };
-        let owner = ClaimOwner(port);
+        let owner = ClaimOwner::Ipc(port);
         let result = change(&mut reactor, owner);
         if reactor.state.windows.owner_claims(owner).is_empty() {
             self.server_state.set_lease(port, PortLease::Claims, false);
