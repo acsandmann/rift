@@ -2942,14 +2942,7 @@ fn torn_tab_under_held_button() -> TornTab {
     let wid = WindowId::new(1, 2);
     let frame = CGRect::new(CGPoint::new(200., 200.), CGSize::new(500., 500.));
     let wsid = WindowServerId::new(10_002);
-    reactor.state.windows.track_window_server_info(WindowServerInfo {
-        id: wsid,
-        pid: 1,
-        layer: 0,
-        frame,
-        min_frame: CGSize::ZERO,
-        max_frame: CGSize::ZERO,
-    });
+    reactor.track_test_window_server_info(wsid, 1, frame);
     reactor.mark_test_window_visible_in_space(wsid, space);
     crate::sys::event::TEST_MOUSE_STATE.with(|state| state.set(Some(MouseState::Down)));
     let info = make_window_info(frame, Some(wsid), "Detached tab", None);
