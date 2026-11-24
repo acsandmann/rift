@@ -1,6 +1,7 @@
-//! External window claims: a Mach session temporarily excludes windows from
-//! Rift management. Ownership lives in [`WindowStore`](crate::model::WindowStore);
-//! this module only applies the layout, presentation and focus effects.
+//! Window claims: an external manager's Mach session, or the held left button,
+//! temporarily excludes windows from Rift management. Ownership lives in
+//! [`WindowStore`](crate::model::WindowStore); this module only applies the layout,
+//! presentation and focus effects.
 
 use rift_protocol::WindowClaimFlags;
 
@@ -73,6 +74,14 @@ impl Reactor {
         }
     }
 
+    /// The left button was released: return the windows that appeared under it.
+    pub(super) fn release_press(&mut self, changes: &mut Changes) {
+        let windows = self.state.windows.owner_claims(ClaimOwner::Press).to_vec();
+        for window in windows {
+            self.readmit(changes, window);
+        }
+    }
+
     fn release_claims_of(&mut self, windows: impl IntoIterator<Item = WindowId>) {
         self.with_claim_focus_policy(|reactor| {
             let mut changes = Changes::default();
@@ -111,6 +120,13 @@ impl Reactor {
         if self.state.windows.native_fullscreen_record_for_window(wid).is_some() {
             // Suspended windows return through native fullscreen recovery.
             self.restore_native_fullscreen(changes, None, wid, None);
+            return;
+        }
+        // A press only delays a first admission: place the window as any new one.
+        if claim.owner == ClaimOwner::Press
+            && self.state.windows.workspace_for_window(wid).is_none()
+        {
+            self.admit_ax_window(changes, wid);
             return;
         }
         if let Some(space) = self.best_space_for_window_id(wid) {

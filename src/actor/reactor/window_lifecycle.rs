@@ -4,7 +4,7 @@ use super::{Changes, Presentation, Reactor, RefocusState, utils};
 use crate::actor::app::{AppInfo, WindowId, WindowInfo, pid_t};
 use crate::layout_engine::LayoutEvent;
 use crate::model::virtual_workspace::WorkspaceContext;
-use crate::model::window_store::NativeFullscreenTransition;
+use crate::model::window_store::{ClaimOwner, NativeFullscreenTransition};
 use crate::model::{AppRuleEffects, AppRuleResult, WindowRuleContext};
 use crate::sys::geometry::SameAs;
 use crate::sys::screen::SpaceId;
@@ -227,6 +227,13 @@ impl Reactor {
                 (false, restored, geometry_changed)
             } else {
                 self.state.windows.insert_window(wid, info.into());
+                // A window that first appears while the left button is held belongs to
+                // the press until the release, so no admission path tiles it out from
+                // under the cursor. A new AX identity for a known window is not new here.
+                if crate::sys::event::left_button_down() {
+                    let flags = rift_protocol::WindowClaimFlags::empty();
+                    self.state.windows.insert_claim(wid, ClaimOwner::Press, flags);
+                }
                 (true, false, false)
             };
         if minimized || restored {
@@ -324,7 +331,7 @@ impl Reactor {
         !was_admitted && admitted
     }
 
-    fn admit_ax_window(&mut self, changes: &mut Changes, window: WindowId) {
+    pub(super) fn admit_ax_window(&mut self, changes: &mut Changes, window: WindowId) {
         if !self.state.windows.can_reconcile_admission(window) {
             return;
         }

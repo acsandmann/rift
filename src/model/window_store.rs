@@ -54,6 +54,9 @@ pub struct WindowRecord {
 pub enum ClaimOwner {
     /// An external manager's session, by its Mach client port.
     Ipc(u32),
+    /// The held left button, for windows that first appeared under it (a tab torn out of
+    /// its window). The release returns them (#689).
+    Press,
 }
 
 /// Temporary exclusion of a tracked window from Rift management.

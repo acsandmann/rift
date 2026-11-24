@@ -1017,7 +1017,7 @@ impl Reactor {
     fn can_start_native_drag(&self, window: WindowId, frame: CGRect) -> bool {
         self.can_start_drag(window)
             && (self.communication_manager.events_tx.is_none()
-                || (crate::sys::event::get_mouse_state() == Some(MouseState::Down)
+                || (crate::sys::event::left_button_down()
                     && window_server::current_cursor_location()
                         .is_ok_and(|point| super::drag::contains(frame, point, 12.0))))
     }
@@ -2706,6 +2706,9 @@ impl Reactor {
         changes: &mut Changes,
         button: crate::actor::drag::MouseButton,
     ) {
+        if button == crate::actor::drag::MouseButton::Left {
+            self.release_press(changes);
+        }
         if self.is_mission_control_active()
             || (self.is_in_drag() && !self.drag_manager.actor.owns_button(button))
         {

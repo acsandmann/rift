@@ -47,6 +47,9 @@ thread_local! {
     pub(crate) static TEST_MOUSE_STATE: std::cell::Cell<Option<MouseState>> = const { std::cell::Cell::new(None) };
 }
 
+/// Whether the left mouse button is down right now.
+pub fn left_button_down() -> bool { get_mouse_state() == Some(MouseState::Down) }
+
 pub fn get_mouse_state() -> Option<MouseState> {
     #[cfg(test)]
     if let Some(state) = TEST_MOUSE_STATE.with(|state| state.get()) {
