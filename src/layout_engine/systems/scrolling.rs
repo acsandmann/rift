@@ -2722,6 +2722,28 @@ pub(crate) mod tests {
 
         fn selected(&self) -> Option<WindowId> { self.system.selected_window(self.layout) }
 
+        fn target(&self) -> f64 { self.system.layouts[self.layout].camera.viewport.target() }
+
+        /// Mid-scroll towards the end of a four-column strip, from 900 to 1000.
+        fn scroll_towards_the_end(&mut self) {
+            self.system.layouts[self.layout].camera.viewport = Viewport::Resting(
+                Rest::At,
+                Motion::Animation(CameraSpring::new(900.0, 1000.0, 0.0, Instant::now())),
+            );
+        }
+
+        /// The drag still overscrolls at `offset`; release it and return where it
+        /// settles.
+        fn release_overscrolled_gesture(&mut self, offset: f64) -> f64 {
+            let viewport = &self.system.layouts[self.layout].camera.viewport;
+            assert!(matches!(viewport, Viewport::Gesture(_)));
+            assert_eq!(viewport.offset(), offset);
+            self.system
+                .end_viewport_gesture(self.layout, Duration::from_millis(220), false)
+                .unwrap()
+                .offset
+        }
+
         fn drop(&mut self, source: u32, target: u32, action: WindowDropAction) {
             assert!(
                 self.system
@@ -2839,12 +2861,12 @@ pub(crate) mod tests {
         let mut f = Fixture::new(4);
         f.select(4);
         f.system.finish_viewport(f.layout);
-        assert_eq!(f.system.layouts[f.layout].camera.viewport.target(), 1000.0);
+        assert_eq!(f.target(), 1000.0);
 
         f.system.update(WindowChange::Remove(wid(4)));
 
         assert_eq!(f.selected(), Some(wid(3)));
-        assert_eq!(f.system.layouts[f.layout].camera.viewport.target(), 500.0);
+        assert_eq!(f.target(), 500.0);
         assert_eq!(f.frame(3).origin.x, 500.0);
     }
 
@@ -2853,15 +2875,11 @@ pub(crate) mod tests {
         let mut f = Fixture::new(4);
         f.select(4);
         f.system.finish_viewport(f.layout);
-        let now = Instant::now();
-        f.system.layouts[f.layout].camera.viewport = Viewport::Resting(
-            Rest::At,
-            Motion::Animation(CameraSpring::new(900.0, 1000.0, 0.0, now)),
-        );
+        f.scroll_towards_the_end();
 
         f.system.update(WindowChange::Remove(wid(4)));
 
-        assert_eq!(f.system.layouts[f.layout].camera.viewport.target(), 500.0);
+        assert_eq!(f.target(), 500.0);
     }
 
     #[test]
@@ -2870,12 +2888,12 @@ pub(crate) mod tests {
         f.select(4);
         f.select(3);
         f.system.finish_viewport(f.layout);
-        assert_eq!(f.system.layouts[f.layout].camera.viewport.target(), 1000.0);
+        assert_eq!(f.target(), 1000.0);
 
         f.system.update(WindowChange::Remove(wid(4)));
 
         assert_eq!(f.selected(), Some(wid(3)));
-        assert_eq!(f.system.layouts[f.layout].camera.viewport.target(), 500.0);
+        assert_eq!(f.target(), 500.0);
         assert_eq!(f.frame(3).origin.x, 500.0);
     }
 
@@ -2889,14 +2907,7 @@ pub(crate) mod tests {
 
         f.system.update(WindowChange::Remove(wid(4)));
 
-        let viewport = &f.system.layouts[f.layout].camera.viewport;
-        assert!(matches!(viewport, Viewport::Gesture(_)));
-        assert_eq!(viewport.offset(), 1000.0);
-        let release = f
-            .system
-            .end_viewport_gesture(f.layout, Duration::from_millis(220), false)
-            .unwrap();
-        assert_eq!(release.offset, 500.0);
+        assert_eq!(f.release_overscrolled_gesture(1000.0), 500.0);
     }
 
     #[test]
@@ -2966,7 +2977,7 @@ pub(crate) mod tests {
         f.select(4);
         f.system.finish_viewport(f.layout);
         f.prepare();
-        assert_eq!(f.system.layouts[f.layout].camera.viewport.target(), 1000.0);
+        assert_eq!(f.target(), 1000.0);
         f
     }
 
@@ -2977,22 +2988,18 @@ pub(crate) mod tests {
         f.screen.size.width = 1500.0;
 
         assert_eq!(f.frame(4).origin.x, 1000.0);
-        assert_eq!(f.system.layouts[f.layout].camera.viewport.target(), 500.0);
+        assert_eq!(f.target(), 500.0);
     }
 
     #[test]
     fn a_resize_mid_scroll_settles_in_bounds() {
         let mut f = fixed_width_strip_scrolled_to_the_end();
-        let now = Instant::now();
-        f.system.layouts[f.layout].camera.viewport = Viewport::Resting(
-            Rest::At,
-            Motion::Animation(CameraSpring::new(900.0, 1000.0, 0.0, now)),
-        );
+        f.scroll_towards_the_end();
 
         f.screen.size.width = 1500.0;
         f.prepare();
 
-        assert_eq!(f.system.layouts[f.layout].camera.viewport.target(), 500.0);
+        assert_eq!(f.target(), 500.0);
     }
 
     #[test]
@@ -3003,14 +3010,7 @@ pub(crate) mod tests {
         f.screen.size.width = 1500.0;
         f.prepare();
 
-        let viewport = &f.system.layouts[f.layout].camera.viewport;
-        assert!(matches!(viewport, Viewport::Gesture(_)));
-        assert_eq!(viewport.offset(), 1000.0);
-        let release = f
-            .system
-            .end_viewport_gesture(f.layout, Duration::from_millis(220), false)
-            .unwrap();
-        assert_eq!(release.offset, 500.0);
+        assert_eq!(f.release_overscrolled_gesture(1000.0), 500.0);
     }
 
     #[test]
