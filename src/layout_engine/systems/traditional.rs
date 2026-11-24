@@ -716,9 +716,44 @@ mod tests {
     use objc2_core_foundation::{CGPoint, CGRect, CGSize};
 
     use super::*;
-    use crate::layout_engine::{Direction, LayoutKind};
+    use crate::layout_engine::{Direction, LayoutKind, Orientation};
 
     fn w(idx: u32) -> WindowId { WindowId::new(1, idx) }
+
+    /// A layout whose root lies along `axis`, holding `order`'s windows, with window 1 and the
+    /// window after it joined and stacked.
+    fn stacked_pair(axis: Orientation, order: &[WindowId]) -> (TraditionalLayoutSystem, LayoutId) {
+        use crate::common::config::StackDefaultOrientation;
+
+        let mut system = TraditionalLayoutSystem::default();
+        let layout = system.create_layout();
+        let root = system.tiles.root(layout);
+        system.tiles.set_layout(root, LayoutKind::from(axis));
+        for &window in order {
+            system.add_window_after_selection(layout, window);
+        }
+        let forward = match axis {
+            Orientation::Horizontal => Direction::Right,
+            Orientation::Vertical => Direction::Down,
+        };
+        system.focus(layout, Focus::Select(w(1)));
+        system.edit(layout, LayoutEdit::Group(GroupEdit::Join(forward)));
+        let _ = system.edit(
+            layout,
+            LayoutEdit::Group(GroupEdit::Stack(StackDefaultOrientation::Same)),
+        );
+        assert_eq!(system.windows(layout, WindowQuery::Stack(w(1))), [w(1), w(2)]);
+        (system, layout)
+    }
+
+    fn parent_of(
+        system: &TraditionalLayoutSystem,
+        layout: LayoutId,
+        window: WindowId,
+    ) -> Option<NodeId> {
+        let tiles = &system.tiles;
+        tiles.window_node(layout, window).and_then(|node| node.parent(tiles.map()))
+    }
 
     #[test]
     fn splitting_a_narrow_tile_preserves_the_other_tiles_width() {
@@ -941,35 +976,14 @@ mod tests {
 
     #[test]
     fn join_adds_a_window_to_the_neighboring_stack_in_every_direction() {
-        use crate::common::config::StackDefaultOrientation;
-
-        // The stack holds windows 1 and 2, built by joining them and stacking the pair; window 3
-        // stands alone on one side of it.
-        let build = |root_kind: LayoutKind, lone_first: bool| {
-            let mut system = TraditionalLayoutSystem::default();
-            let layout = system.create_layout();
-            let root = system.tiles.layout_roots[layout].0;
-            system.tiles.set_layout(root, root_kind);
+        // The stack holds windows 1 and 2; window 3 stands alone on one side of it.
+        let build = |axis, lone_first| {
             let order = if lone_first {
                 [w(3), w(1), w(2)]
             } else {
                 [w(1), w(2), w(3)]
             };
-            for window in order {
-                system.add_window_after_selection(layout, window);
-            }
-            let forward = match root_kind {
-                LayoutKind::Horizontal => Direction::Right,
-                _ => Direction::Down,
-            };
-            system.focus(layout, Focus::Select(w(1)));
-            system.edit(layout, LayoutEdit::Group(GroupEdit::Join(forward)));
-            let _ = system.edit(
-                layout,
-                LayoutEdit::Group(GroupEdit::Stack(StackDefaultOrientation::Same)),
-            );
-            assert_eq!(system.windows(layout, WindowQuery::Stack(w(1))), [w(1), w(2)]);
-            (system, layout)
+            stacked_pair(axis, &order)
         };
 
         // (direction, lone window first, window selected, stack after the join)
@@ -988,8 +1002,7 @@ mod tests {
         for (direction, lone_first, selected, expected) in
             beside_the_stack.into_iter().chain(from_the_stack)
         {
-            let root_kind = LayoutKind::from(direction.orientation());
-            let (mut system, layout) = build(root_kind, lone_first);
+            let (mut system, layout) = build(direction.orientation(), lone_first);
             system.focus(layout, Focus::Select(selected));
             system.edit(layout, LayoutEdit::Group(GroupEdit::Join(direction)));
             let case = format!("join {direction:?} with window {selected:?} selected");
@@ -1013,21 +1026,7 @@ mod tests {
 
     #[test]
     fn joining_two_tabs_of_one_stack_lays_the_stack_out_as_a_split() {
-        use crate::common::config::StackDefaultOrientation;
-
-        let mut system = TraditionalLayoutSystem::default();
-        let layout = system.create_layout();
-        for window in [w(1), w(2), w(3)] {
-            system.add_window_after_selection(layout, window);
-        }
-        system.focus(layout, Focus::Select(w(1)));
-        system.edit(layout, LayoutEdit::Group(GroupEdit::Join(Direction::Right)));
-        let _ = system.edit(
-            layout,
-            LayoutEdit::Group(GroupEdit::Stack(StackDefaultOrientation::Same)),
-        );
-        assert_eq!(system.windows(layout, WindowQuery::Stack(w(1))), [w(1), w(2)]);
-
+        let (mut system, layout) = stacked_pair(Orientation::Horizontal, &[w(1), w(2), w(3)]);
         system.focus(layout, Focus::Select(w(1)));
         system.edit(layout, LayoutEdit::Group(GroupEdit::Join(Direction::Right)));
 
@@ -1048,10 +1047,9 @@ mod tests {
 
         // A split already holding four panes: the new window nests with the selection.
         system.add_window_after_selection(layout, w(5));
-        let tiles = &system.tiles;
-        let parent = |window| tiles.window_node(layout, window).and_then(|n| n.parent(tiles.map()));
+        let parent = |window| parent_of(&system, layout, window);
         assert_eq!(parent(w(4)), parent(w(5)));
-        assert_ne!(parent(w(5)), Some(tiles.root(layout)));
+        assert_ne!(parent(w(5)), Some(system.tiles.root(layout)));
 
         // A stack of four tabs: the new window is a fifth tab.
         let _ = stacked.edit(
@@ -1117,32 +1115,13 @@ mod tests {
 
     #[test]
     fn dropping_onto_a_stacked_window_targets_its_stack_and_onto_a_pane_targets_the_pane() {
-        use crate::common::config::StackDefaultOrientation;
         use crate::layout_engine::WindowDropAction::{Insert, Stack};
 
         // Windows 1 and 2 are a stack; windows 3 and 4 are panes of the root split beside it.
-        let build = || {
-            let mut system = TraditionalLayoutSystem::default();
-            let layout = system.create_layout();
-            for window in [w(1), w(2), w(3), w(4)] {
-                system.add_window_after_selection(layout, window);
-            }
-            system.focus(layout, Focus::Select(w(1)));
-            system.edit(layout, LayoutEdit::Group(GroupEdit::Join(Direction::Right)));
-            let _ = system.edit(
-                layout,
-                LayoutEdit::Group(GroupEdit::Stack(StackDefaultOrientation::Same)),
-            );
-            assert_eq!(system.windows(layout, WindowQuery::Stack(w(1))), [w(1), w(2)]);
-            (system, layout)
-        };
+        let build = || stacked_pair(Orientation::Horizontal, &[w(1), w(2), w(3), w(4)]);
         let drop = |system: &mut TraditionalLayoutSystem, layout, source, target, action| {
             let edit = LayoutEdit::Drop { source, target, action };
             assert!(system.edit(layout, edit).changed());
-        };
-        let parent = |system: &TraditionalLayoutSystem, layout, window| {
-            let tiles = &system.tiles;
-            tiles.window_node(layout, window).and_then(|node| node.parent(tiles.map()))
         };
 
         // Stacking onto a tab adds a tab right after it.
@@ -1158,16 +1137,16 @@ mod tests {
         let (mut system, layout) = build();
         drop(&mut system, layout, w(4), w(3), Stack);
         assert_eq!(system.windows(layout, WindowQuery::Stack(w(3))), [w(3), w(4)]);
-        let new_stack = parent(&system, layout, w(3)).unwrap();
+        let new_stack = parent_of(&system, layout, w(3)).unwrap();
         assert_eq!(system.tiles.layout(new_stack), LayoutKind::HorizontalStack);
 
         // Inserting beside a tab, along the split's axis, inserts beside its whole stack.
         let (mut system, layout) = build();
         drop(&mut system, layout, w(4), w(2), Insert(Direction::Left));
         let root = Some(system.tiles.root(layout));
-        assert_eq!(parent(&system, layout, w(4)), root);
+        assert_eq!(parent_of(&system, layout, w(4)), root);
         assert_eq!(system.windows(layout, WindowQuery::Stack(w(1))), [w(1), w(2)]);
-        let stack = parent(&system, layout, w(1)).unwrap();
+        let stack = parent_of(&system, layout, w(1)).unwrap();
         let window_4 = system.tiles.window_node(layout, w(4)).unwrap();
         assert_eq!(window_4.next_sibling(system.tiles.map()), Some(stack));
     }
