@@ -167,7 +167,9 @@ impl Motion {
         }
     }
 
-    fn retarget(&mut self, target: f64, now: Instant) {
+    /// Move where the motion comes to rest, whether it is at rest or still on
+    /// its way.
+    fn move_target(&mut self, target: f64, now: Instant) {
         match self {
             Self::Static(_) | Self::Pending { .. } => {
                 if target != self.target() {
@@ -251,14 +253,6 @@ impl Viewport {
         match self {
             Self::Resting(_, motion) => motion.sample(now, scale),
             _ => None,
-        }
-    }
-
-    /// Move where the viewport comes to rest, whether it is at rest or still on
-    /// its way, keeping how it rests. A gesture keeps its overscroll until it ends.
-    fn retarget(&mut self, target: f64, now: Instant) {
-        if let Self::Resting(_, motion) = self {
-            motion.retarget(target, now);
         }
     }
 
@@ -1263,31 +1257,38 @@ impl LayoutState {
 
     /// After the geometry changes the viewport comes to rest within the strip
     /// bounds, or, when centred, centred on whichever column is selected now.
+    /// A gesture keeps its overscroll until it ends.
     fn settle_viewport(&mut self) {
-        let (Some(g), Viewport::Resting(rest, motion)) = (&self.geometry, &self.camera.viewport)
-        else {
+        let Some(g) = &self.geometry else {
+            return;
+        };
+        let centred = self.centred_offset(g);
+        let Viewport::Resting(rest, motion) = &mut self.camera.viewport else {
             return;
         };
         let clamped = motion.target().clamp(g.bounds.0, g.bounds.1);
-        let target = match *rest {
+        let target = match rest {
             Rest::At => clamped,
-            Rest::Centred => self.centred_offset().unwrap_or(clamped),
+            Rest::Centred => centred.unwrap_or(clamped),
         };
-        self.camera.viewport.retarget(target, Instant::now());
+        motion.move_target(target, Instant::now());
     }
 
-    fn centred_offset(&self) -> Option<f64> {
-        let g = self.geometry.as_ref()?;
-        let column = g.column(self.arrangement.columns.get(self.arrangement.active_column)?.id)?;
+    /// The selected column's place in `g`; a dormant selected column has none.
+    fn active_column_geometry(&self, g: &Geometry) -> Option<ColumnGeometry> {
+        g.column(self.arrangement.columns.get(self.arrangement.active_column)?.id)
+    }
+
+    fn centred_offset(&self, g: &Geometry) -> Option<f64> {
+        let column = self.active_column_geometry(g)?;
         Some(centered_offset(g.tiling.size.width, column))
     }
 
     fn bookmark(&self) -> Option<ViewBookmark> {
-        let id = self.arrangement.columns.get(self.arrangement.active_column)?.id;
-        let x = self.geometry.as_ref()?.column(id)?.world_x;
+        let column = self.active_column_geometry(self.geometry.as_ref()?)?;
         Some(ViewBookmark {
-            column: id,
-            relative_offset: self.camera.viewport.offset() - x,
+            column: column.id,
+            relative_offset: self.camera.viewport.offset() - column.world_x,
         })
     }
 
@@ -1314,12 +1315,7 @@ impl LayoutState {
         let Some(g) = &self.geometry else {
             return;
         };
-        let Some(column) = self
-            .arrangement
-            .columns
-            .get(self.arrangement.active_column)
-            .and_then(|c| g.column(c.id))
-        else {
+        let Some(column) = self.active_column_geometry(g) else {
             return;
         };
         let offset = if settings.focus_navigation_style == ScrollingFocusNavigationStyle::Anchored {
@@ -1648,11 +1644,7 @@ impl ScrollingLayoutSystem {
         }
         let state = self.layouts.get_mut(layout)?;
         let g = state.geometry.as_ref()?;
-        let column = state
-            .arrangement
-            .columns
-            .get(state.arrangement.active_column)
-            .and_then(|c| g.column(c.id))?;
+        let column = state.active_column_geometry(g)?;
         let step = column.width + g.gaps.inner.horizontal;
         let raw = state.camera.viewport.offset() + delta * step;
         state.camera.viewport.set_target(raw.clamp(g.bounds.0, g.bounds.1));
@@ -1858,7 +1850,7 @@ impl ScrollingLayoutSystem {
 
     pub fn center_selected_column(&mut self, layout: LayoutId) {
         if let Some(state) = self.layouts.get_mut(layout)
-            && let Some(offset) = state.centred_offset()
+            && let Some(offset) = state.geometry.as_ref().and_then(|g| state.centred_offset(g))
         {
             state.camera.viewport.aim(offset, Rest::Centred);
         }
@@ -2014,8 +2006,11 @@ impl LayoutSystem for ScrollingLayoutSystem {
 
     fn clone_layout(&mut self, layout: LayoutId) -> LayoutId {
         let mut state = self.layouts.get(layout).cloned().unwrap_or_default();
-        if let Viewport::Resting(_, motion @ Motion::Pending { .. }) = &mut state.camera.viewport {
-            *motion = Motion::Static(motion.target());
+        if matches!(
+            state.camera.viewport,
+            Viewport::Resting(_, Motion::Pending { .. })
+        ) {
+            state.camera.viewport.finish();
         } else if matches!(state.camera.viewport, Viewport::Resting(_, Motion::Animation(_))) {
             // An in-flight clone stops where it is, so it no longer rests centred.
             let offset = state.camera.viewport.offset();
