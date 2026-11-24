@@ -1329,11 +1329,23 @@ impl LayoutState {
         }
     }
 
-    /// All topology/sizing edits use this transaction. With screen_x = world_x -
-    /// camera, the camera changes by NEW world_x - OLD world_x. Rebase the free
-    /// gesture as well, without losing its recent velocity samples.
+    /// All topology/sizing edits use this transaction, holding the selection
+    /// still on screen.
     fn mutate<R>(
         &mut self,
+        settings: &ScrollingLayoutSettings,
+        inactive: &HashSet<WindowId>,
+        edit: impl FnOnce(&mut Self) -> R,
+    ) -> R {
+        self.mutate_holding(Hold::Selection, settings, inactive, edit)
+    }
+
+    /// With screen_x = world_x - camera, holding the selection changes the camera
+    /// by NEW world_x - OLD world_x. Rebase the free gesture as well, without
+    /// losing its recent velocity samples.
+    fn mutate_holding<R>(
+        &mut self,
+        hold: Hold,
         settings: &ScrollingLayoutSettings,
         inactive: &HashSet<WindowId>,
         edit: impl FnOnce(&mut Self) -> R,
@@ -1356,13 +1368,26 @@ impl LayoutState {
                 .and_then(|wid| self.arrangement.locate(wid))
                 .map(|(col, _)| self.arrangement.columns[col].id)
                 .or_else(|| id.filter(|id| self.arrangement.columns.iter().any(|c| c.id == *id)));
-            self.set_geometry(geometry, anchor.zip(old_x));
+            let anchor = match hold {
+                Hold::Selection => anchor.zip(old_x),
+                Hold::Strip => None,
+            };
+            self.set_geometry(geometry, anchor);
         }
         if self.arrangement.columns.is_empty() {
             self.camera.viewport = Viewport::at(0.0);
         }
         result
     }
+}
+
+/// What an edit keeps still on screen.
+#[derive(Clone, Copy, Debug)]
+enum Hold {
+    /// The selected column keeps its screen position.
+    Selection,
+    /// The camera keeps its place on the strip, so a moved column visibly travels.
+    Strip,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, Default)]
@@ -2478,9 +2503,11 @@ impl ScrollingLayoutSystem {
             return false;
         };
         state.camera.transient_restore = None;
-        let viewport = (!matches!(destination, MoveDestination::Row(_)))
-            .then(|| state.camera.viewport.clone());
-        state.mutate(&self.settings, &self.inactive, |state| {
+        let hold = match destination {
+            MoveDestination::Row(_) => Hold::Selection,
+            MoveDestination::NewColumn(_) | MoveDestination::Column(_) => Hold::Strip,
+        };
+        state.mutate_holding(hold, &self.settings, &self.inactive, |state| {
             let arrangement = &mut state.arrangement;
             match destination {
                 MoveDestination::NewColumn(target) => {
@@ -2499,9 +2526,7 @@ impl ScrollingLayoutSystem {
                 }
             }
         });
-        if let Some(viewport) = viewport {
-            state.camera.viewport = viewport;
-            state.settle_viewport();
+        if matches!(hold, Hold::Strip) {
             state.reveal(&self.settings);
         }
         true
