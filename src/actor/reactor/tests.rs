@@ -2922,10 +2922,18 @@ fn new_window_under_a_held_pointer_waits_for_a_frame_change_before_dragging() {
     assert!(!reactor.is_in_drag());
 }
 
-/// #689: a browser tab dragged out of its window becomes a new window while the button is
-/// still held. Rift leaves it under the cursor and tiles it at the release.
-#[test]
-fn a_window_created_while_the_button_is_held_is_tiled_only_at_the_release() {
+/// #689: a browser tab dragged out of its window becomes a new window while the left
+/// button is still held. The window server reports it first; Rift then hears of it
+/// through the created notification or a window-list refresh, whichever comes first.
+struct TornTab {
+    apps: Apps,
+    reactor: Reactor,
+    space: SpaceId,
+    wid: WindowId,
+    info: WindowInfo,
+}
+
+fn torn_tab_under_held_button() -> TornTab {
     let (mut apps, mut reactor) = test_context();
     let screen = CGRect::new(CGPoint::ZERO, CGSize::new(1000., 1000.));
     let space = SpaceId::new(1);
@@ -2933,21 +2941,172 @@ fn a_window_created_while_the_button_is_held_is_tiled_only_at_the_release() {
     apps.requests();
     let wid = WindowId::new(1, 2);
     let frame = CGRect::new(CGPoint::new(200., 200.), CGSize::new(500., 500.));
+    let wsid = WindowServerId::new(10_002);
+    reactor.state.windows.track_window_server_info(WindowServerInfo {
+        id: wsid,
+        pid: 1,
+        layer: 0,
+        frame,
+        min_frame: CGSize::ZERO,
+        max_frame: CGSize::ZERO,
+    });
+    reactor.mark_test_window_visible_in_space(wsid, space);
     crate::sys::event::TEST_MOUSE_STATE.with(|state| state.set(Some(MouseState::Down)));
-    let info = make_window_info(frame, None, "Detached tab", None);
-    reactor.handle_event(Event::WindowCreated(wid, info, None, Some(MouseState::Down)));
-    let held = frame_writes(&mut apps);
-    assert!(
-        held.iter().all(|(window, _)| *window != wid),
-        "the new window moved while the button was held: {held:?}"
-    );
+    let info = make_window_info(frame, Some(wsid), "Detached tab", None);
+    TornTab {
+        apps,
+        reactor,
+        space,
+        wid,
+        info,
+    }
+}
 
+impl TornTab {
+    fn created(mut self) -> Self {
+        let event = Event::WindowCreated(self.wid, self.info.clone(), None, Some(MouseState::Down));
+        self.reactor.handle_event(event);
+        self
+    }
+
+    fn discovered(mut self) -> Self {
+        self.discover(self.wid);
+        self
+    }
+
+    /// A window-list refresh reporting the tab as `wid`, which may be a new AX identity.
+    fn discover(&mut self, wid: WindowId) {
+        let windows = vec![(wid, self.info.clone())];
+        self.reactor.discover_test_windows(1, windows, vec![WindowId::new(1, 1), wid]);
+    }
+
+    fn frame_writes_for(&mut self, wid: WindowId) -> Vec<CGRect> {
+        frame_writes(&mut self.apps)
+            .into_iter()
+            .filter_map(|(window, frame)| (window == wid).then_some(frame))
+            .collect()
+    }
+}
+
+fn release_left_button(reactor: &mut Reactor) {
     crate::sys::event::TEST_MOUSE_STATE.with(|state| state.set(Some(MouseState::Up)));
     reactor.handle_event(Event::MouseUp(crate::actor::drag::MouseButton::Left));
-    let released = frame_writes(&mut apps);
-    assert!(
-        released.iter().any(|(window, _)| *window == wid),
-        "the release did not tile the new window: {released:?}"
+}
+
+#[test]
+fn a_window_created_while_the_button_is_held_is_tiled_only_at_the_release() {
+    let mut tab = torn_tab_under_held_button().created();
+    let wid = tab.wid;
+    assert_eq!(
+        tab.frame_writes_for(wid),
+        [],
+        "the new window moved while the button was held"
+    );
+
+    release_left_button(&mut tab.reactor);
+    assert_ne!(
+        tab.frame_writes_for(wid),
+        [],
+        "the release did not tile the new window"
+    );
+}
+
+#[test]
+fn a_window_discovered_while_the_button_is_held_is_admitted_only_at_the_release() {
+    let mut tab = torn_tab_under_held_button().discovered();
+    assert_eq!(
+        tab.reactor.assigned_space_for_window_id(tab.wid),
+        None,
+        "a window-list refresh admitted the window while the button was held"
+    );
+
+    release_left_button(&mut tab.reactor);
+    assert_eq!(
+        tab.reactor.assigned_space_for_window_id(tab.wid),
+        Some(tab.space)
+    );
+}
+
+#[test]
+fn a_window_discovered_while_the_button_is_held_gets_no_frame_writes_until_the_release() {
+    let mut tab = torn_tab_under_held_button().discovered();
+    let wid = tab.wid;
+    // The app moves its new window under the cursor while the tab is dragged.
+    for step in 0..5 {
+        let origin = CGPoint::new(200. + 40. * f64::from(step), 200.);
+        let frame = CGRect::new(origin, CGSize::new(500., 500.));
+        let moved =
+            Event::WindowFrameChanged(wid, frame, None, Requested(false), Some(MouseState::Down));
+        tab.reactor.handle_event(moved);
+    }
+    assert_eq!(
+        tab.frame_writes_for(wid),
+        [],
+        "Rift moved the window while the button was held"
+    );
+
+    release_left_button(&mut tab.reactor);
+    assert_ne!(
+        tab.frame_writes_for(wid),
+        [],
+        "the release did not tile the window"
+    );
+}
+
+#[test]
+fn the_release_admits_each_held_window_once_and_ends_the_press() {
+    let mut tab = torn_tab_under_held_button().created();
+    let wid = tab.wid;
+    // The same window reported again under the press is still held, and only once.
+    tab.discover(wid);
+    assert_eq!(tab.reactor.assigned_space_for_window_id(wid), None);
+
+    release_left_button(&mut tab.reactor);
+    assert_eq!(tab.reactor.assigned_space_for_window_id(wid), Some(tab.space));
+    tab.apps.requests();
+
+    // The press is over: a second release has nothing left to admit, and a window
+    // that appears with the button up is tiled at once.
+    release_left_button(&mut tab.reactor);
+    assert_eq!(tab.frame_writes_for(wid), []);
+    let later = WindowId::new(1, 3);
+    let frame = CGRect::new(CGPoint::new(300., 300.), CGSize::new(400., 400.));
+    let info = make_window_info(frame, None, "Later", None);
+    tab.reactor
+        .handle_event(Event::WindowCreated(later, info, None, Some(MouseState::Up)));
+    assert_eq!(tab.reactor.assigned_space_for_window_id(later), Some(tab.space));
+}
+
+#[test]
+fn a_held_window_stays_held_across_an_ax_identity_change() {
+    let mut tab = torn_tab_under_held_button().created();
+    // AX reports the same native window under a new identity while the button is held.
+    let replacement = WindowId::new(1, 7);
+    tab.discover(replacement);
+    assert!(!tab.reactor.state.windows.contains_window(tab.wid));
+    assert_eq!(tab.reactor.assigned_space_for_window_id(replacement), None);
+    assert_eq!(tab.frame_writes_for(replacement), []);
+
+    release_left_button(&mut tab.reactor);
+    assert_eq!(
+        tab.reactor.assigned_space_for_window_id(replacement),
+        Some(tab.space)
+    );
+}
+
+#[test]
+fn mission_control_does_not_affect_a_press() {
+    // Dragging the new window to the top edge opens Mission Control with the button down.
+    let mut tab = torn_tab_under_held_button().created();
+    tab.reactor.handle_event(Event::MissionControlNativeEntered);
+    assert_eq!(tab.reactor.assigned_space_for_window_id(tab.wid), None);
+    tab.reactor.handle_event(Event::MissionControlNativeExited);
+    assert_eq!(tab.reactor.assigned_space_for_window_id(tab.wid), None);
+
+    release_left_button(&mut tab.reactor);
+    assert_eq!(
+        tab.reactor.assigned_space_for_window_id(tab.wid),
+        Some(tab.space)
     );
 }
 
