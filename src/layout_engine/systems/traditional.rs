@@ -1056,4 +1056,50 @@ mod tests {
             w(5)
         ]);
     }
+
+    #[test]
+    fn toggling_orientation_rotates_a_split_but_leaves_a_stack_alone() {
+        use crate::common::config::StackDefaultOrientation;
+
+        let mut system = TraditionalLayoutSystem::default();
+        let layout = system.create_layout();
+        for window in [w(1), w(2)] {
+            system.add_window_after_selection(layout, window);
+        }
+        let root = system.tiles.root(layout);
+
+        assert!(system.edit(layout, LayoutEdit::ToggleOrientation).changed());
+        assert_eq!(system.tiles.layout(root), LayoutKind::Vertical);
+
+        let _ = system.edit(
+            layout,
+            LayoutEdit::Group(GroupEdit::Stack(StackDefaultOrientation::Same)),
+        );
+        let stacked = system.tiles.layout(root);
+        assert!(stacked.is_stacked());
+        assert!(!system.edit(layout, LayoutEdit::ToggleOrientation).changed());
+        assert_eq!(system.tiles.layout(root), stacked);
+    }
+
+    #[test]
+    fn a_stacks_members_are_its_own_windows_not_those_nested_in_a_tab() {
+        use crate::common::config::StackDefaultOrientation;
+
+        // Window 3 sits in a split that is itself a tab of the stack.
+        let mut system = TraditionalLayoutSystem::default();
+        let layout = system.create_layout();
+        for window in [w(1), w(2), w(3)] {
+            system.add_window_after_selection(layout, window);
+        }
+        system.focus(layout, Focus::Select(w(2)));
+        system.edit(layout, LayoutEdit::Group(GroupEdit::Join(Direction::Right)));
+        system.focus(layout, Focus::Select(w(1)));
+        let _ = system.edit(
+            layout,
+            LayoutEdit::Group(GroupEdit::Stack(StackDefaultOrientation::Same)),
+        );
+
+        assert_eq!(system.windows(layout, WindowQuery::Stack(w(1))), [w(1)]);
+        assert_eq!(system.windows(layout, WindowQuery::Stack(w(3))), []);
+    }
 }

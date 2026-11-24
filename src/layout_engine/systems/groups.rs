@@ -301,27 +301,19 @@ impl GroupLayouts {
         if !self.inactive.is_empty() && self.find_best_focus_target(self.root(layout)).is_none() {
             return EditResult::Unchanged;
         }
-        use crate::layout_engine::LayoutKind;
-
-        let map = self.map();
-        let selection_node = self.selection(layout);
-
-        let target_node = match selection_node.parent(map) {
-            Some(p) => p,
-            None => self.root(layout),
+        let (target_node, orientation) = match self.seat(self.selection(layout)) {
+            Seat::Pane { split, orientation } => (split, orientation),
+            Seat::Tab { .. } => return EditResult::Unchanged,
+            Seat::Root => {
+                let root = self.root(layout);
+                let kind = self.layout(root);
+                if kind.is_stacked() {
+                    return EditResult::Unchanged;
+                }
+                (root, kind.orientation())
+            }
         };
-
-        let current_kind = self.layout(target_node);
-
-        if current_kind.is_group() {
-            return EditResult::Unchanged;
-        }
-
-        let new_kind = match current_kind {
-            LayoutKind::Horizontal => LayoutKind::Vertical,
-            LayoutKind::Vertical => LayoutKind::Horizontal,
-            other => other,
-        };
+        let new_kind = LayoutKind::from(perpendicular(orientation));
 
         // Split weights are axis-independent. Rotating a container should preserve the
         // user's ratios; `rebalance` is the explicit operation that resets them.
@@ -619,15 +611,15 @@ impl GroupLayouts {
     }
 
     fn stack_members(&self, layout: LayoutId, window: WindowId) -> Vec<WindowId> {
-        let Some(parent) =
-            self.window_node(layout, window).and_then(|node| node.parent(self.map()))
-        else {
+        let Some(node) = self.window_node(layout, window) else {
             return Vec::new();
         };
-        if !self.layout(parent).is_group() {
-            return Vec::new();
+        match self.seat(node) {
+            Seat::Tab { stack } => {
+                stack.children(self.map()).filter_map(|node| self.window_at(node)).collect()
+            }
+            Seat::Pane { .. } | Seat::Root => Vec::new(),
         }
-        parent.children(self.map()).filter_map(|node| self.window_at(node)).collect()
     }
 
     pub(super) fn descend_selection(&mut self, layout: LayoutId) -> bool {
@@ -655,8 +647,8 @@ impl GroupLayouts {
             let mut highest_revealed = focus_node;
             let mut node = focus_node;
             while let Some(parent) = node.parent(&self.tree.map) {
-                let is_group = self.layout(parent).is_group();
-                if self.tree.map.select_locally(node) && is_group {
+                let is_tab = matches!(self.seat(node), Seat::Tab { .. });
+                if self.tree.map.select_locally(node) && is_tab {
                     highest_revealed = node;
                 }
                 node = parent;
@@ -730,7 +722,10 @@ impl GroupLayouts {
         let selection = self.selection(layout);
         let stacked = |&node: &NodeId| self.layout(node).is_stacked();
         if self.window_at(selection).is_some() {
-            selection.ancestors(self.map()).skip(1).find(stacked)
+            selection.ancestors(self.map()).find_map(|node| match self.seat(node) {
+                Seat::Tab { stack } => Some(stack),
+                Seat::Pane { .. } | Seat::Root => None,
+            })
         } else if stacked(&selection) {
             Some(selection)
         } else {
@@ -1084,11 +1079,9 @@ impl GroupLayouts {
 
     pub(super) fn node_is_visible(&self, node: NodeId) -> bool {
         self.window_at(node).is_some_and(|window| self.window_participates(window))
-            && node.ancestors_with_parent(self.map()).all(|(child, parent)| {
-                parent.is_none_or(|parent| {
-                    !self.layout(parent).is_stacked()
-                        || self.visible_stack_child(parent) == Some(child)
-                })
+            && node.ancestors(self.map()).all(|node| match self.seat(node) {
+                Seat::Tab { stack } => self.visible_stack_child(stack) == Some(node),
+                Seat::Pane { .. } | Seat::Root => true,
             })
     }
 
