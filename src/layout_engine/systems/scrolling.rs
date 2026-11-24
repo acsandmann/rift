@@ -1212,14 +1212,17 @@ impl LayoutState {
         );
         self.set_geometry(geometry, None);
         if initial {
+            // The first view starts at the strip's origin and jumps, unanimated,
+            // to where the selection is shown.
             self.camera.viewport = Viewport::at(0.0);
-            if self.geometry.as_ref().unwrap().columns.len() == 1 {
-                let g = self.geometry.as_ref().unwrap();
-                self.camera.viewport = Viewport::at(g.anchor_offset(0, settings.alignment));
+            let g = self.geometry.as_ref().unwrap();
+            if g.columns.len() == 1 {
+                let offset = g.anchor_offset(0, settings.alignment);
+                self.camera.viewport.set_target(offset);
             } else {
                 self.reveal(settings);
             }
-            self.camera.viewport = Viewport::at(self.camera.viewport.offset());
+            self.camera.viewport.finish();
         }
     }
 
