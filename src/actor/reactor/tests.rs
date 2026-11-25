@@ -3288,6 +3288,84 @@ impl SilentDrag {
 /// The tab was torn from the bottom tile of a master-stack, which stays selected, so a new
 /// window joins right after it. Every zone of that tile is still a drop target, and the window
 /// lands where the zone says.
+/// A torn tab's overlay sits under the pointer: for each tile, its centre and edges preview the
+/// zone of that tile as it is on screen, the tab's own source tile included. Where the window
+/// lands still comes from the layout it would join.
+#[test]
+fn a_torn_tabs_overlay_is_the_zone_under_the_pointer() {
+    let bottom = WindowId::new(1, 1);
+    let mut drag = silent_drag_over(Some(LayoutMode::MasterStack), 3);
+    drag.reactor
+        .handle_test_layout_event(LayoutEvent::WindowFocused(drag.space, bottom));
+    let tiles: Vec<(WindowId, CGRect)> = test_layout(&mut drag.reactor, drag.space, SCREEN_1000);
+    let source = drag.reactor.state.windows.window(bottom).unwrap().frame_monotonic;
+    drag.appears(20_001);
+    drag.moves_to(20_001, CGRect {
+        origin: CGPoint::new(source.origin.x, source.origin.y - 100.),
+        ..source
+    });
+
+    for (window, tile) in tiles {
+        let (min, max) = (tile.origin, CGPoint::new(tile.max().x, tile.max().y));
+        let points = [
+            tile.mid(),
+            CGPoint::new(min.x + 5., tile.mid().y),
+            CGPoint::new(max.x - 5., tile.mid().y),
+            CGPoint::new(tile.mid().x, min.y + 5.),
+            CGPoint::new(tile.mid().x, max.y - 5.),
+        ];
+        for (index, point) in points.into_iter().enumerate() {
+            drag.pointer_at(point);
+            let Some(target) = drag.reactor.drag_manager.actor.preview_target() else {
+                assert!(index > 0, "no target at the centre of {window:?}");
+                continue;
+            };
+            assert_eq!(target.intent.window, window, "{point:?}");
+            let area = target.preview_area;
+            assert!(
+                crate::actor::drag::contains(area, point, 0.5),
+                "{area:?} is not under {point:?}"
+            );
+            assert!(
+                area.origin.x >= tile.origin.x - 0.5
+                    && area.origin.y >= tile.origin.y - 0.5
+                    && area.max().x <= tile.max().x + 0.5
+                    && area.max().y <= tile.max().y + 0.5,
+                "{area:?} is outside {window:?} at {tile:?}"
+            );
+        }
+    }
+}
+
+/// A tile larger than its slot (an app's minimum height, as Chrome's) runs past the display;
+/// the overlay of a zone there stays on the display.
+#[test]
+fn a_torn_tabs_overlay_stays_on_the_display() {
+    let bottom = WindowId::new(1, 1);
+    let mut drag = silent_drag_over(Some(LayoutMode::MasterStack), 3);
+    let tile = drag.reactor.state.windows.window(bottom).unwrap().frame_monotonic;
+    // On screen the window is taller than its slot and reaches past the bottom.
+    let overflowing = CGRect::new(tile.origin, CGSize::new(tile.size.width, 600.));
+    drag.reactor.state.windows.window_mut(bottom).unwrap().frame_monotonic = overflowing;
+    drag.appears(20_001);
+    drag.moves_to(20_001, CGRect::new(CGPoint::new(tile.origin.x, 200.), tile.size));
+
+    drag.pointer_at(CGPoint::new(tile.mid().x, 990.));
+    let target = drag
+        .reactor
+        .drag_manager
+        .actor
+        .preview_target()
+        .expect("no target on the south edge");
+    assert_eq!(target.intent.window, bottom);
+    assert!(overflowing.max().y > SCREEN_1000.max().y);
+    assert!(
+        target.preview_area.max().y <= SCREEN_1000.max().y + 0.5,
+        "{:?}",
+        target.preview_area
+    );
+}
+
 #[test]
 fn a_torn_tab_can_drop_onto_the_tile_it_was_torn_from() {
     let bottom = WindowId::new(1, 1);

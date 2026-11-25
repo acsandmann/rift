@@ -434,7 +434,7 @@ pub fn classify_zone(frame: CGRect, point: CGPoint, fraction: f64) -> Option<Dro
     Some(nearest.1)
 }
 
-fn zone_frame(frame: CGRect, zone: DropZone, fraction: f64) -> CGRect {
+pub fn zone_frame(frame: CGRect, zone: DropZone, fraction: f64) -> CGRect {
     let (x, y, width, height) = match zone {
         DropZone::Center => (fraction, fraction, 1.0 - 2.0 * fraction, 1.0 - 2.0 * fraction),
         DropZone::West => (0.0, 0.0, fraction, 1.0),

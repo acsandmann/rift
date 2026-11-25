@@ -4501,6 +4501,29 @@ impl Reactor {
         interaction_workflow::build_drag_scene(&self.state, &self.layout_manager, source, space)
     }
 
+    /// The area a drop's overlay covers. For a window with a slot it is where the window lands:
+    /// preview and commit come from one prospective layout. A window arriving brings a new tile,
+    /// and joining re-divides the layout, so no landing rect is both exact and under the pointer;
+    /// it shows the zone of the tile it is over, as that tile is now, kept on its display. It still
+    /// lands where the prospective layout puts it.
+    fn drop_preview_area(
+        &self,
+        source: &crate::actor::drag::DragSource,
+        intent: &crate::actor::drag::DropIntent,
+        landing: CGRect,
+    ) -> CGRect {
+        if source.origin != crate::actor::drag::DragOrigin::Arriving {
+            return landing;
+        }
+        let fraction = self.config.settings.drag_drop.drop_zone_fraction;
+        let zone = crate::actor::drag::zone_frame(intent.frame, intent.zone, fraction);
+        self.space_state
+            .screen_by_space(intent.space)
+            .map(|screen| screen.frame.intersection(&zone))
+            .filter(|visible| visible.size.width > 0. && visible.size.height > 0.)
+            .unwrap_or(zone)
+    }
+
     fn resolve_drag_preview(&mut self) {
         let Some(source) = self.drag_manager.actor.source() else {
             return;
@@ -4532,7 +4555,8 @@ impl Reactor {
                 }
                 intent.action = action;
             };
-            if !self.drag_manager.actor.set_preview(intent, preview.map(|result| result.frame)) {
+            let area = preview.map(|result| self.drop_preview_area(&source, &intent, result.frame));
+            if !self.drag_manager.actor.set_preview(intent, area) {
                 break;
             }
         }
