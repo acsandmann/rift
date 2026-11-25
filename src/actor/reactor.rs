@@ -55,6 +55,7 @@ use super::input;
 use crate::actor::app::{
     AppInfo, AppThreadHandle, Quiet, Request, WindowId, WindowInfo, WindowInventoryToken, pid_t,
 };
+use crate::actor::drag::MouseButton;
 use crate::actor::raise_manager::{self, RaiseManager, RaiseRequest};
 use crate::actor::reactor::events::window_discovery;
 use crate::actor::spaces::ForwardedSpaceState;
@@ -420,10 +421,6 @@ pub struct Reactor {
     refocus_manager: managers::RefocusManager,
     suppress_auto_workspace_switch_until_input: bool,
     pointer: press::Pointer,
-    /// Native windows that appeared under the held left button and have no record yet,
-    /// subscribed for WindowServer moves: AX can stay silent while an app runs its own drag
-    /// (#689). The first move records and claims each one (`arrive_under_press`).
-    press_arrivals: HashSet<WindowServerId>,
     pending_space_change_manager: managers::PendingSpaceChangeManager,
     transient_focus: transient_focus::TransientFocusGuard,
     mouse_raise_token: tokio_util::sync::CancellationToken,
@@ -556,7 +553,6 @@ impl Reactor {
             },
             suppress_auto_workspace_switch_until_input: false,
             pointer: press::Pointer::Up,
-            press_arrivals: HashSet::default(),
             pending_space_change_manager: managers::PendingSpaceChangeManager {
                 pending_space_change: None,
             },
@@ -1052,7 +1048,7 @@ impl Reactor {
         }
         let origin = self.drag_origin(window)?;
         (self.communication_manager.events_tx.is_none()
-            || (crate::sys::event::left_button_down()
+            || (matches!(&self.pointer, Pointer::Down(press) if press.button == crate::actor::drag::MouseButton::Left)
                 && window_server::current_cursor_location()
                     .is_ok_and(|point| super::drag::contains(frame, point, 12.0))))
         .then_some(origin)
@@ -1782,7 +1778,9 @@ impl Reactor {
                 return Ok(());
             }
             Event::WindowServerDestroyed(wsid, sid, kind) => {
-                if self.press_arrivals.remove(&wsid) {
+                if let Pointer::Down(press) = &mut self.pointer
+                    && press.arrivals.remove(&wsid)
+                {
                     debug!(?wsid, "press-arrival: destroyed");
                     changes.refresh_notifications = true;
                 }
@@ -1830,9 +1828,10 @@ impl Reactor {
             Event::WindowServerAppeared(wsid, sid, kind) => {
                 let resolved = self.resolve_native_space(wsid, Some(sid));
                 let tracked_window = self.state.windows.tracked_window_id(wsid);
-                if crate::sys::event::left_button_down()
-                    && tracked_window.is_none()
-                    && self.press_arrivals.insert(wsid)
+                if tracked_window.is_none()
+                    && self.observe_button(changes)
+                    && let Pointer::Down(press) = &mut self.pointer
+                    && press.arrivals.insert(wsid)
                 {
                     debug!(?wsid, ?sid, ?kind, "press-arrival: appeared under the press");
                     changes.refresh_notifications = true;
@@ -1894,9 +1893,9 @@ impl Reactor {
             }
             Event::WindowFrameChanged(wid, new_frame, last_seen, requested, mouse_state) => {
                 let wsid = WindowServerId::new(wid.idx.get());
-                if self.press_arrivals.contains(&wsid)
+                if matches!(&self.pointer, Pointer::Down(press) if press.arrivals.contains(&wsid))
                     && self.state.windows.tracked_window_id(wsid).is_none()
-                    && crate::sys::event::left_button_down()
+                    && self.observe_button(changes)
                 {
                     // The first move records the window; a later one can start its drag.
                     self.arrive_under_press(changes, wid, new_frame);
@@ -1904,7 +1903,7 @@ impl Reactor {
                 }
                 // A held window AX has not reported has only its WindowServer frame.
                 if self.state.windows.is_claimed(wid) && !self.state.windows.contains_window(wid) {
-                    self.move_unreported(wid, new_frame);
+                    self.move_unreported(changes, wid, new_frame);
                     return Ok(());
                 }
                 if self.is_mission_control_active() {
@@ -1956,6 +1955,10 @@ impl Reactor {
                 let old_space = self.geometry_space_for_window(&old_frame, server_id);
                 let new_space = self.geometry_space_for_window(&new_frame, server_id);
                 let assigned_space = self.assigned_space_for_window_id(wid);
+                if effective_mouse_state == Some(MouseState::Down) {
+                    // Keep the pointer in step before deciding whether a drag starts.
+                    self.observe_button(changes);
+                }
                 let active =
                     |space: Option<SpaceId>| space.is_some_and(|s| self.is_space_active(s));
                 if effective_mouse_state == Some(MouseState::Down)
@@ -2095,6 +2098,9 @@ impl Reactor {
                 return Ok(());
             }
             Event::ModifierMouseDown { button, point, action } => {
+                if let Pointer::Up = self.pointer {
+                    self.pointer = Pointer::Down(Press::new(button));
+                }
                 if action == crate::common::config::MouseAction::None
                     || !self.drag_manager.actor.drop_enabled()
                 {
@@ -2784,20 +2790,7 @@ impl Reactor {
         // drag and no focus. The press still ends.
         let finishes = !self.is_mission_control_active()
             && (!self.is_in_drag() || self.drag_manager.actor.owns_button(button));
-        // The drag ends before the press returns its windows, so a window the press held is
-        // returned and then dropped, both in this one reconciliation.
-        let mut commit = finishes.then(|| self.end_drag(button)).flatten();
-        if button == crate::actor::drag::MouseButton::Left {
-            commit = self.release_press(changes, commit);
-            if !self.press_arrivals.is_empty() {
-                let windows: Vec<_> = self.press_arrivals.drain().collect();
-                debug!(?windows, "press-arrival: released");
-                changes.refresh_notifications = true;
-            }
-        }
-        if let Some(commit) = commit {
-            self.land_drag(changes, commit);
-        }
+        self.release(changes, button);
         if finishes
             && let Some(window) = self.window_id_under_cursor()
             && let Some(space) = self
@@ -2951,39 +2944,54 @@ impl Reactor {
         {
             self.focus_desktop_if_active_workspace_empty(space);
         }
+        // A press with no drag ends when the button reads up: a release the tap missed (or
+        // after a drag that was cancelled) heals here, in the press's one transition.
+        if matches!(self.pointer, Pointer::Down(_)) {
+            self.observe_button(&mut changes);
+        }
         let dragging = self.is_in_drag();
         let layout_modes_may_have_changed = changes.has_layouts();
         let blocked = self.refreshes_blocked() || self.is_mission_control_active();
-        // A drag holds the screen back: the press begins and ends with it.
-        if dragging {
-            let mut press = match std::mem::take(&mut self.pointer) {
-                Pointer::Down(press) => press,
-                Pointer::Up => Press::default(),
+        // A drag runs only under a press. One the button reads have not seen (started with
+        // the button already up) begins its press here.
+        if dragging && let Pointer::Up = self.pointer {
+            let button = if self.drag_manager.actor.owns_button(MouseButton::Right) {
+                MouseButton::Right
+            } else {
+                MouseButton::Left
             };
-            changes.defer_drag_layouts(|space, policy, changed| {
-                press.held_layout.hold(space, policy, changed)
-            });
-            if !blocked && changes.has_layouts() {
-                // A permitted commit covers earlier work for this space at the same
-                // or a weaker presentation policy. Keep global requests deferred.
-                press.held_layout.retain(|&(scope, policy, changed)| {
-                    let Some(space) = scope else { return true };
-                    if changes.for_space(space).presentation < Some(policy)
-                        || !self.active_spaces.contains(&space)
-                        || self.space_state.screen_by_space(space).is_none()
-                    {
-                        return true;
-                    }
-                    changes.space(space).layout_changed |= changed;
-                    false
+            self.pointer = Pointer::Down(Press::new(button));
+        }
+        if let Pointer::Down(mut press) = std::mem::take(&mut self.pointer) {
+            if dragging {
+                // The drag holds the screen back until the release.
+                changes.defer_drag_layouts(|space, policy, changed| {
+                    press.held_layout.hold(space, policy, changed)
                 });
+                if !blocked && changes.has_layouts() {
+                    // A permitted commit covers earlier work for this space at the same
+                    // or a weaker presentation policy. Keep global requests deferred.
+                    press.held_layout.retain(|&(scope, policy, changed)| {
+                        let Some(space) = scope else { return true };
+                        if changes.for_space(space).presentation < Some(policy)
+                            || !self.active_spaces.contains(&space)
+                            || self.space_state.screen_by_space(space).is_none()
+                        {
+                            return true;
+                        }
+                        changes.space(space).layout_changed |= changed;
+                        false
+                    });
+                }
+            } else if !blocked {
+                // No drag holds the screen back: what one held goes out now.
+                for (space, policy, changed) in std::mem::take(&mut press.held_layout) {
+                    changes.arrange(space, policy).layout_changed |= changed;
+                }
             }
             self.pointer = Pointer::Down(press);
-        } else if !blocked && let Pointer::Down(press) = std::mem::take(&mut self.pointer) {
-            for (space, policy, changed) in press.held_layout {
-                changes.arrange(space, policy).layout_changed |= changed;
-            }
         }
+        self.debug_assert_press_invariants();
         let arrange = !blocked && changes.has_layouts();
         let layout_changed = arrange && LayoutManager::commit(self, &mut changes);
         if arrange && dragging {
@@ -3082,7 +3090,10 @@ impl Reactor {
                 .windows
                 .iter_tracked_window_server_ids()
                 .chain(self.transient_focus.windows.keys().copied())
-                .chain(self.press_arrivals.iter().copied())
+                .chain(match &self.pointer {
+                    Pointer::Down(press) => press.arrivals.iter().copied().collect(),
+                    Pointer::Up => Vec::new(),
+                })
                 .map(|wsid| wsid.as_u32())
                 .collect();
             ids.sort_unstable();

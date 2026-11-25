@@ -231,7 +231,7 @@ impl Reactor {
                 // A window that first appears while the left button is held belongs to
                 // the press until the release, so no admission path tiles it out from
                 // under the cursor. A new AX identity for a known window is not new here.
-                if crate::sys::event::left_button_down() && !self.state.windows.is_claimed(wid) {
+                if !self.state.windows.is_claimed(wid) && self.observe_button(changes) {
                     self.state.windows.insert_claim(wid, ClaimHolder::Press);
                 }
                 (true, false, false)
@@ -279,7 +279,9 @@ impl Reactor {
         frame: CGRect,
     ) {
         let wsid = WindowServerId::new(wid.idx.get());
-        self.press_arrivals.remove(&wsid);
+        if let super::press::Pointer::Down(press) = &mut self.pointer {
+            press.arrivals.remove(&wsid);
+        }
         self.state.windows.track_window_server_id(wsid, wid);
         self.state.windows.track_window_server_info(WindowServerInfo {
             id: wsid,
@@ -295,7 +297,7 @@ impl Reactor {
 
     /// A move of a window the press holds that AX has not reported: the WindowServer's frame is
     /// the only one it has, and the move updates or starts its drag.
-    pub(super) fn move_unreported(&mut self, wid: WindowId, frame: CGRect) {
+    pub(super) fn move_unreported(&mut self, changes: &mut Changes, wid: WindowId, frame: CGRect) {
         let wsid = WindowServerId::new(wid.idx.get());
         let Some(mut info) = self.state.windows.get_window_server_info(wsid) else {
             return;
@@ -305,7 +307,10 @@ impl Reactor {
         if self.drag_manager.actor.update_native(wid, frame) {
             self.drag_manager.sync_preview();
         } else if !previous.same_as(frame)
-            && let Some(origin) = self.native_drag_origin(wid, frame)
+            && let Some(origin) = {
+                self.observe_button(changes);
+                self.native_drag_origin(wid, frame)
+            }
         {
             let space = self.geometry_space_for_window(&previous, Some(wsid));
             let current = self.geometry_space_for_window(&frame, Some(wsid));

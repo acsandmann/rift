@@ -3436,7 +3436,10 @@ fn windows_appearing_and_vanishing_under_one_press_leave_only_the_survivor() {
         );
     }
     assert!(matches!(drag.holder(20_003), Some(ClaimHolder::Landing(_))));
-    assert!(drag.reactor.press_arrivals.is_empty());
+    assert!(
+        matches!(drag.reactor.pointer, Pointer::Up),
+        "the release ends the press"
+    );
 
     drag.ax_reports(20_003);
     assert_eq!(drag.tiles(), [SilentDrag::wid(20_003), WindowId::new(1, 1)]);
@@ -3525,6 +3528,24 @@ fn the_release_admits_each_held_window_once_and_ends_the_press() {
     tab.reactor
         .handle_event(Event::WindowCreated(later, info, None, Some(MouseState::Up)));
     assert_eq!(tab.reactor.assigned_space_for_window_id(later), Some(tab.space));
+}
+
+/// A release the event tap missed (the tap was disabled, say) still ends the press: the next
+/// event that finds the button up releases it, and the held window joins.
+#[test]
+fn a_release_the_tap_missed_ends_the_press_at_the_next_event() {
+    let mut tab = torn_tab_under_held_button().created();
+    assert!(matches!(tab.reactor.pointer, Pointer::Down(_)));
+    assert_eq!(tab.reactor.assigned_space_for_window_id(tab.wid), None);
+
+    crate::sys::event::TEST_MOUSE_STATE.with(|state| state.set(Some(MouseState::Up)));
+    tab.reactor
+        .handle_event(Event::WindowTitleChanged(WindowId::new(1, 1), "Any".into()));
+    assert!(matches!(tab.reactor.pointer, Pointer::Up));
+    assert_eq!(
+        tab.reactor.assigned_space_for_window_id(tab.wid),
+        Some(tab.space)
+    );
 }
 
 #[test]
