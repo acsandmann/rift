@@ -654,12 +654,7 @@ impl FloatingLayoutSystem {
     ) -> Vec<WindowId> {
         let focused = self.groups.selected_window(layout);
         let selection = self.groups.selection(layout);
-        let container = if self.groups.is_stack(selection) {
-            Some(selection)
-        } else {
-            self.groups.enclosing_stacks(selection).next()
-        };
-        let Some(container) = container else {
+        let Some(container) = self.groups.own_or_enclosing_stack(selection) else {
             return Vec::new();
         };
         let visible = self.groups.unstack_parent_of_selection(layout, default_orientation);

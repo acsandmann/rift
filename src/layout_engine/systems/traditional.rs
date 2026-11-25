@@ -138,8 +138,10 @@ impl TraditionalLayoutSystem {
         // itself.
         let selection_seat = self.tiles.seat(selection);
         let target_seat = self.tiles.seat(target);
-        // A side's stack: the node itself if it is one, else the stack it is a tab of.
-        let stack_of = |node: NodeId, seat: Seat| {
+        // A side's stack: the node itself if it is one, else its parent if that is a stack. Unlike
+        // own_or_enclosing_stack this never looks past the parent, on purpose: it is the join's
+        // own rule.
+        let own_or_parent_stack = |node: NodeId, seat: Seat| {
             if self.tiles.is_stack(node) {
                 Some(node)
             } else {
@@ -148,8 +150,8 @@ impl TraditionalLayoutSystem {
         };
         let backwards = matches!(direction, Direction::Left | Direction::Up);
         let join = match (
-            stack_of(selection, selection_seat),
-            stack_of(target, target_seat),
+            own_or_parent_stack(selection, selection_seat),
+            own_or_parent_stack(target, target_seat),
         ) {
             (Some(stack), None) => Some((stack, target, backwards)),
             (None, Some(stack)) => Some((stack, selection, !backwards)),

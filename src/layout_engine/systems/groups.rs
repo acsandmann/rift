@@ -739,15 +739,22 @@ impl GroupLayouts {
         self.window_at(node).is_none() && self.layout(node).is_stacked()
     }
 
+    /// `node` itself if it is a stack, else the nearest stack around it.
+    pub(super) fn own_or_enclosing_stack(&self, node: NodeId) -> Option<NodeId> {
+        if self.is_stack(node) {
+            Some(node)
+        } else {
+            self.enclosing_stacks(node).next()
+        }
+    }
+
     fn stacked_selection_container(&self, layout: LayoutId) -> Option<NodeId> {
         let selection = self.selection(layout);
-        if self.window_at(selection).is_some() {
-            self.enclosing_stacks(selection).next()
-        } else if self.is_stack(selection) {
-            Some(selection)
-        } else {
-            selection.children(self.map()).find(|&child| self.is_stack(child))
+        if self.window_at(selection).is_none() && !self.is_stack(selection) {
+            // A selected split stands for its stacked child.
+            return selection.children(self.map()).find(|&child| self.is_stack(child));
         }
+        self.own_or_enclosing_stack(selection)
     }
 
     pub(super) fn unstack_parent_of_selection(
