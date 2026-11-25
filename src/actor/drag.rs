@@ -303,8 +303,9 @@ impl DragActor {
         let Some(session) = &mut self.session else {
             return false;
         };
-        let home_preview_changed = contains(session.source.origin_frame, session.pointer, 0.0)
-            != contains(session.source.origin_frame, motion.point, 0.0);
+        let home_preview_changed = session.source.origin.has_slot()
+            && contains(session.source.origin_frame, session.pointer, 0.0)
+                != contains(session.source.origin_frame, motion.point, 0.0);
         session.pointer = motion.point;
         if session.kind == DragKind::ModifierMove {
             let dx = motion.point.x - session.anchor_point.x;
@@ -508,7 +509,10 @@ fn hit_test_available(
     source: Option<DragSource>,
     excluded: Option<WindowId>,
 ) -> Option<DropIntent> {
-    if !source.is_some_and(|source| contains(source.origin_frame, point, 0.0))
+    // A source's own slot is its home: over it, only its edges are drop zones. A window with
+    // no slot (one arriving) has no home; where it first appeared means nothing.
+    let home = source.filter(|source| source.origin.has_slot());
+    if !home.is_some_and(|source| contains(source.origin_frame, point, 0.0))
         && let Some(previous) = previous
         && let Some(target) = scene
             .targets
@@ -547,7 +551,7 @@ fn hit_test_available(
         }
     }
 
-    if let Some(source) = source
+    if let Some(source) = home
         && let Some(space) = source.current_space
         && let Some(zone) = classify_zone(source.origin_frame, point, fraction)
     {
@@ -899,6 +903,23 @@ mod tests {
         actor.set_preview(intent, Some(frame(200.0, 0.0, 100.0, 100.0)));
         assert!(actor.preview_target().is_some());
         assert!(actor.finish(MouseButton::Left).unwrap().target.is_some());
+    }
+
+    #[test]
+    fn only_a_window_with_a_slot_has_a_home_to_move_within() {
+        // Over the source's own frame with no tile under the pointer: a tile moves within its
+        // slot; a window arriving has none, wherever it first appeared.
+        let tile = native(DragOrigin::Tiled, rect(), scene_with(Vec::new()));
+        let mut tile = tile;
+        motion(&mut tile, 190.0, 50.0);
+        assert!(matches!(
+            tile.intent().map(|intent| intent.action),
+            Some(WindowDropAction::Move(_))
+        ));
+
+        let mut arriving = native(DragOrigin::Arriving, rect(), scene_with(Vec::new()));
+        motion(&mut arriving, 190.0, 50.0);
+        assert!(arriving.intent().is_none());
     }
 
     #[test]
