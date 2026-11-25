@@ -69,14 +69,9 @@ impl Reactor {
     /// The session ended: return all of its windows, arranging each space once.
     pub(crate) fn release_claims(&mut self, port: u32) {
         self.finish_claim_release(|reactor, changes| {
-            reactor.release_owner_claims(changes, ClaimOwner::Ipc(port));
+            let windows = reactor.state.windows.owner_claims(ClaimOwner::Ipc(port)).to_vec();
+            reactor.release_claims_of(changes, windows);
         });
-    }
-
-    /// Return every window `owner` holds: a session's at its end, the press's at the release.
-    pub(super) fn release_owner_claims(&mut self, changes: &mut Changes, owner: ClaimOwner) {
-        let windows = self.state.windows.owner_claims(owner).to_vec();
-        self.release_claims_of(changes, windows);
     }
 
     /// The left button was released. Windows AX has reported return now. Nothing can admit the

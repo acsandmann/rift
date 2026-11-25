@@ -339,7 +339,6 @@ pub trait LayoutSystem: Serialize + for<'de> Deserialize<'de> {
     fn windows(&self, layout: LayoutId, query: WindowQuery) -> Vec<WindowId>;
     fn focus(&mut self, layout: LayoutId, focus: Focus) -> FocusResult;
     fn update(&mut self, change: WindowChange<'_>);
-
     fn edit_layout(&mut self, layout: LayoutId, edit: LayoutEdit) -> EditResult;
 
     fn edit(&mut self, layout: LayoutId, edit: LayoutEdit) -> EditResult {

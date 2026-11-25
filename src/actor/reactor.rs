@@ -2949,8 +2949,6 @@ impl Reactor {
         {
             self.focus_desktop_if_active_workspace_empty(space);
         }
-        // A press with no drag ends when the button reads up: a release the tap missed (or
-        // after a drag that was cancelled) heals here, in the press's one transition.
         // While a press is down, a release the tap missed (or one after a cancelled drag) heals
         // here. With the pointer up, layout about to reach the screen asks whether a button is
         // held: a window that disappears under it starts the press that holds its reflow back.
