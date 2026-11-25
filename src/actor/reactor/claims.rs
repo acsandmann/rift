@@ -79,9 +79,9 @@ impl Reactor {
         self.release_claims_of(changes, windows);
     }
 
-    /// The left button was released. Windows AX has reported return now. The others wait for
-    /// AX in a landing claim, the dragged one with its drop, which is then no longer `commit`'s
-    /// to land now.
+    /// The left button was released. Windows AX has reported return now. Nothing can admit the
+    /// others until AX reports them: the dragged one waits with its drop in a landing claim
+    /// (which `commit` then no longer lands now), and the rest just lose their claim.
     pub(super) fn release_press(
         &mut self,
         changes: &mut Changes,
@@ -91,26 +91,27 @@ impl Reactor {
         for window in self.state.windows.owner_claims(ClaimOwner::Press).to_vec() {
             if self.state.windows.contains_window(window) {
                 reported.push(window);
-            } else {
-                let drop = commit.take_if(|commit| commit.source.window == window);
+            } else if let Some(drop) = commit.take_if(|commit| commit.source.window == window) {
                 self.state.windows.hand_over_claim(window, ClaimHolder::Landing(drop));
+            } else {
+                self.state.windows.remove_claim(window);
             }
         }
         self.release_claims_of(changes, reported);
         commit
     }
 
-    /// AX reported a window the press held: it joins the layout, on its drop if it has one.
+    /// AX reported a window waiting to land: it joins the layout and lands on its drop. If
+    /// the claim kept a destination (an identity merge, a restored layout), the window returns
+    /// there first and the drop then moves it: the drop wins.
     pub(super) fn land_arrival(
         &mut self,
         changes: &mut Changes,
         wid: WindowId,
-        drop: Option<crate::actor::drag::DragCommit>,
+        drop: crate::actor::drag::DragCommit,
     ) {
         self.release_claims_of(changes, [wid]);
-        if let Some(drop) = drop {
-            self.land_drag(changes, drop);
-        }
+        self.land_drag(changes, drop);
     }
 
     fn release_claims_of(

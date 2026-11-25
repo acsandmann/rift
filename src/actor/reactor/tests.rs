@@ -3321,10 +3321,7 @@ fn a_window_ax_reports_only_after_the_release_lands_on_its_drop_then() {
     drag.pointer_at(WEST_EDGE);
 
     drag.release();
-    assert!(matches!(
-        drag.holder(20_001),
-        Some(ClaimHolder::Landing(Some(_)))
-    ));
+    assert!(matches!(drag.holder(20_001), Some(ClaimHolder::Landing(_))));
     drag.assert_untouched(20_001);
 
     drag.ax_reports(20_001);
@@ -3361,6 +3358,28 @@ fn a_window_without_ax_facts_survives_moves_and_window_list_refreshes() {
 
     drag.ax_reports(20_001);
     assert_eq!(drag.tiles(), [wid, WindowId::new(1, 1)]);
+}
+
+/// Only the dragged window waits with a drop. Another the press held, never dragged, loses its
+/// claim at the release and joins normally when AX reports it.
+#[test]
+fn a_held_window_that_was_not_dragged_joins_normally_when_ax_reports_it() {
+    use crate::model::window_store::ClaimHolder;
+    let mut drag = silent_drag_under_held_button();
+    drag.appears(20_002);
+    drag.moves(20_002, 600.);
+    drag.appears(20_001);
+    drag.moves(20_001, 200.);
+    drag.moves(20_001, 240.);
+    drag.pointer_at(WEST_EDGE);
+
+    drag.release();
+    assert!(matches!(drag.holder(20_001), Some(ClaimHolder::Landing(_))));
+    assert!(drag.holder(20_002).is_none());
+    drag.assert_untouched(20_002);
+
+    drag.ax_reports(20_002);
+    assert_eq!(drag.tiles(), [WindowId::new(1, 1), SilentDrag::wid(20_002)]);
 }
 
 #[test]
@@ -3416,10 +3435,7 @@ fn windows_appearing_and_vanishing_under_one_press_leave_only_the_survivor() {
             "{gone}"
         );
     }
-    assert!(matches!(
-        drag.holder(20_003),
-        Some(ClaimHolder::Landing(Some(_)))
-    ));
+    assert!(matches!(drag.holder(20_003), Some(ClaimHolder::Landing(_))));
     assert!(drag.reactor.press_arrivals.is_empty());
 
     drag.ax_reports(20_003);

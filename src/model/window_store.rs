@@ -85,9 +85,9 @@ pub enum ClaimHolder {
     /// The held left button. Until AX reports the window, its record has no AX state: only
     /// the WindowServer has seen it (an app in its own drag loop can withhold AX).
     Press,
-    /// A window the press held that AX had not reported at the release: it lands when AX
-    /// reports it, on the drop it was released over if it was being dragged.
-    Landing(Option<crate::model::drag::DragCommit>),
+    /// A window dragged under the press and released over a drop before AX reported it: it
+    /// lands on that drop when AX reports it.
+    Landing(crate::model::drag::DragCommit),
 }
 
 impl ClaimHolder {
