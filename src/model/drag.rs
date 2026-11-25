@@ -105,7 +105,7 @@ impl DragOrigin {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Copy)]
 pub struct DragCommit {
     pub source: DragSource,
     pub kind: DragKind,

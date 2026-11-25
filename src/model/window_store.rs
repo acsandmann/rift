@@ -57,6 +57,8 @@ pub enum ClaimOwner {
     /// The held left button, for windows that first appeared under it (a tab torn out of
     /// its window). The release returns them (#689).
     Press,
+    /// Windows the button was released over before AX reported them. Each lands when AX does.
+    Landing,
 }
 
 /// Temporary exclusion of a tracked window from Rift management.
@@ -64,14 +66,14 @@ pub enum ClaimOwner {
 /// The claim holds the window's workspace assignment outside the workspace
 /// index, so enumeration, hiding, rebuilds and projection never see a claimed
 /// window while native identity, visibility and fullscreen tracking continue.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy)]
 pub struct WindowClaim {
     pub holder: ClaimHolder,
     workspace: Option<VirtualWorkspaceId>,
 }
 
 /// Who holds a claim, with what only that kind of holder has.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy)]
 pub enum ClaimHolder {
     /// An external manager's session.
     Ipc {
@@ -80,15 +82,29 @@ pub enum ClaimHolder {
         /// The id the session claimed; release accepts it across AX identity changes.
         original: WindowId,
     },
-    /// The held left button.
-    Press,
+    /// The held left button, and what has reported the window so far.
+    Press(Seen),
+    /// A window the press held that AX had not reported at the release: it lands when AX
+    /// reports it, on the drop it was released over if it was being dragged.
+    Landing(Option<crate::model::drag::DragCommit>),
+}
+
+/// What has reported a window the press holds.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Seen {
+    /// Only the WindowServer: its record holds no AX facts yet (an app in its own drag loop
+    /// can withhold AX notifications until the drag ends).
+    WindowServer,
+    /// AX has reported it.
+    Accessibility,
 }
 
 impl ClaimHolder {
     pub fn owner(&self) -> ClaimOwner {
         match *self {
             ClaimHolder::Ipc { port, .. } => ClaimOwner::Ipc(port),
-            ClaimHolder::Press => ClaimOwner::Press,
+            ClaimHolder::Press(_) => ClaimOwner::Press,
+            ClaimHolder::Landing(_) => ClaimOwner::Landing,
         }
     }
 }
@@ -301,7 +317,7 @@ impl WindowStore {
                 ClaimHolder::Ipc { flags, .. } => {
                     flags.contains(WindowClaimFlags::SUPPRESS_FOCUS_FOLLOWS_MOUSE)
                 }
-                ClaimHolder::Press => false,
+                ClaimHolder::Press(_) | ClaimHolder::Landing(_) => false,
             })
     }
 

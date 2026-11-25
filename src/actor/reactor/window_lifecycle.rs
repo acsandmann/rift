@@ -4,7 +4,7 @@ use super::{Changes, Presentation, Reactor, RefocusState, utils};
 use crate::actor::app::{AppInfo, WindowId, WindowInfo, pid_t};
 use crate::layout_engine::LayoutEvent;
 use crate::model::virtual_workspace::WorkspaceContext;
-use crate::model::window_store::{ClaimHolder, NativeFullscreenTransition};
+use crate::model::window_store::{ClaimHolder, NativeFullscreenTransition, Seen};
 use crate::model::{AppRuleEffects, AppRuleResult, WindowRuleContext};
 use crate::sys::geometry::SameAs;
 use crate::sys::screen::SpaceId;
@@ -231,7 +231,7 @@ impl Reactor {
                 // the press until the release, so no admission path tiles it out from
                 // under the cursor. A new AX identity for a known window is not new here.
                 if crate::sys::event::left_button_down() {
-                    self.state.windows.insert_claim(wid, ClaimHolder::Press);
+                    self.state.windows.insert_claim(wid, ClaimHolder::Press(Seen::Accessibility));
                 }
                 (true, false, false)
             };

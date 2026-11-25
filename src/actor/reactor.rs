@@ -1026,7 +1026,10 @@ impl Reactor {
             } else {
                 DragOrigin::Tiled
             })
-        } else if windows.claim(window).is_some_and(|claim| claim.holder == ClaimHolder::Press) {
+        } else if windows
+            .claim(window)
+            .is_some_and(|claim| matches!(claim.holder, ClaimHolder::Press(_)))
+        {
             Some(DragOrigin::Arriving)
         } else {
             None
