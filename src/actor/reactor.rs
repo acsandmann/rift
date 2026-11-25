@@ -2731,25 +2731,21 @@ impl Reactor {
         changes: &mut Changes,
         button: crate::actor::drag::MouseButton,
     ) {
+        // Under Mission Control, or during a drag another button owns, the release touches no
+        // drag and no focus. The press still ends.
         let finishes = !self.is_mission_control_active()
             && (!self.is_in_drag() || self.drag_manager.actor.owns_button(button));
         // The drag ends before the press returns its windows, so a window the press held is
         // returned and then dropped, both in this one reconciliation.
-        let commit = if finishes {
-            self.end_drag(button)
-        } else {
-            None
-        };
+        let commit = finishes.then(|| self.end_drag(button)).flatten();
         if button == crate::actor::drag::MouseButton::Left {
             self.release_owner_claims(changes, ClaimOwner::Press);
-        }
-        if !finishes {
-            return;
         }
         if let Some(commit) = commit {
             self.land_drag(changes, commit);
         }
-        if let Some(window) = self.window_id_under_cursor()
+        if finishes
+            && let Some(window) = self.window_id_under_cursor()
             && let Some(space) = self
                 .assigned_space_for_window_id(window)
                 .or_else(|| self.best_space_for_window_id(window))
