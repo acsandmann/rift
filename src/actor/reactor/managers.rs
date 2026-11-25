@@ -49,27 +49,9 @@ pub struct DragManager {
     pub(super) preview: Option<crate::ui::drag_preview::DragPreview>,
     pub(super) preview_enabled: bool,
     pub(super) haptics_enabled: bool,
-    // Layouts suppressed across native drag events resume when the drag ends.
-    pub(super) deferred_layouts: Vec<(Option<SpaceId>, Presentation, bool)>,
 }
 
 impl DragManager {
-    pub(super) fn defer_layout(
-        &mut self,
-        space: Option<SpaceId>,
-        policy: Presentation,
-        changed: bool,
-    ) {
-        if let Some((_, current, layout_changed)) =
-            self.deferred_layouts.iter_mut().find(|(id, ..)| *id == space)
-        {
-            *current = (*current).max(policy);
-            *layout_changed |= changed;
-        } else {
-            self.deferred_layouts.push((space, policy, changed));
-        }
-    }
-
     pub fn sync_motion_gate(&self) {
         let active = self.actor.drop_enabled()
             && self.actor.kind() == Some(crate::actor::drag::DragKind::NativeMove);

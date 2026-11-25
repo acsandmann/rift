@@ -13,6 +13,7 @@ pub(crate) use crate::layout_engine::WorkspaceDropRequest as OverviewDrop;
 mod main_window;
 mod managers;
 mod native_tabs;
+mod press;
 mod query;
 mod replay;
 pub mod transaction_manager;
@@ -41,6 +42,7 @@ use events::{
 use main_window::MainWindowTracker;
 use managers::LayoutManager;
 use objc2_core_foundation::{CGPoint, CGRect};
+use press::{Pointer, Press};
 pub use replay::{Record, replay};
 use rift_protocol::DirectionalDistance;
 use serde::{Deserialize, Serialize};
@@ -417,6 +419,7 @@ pub struct Reactor {
     window_inventory_manager: managers::WindowInventoryManager,
     refocus_manager: managers::RefocusManager,
     suppress_auto_workspace_switch_until_input: bool,
+    pointer: press::Pointer,
     /// Native windows that appeared under the held left button and have no record yet,
     /// subscribed for WindowServer moves: AX can stay silent while an app runs its own drag
     /// (#689). The first move records and claims each one (`arrive_under_press`).
@@ -513,7 +516,6 @@ impl Reactor {
                 preview_enabled: config.settings.drag_drop.enabled
                     && config.settings.drag_drop.preview,
                 haptics_enabled: config.settings.drag_drop.haptics_enabled,
-                deferred_layouts: Vec::new(),
             },
             workspace_switch_manager: managers::WorkspaceSwitchManager {
                 active_workspace_switch: None,
@@ -553,6 +555,7 @@ impl Reactor {
                 refocus_state: RefocusState::None,
             },
             suppress_auto_workspace_switch_until_input: false,
+            pointer: press::Pointer::Up,
             press_arrivals: HashSet::default(),
             pending_space_change_manager: managers::PendingSpaceChangeManager {
                 pending_space_change: None,
@@ -2951,14 +2954,19 @@ impl Reactor {
         let dragging = self.is_in_drag();
         let layout_modes_may_have_changed = changes.has_layouts();
         let blocked = self.refreshes_blocked() || self.is_mission_control_active();
+        // A drag holds the screen back: the press begins and ends with it.
         if dragging {
+            let mut press = match std::mem::take(&mut self.pointer) {
+                Pointer::Down(press) => press,
+                Pointer::Up => Press::default(),
+            };
             changes.defer_drag_layouts(|space, policy, changed| {
-                self.drag_manager.defer_layout(space, policy, changed)
+                press.held_layout.hold(space, policy, changed)
             });
             if !blocked && changes.has_layouts() {
                 // A permitted commit covers earlier work for this space at the same
                 // or a weaker presentation policy. Keep global requests deferred.
-                self.drag_manager.deferred_layouts.retain(|&(scope, policy, changed)| {
+                press.held_layout.retain(|&(scope, policy, changed)| {
                     let Some(space) = scope else { return true };
                     if changes.for_space(space).presentation < Some(policy)
                         || !self.active_spaces.contains(&space)
@@ -2970,8 +2978,9 @@ impl Reactor {
                     false
                 });
             }
-        } else if !blocked {
-            for (space, policy, changed) in self.drag_manager.deferred_layouts.drain(..) {
+            self.pointer = Pointer::Down(press);
+        } else if !blocked && let Pointer::Down(press) = std::mem::take(&mut self.pointer) {
+            for (space, policy, changed) in press.held_layout {
                 changes.arrange(space, policy).layout_changed |= changed;
             }
         }
