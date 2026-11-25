@@ -874,6 +874,34 @@ mod tests {
     }
 
     #[test]
+    fn an_arriving_window_targets_tiles_but_has_no_home_to_preview() {
+        let mut actor = native(
+            DragOrigin::Arriving,
+            rect(),
+            scene(frame(200.0, 0.0, 200.0, 100.0)),
+        );
+        // Over its own frame a tile shows its home slot; a window with no slot shows nothing.
+        motion(&mut actor, 100.0, 50.0);
+        assert!(actor.preview_target().is_none());
+        assert!(actor.finish(MouseButton::Left).unwrap().target.is_none());
+
+        let mut actor = native(
+            DragOrigin::Arriving,
+            rect(),
+            scene(frame(200.0, 0.0, 200.0, 100.0)),
+        );
+        motion(&mut actor, 210.0, 50.0);
+        let intent = actor.intent().expect("an arriving window targets the tile under it");
+        assert_eq!(
+            (intent.window, intent.action),
+            (w(2), WindowDropAction::Insert(Direction::Left))
+        );
+        actor.set_preview(intent, Some(frame(200.0, 0.0, 100.0, 100.0)));
+        assert!(actor.preview_target().is_some());
+        assert!(actor.finish(MouseButton::Left).unwrap().target.is_some());
+    }
+
+    #[test]
     fn unavailable_source_tile_edge_does_not_retry_the_same_move() {
         for ((x, y), direction) in [
             ((1.0, 50.0), Direction::Left),

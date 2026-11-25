@@ -82,6 +82,9 @@ pub enum DragOrigin {
     Tiled,
     /// A floating window: it moves freely and drops onto no tile.
     Floating,
+    /// A new window the held button keeps out of the layout (a tab torn out of its window):
+    /// it drops onto tiles like a tile, but has no slot of its own yet.
+    Arriving,
 }
 
 impl DragOrigin {
@@ -96,7 +99,7 @@ impl DragOrigin {
     /// Whether the drag hit-tests the tiles it passes over.
     pub fn targets_tiles(self) -> bool {
         match self {
-            Self::Tiled => true,
+            Self::Tiled | Self::Arriving => true,
             Self::Floating => false,
         }
     }
@@ -105,7 +108,7 @@ impl DragOrigin {
     pub fn has_slot(self) -> bool {
         match self {
             Self::Tiled => true,
-            Self::Floating => false,
+            Self::Floating | Self::Arriving => false,
         }
     }
 }

@@ -2895,8 +2895,9 @@ struct TornTab {
     info: WindowInfo,
 }
 
-fn torn_tab_under_held_button() -> TornTab {
-    let (mut apps, mut reactor) = test_context();
+fn torn_tab_under_held_button() -> TornTab { torn_tab_in(test_context()) }
+
+fn torn_tab_in((mut apps, mut reactor): (Apps, Reactor)) -> TornTab {
     let screen = CGRect::new(CGPoint::ZERO, CGSize::new(1000., 1000.));
     let space = SpaceId::new(1);
     apps.make_app_and_settle_on_screen(&mut reactor, screen, space, 1, make_windows(1));
@@ -2948,35 +2949,135 @@ fn release_left_button(reactor: &mut Reactor) {
     reactor.handle_event(Event::MouseUp(crate::actor::drag::MouseButton::Left));
 }
 
-/// The app drags its own new window: Rift neither takes drag ownership of it while the
-/// button is held nor shows a drop target, and it joins the layout at the release.
+impl TornTab {
+    /// The app moves its new window under the cursor: the first move of a tab dragged out.
+    fn first_move(&mut self) {
+        let mut moved = self.info.frame;
+        moved.origin.x += 25.;
+        window_server::set_cursor_location_override(Some(moved.mid()));
+        let event = Event::WindowFrameChanged(
+            self.wid,
+            moved,
+            None,
+            Requested(false),
+            Some(MouseState::Down),
+        );
+        self.reactor.handle_event(event);
+        window_server::set_cursor_location_override(None);
+    }
+
+    fn pointer_at(&mut self, point: CGPoint) {
+        self.reactor
+            .handle_event(Event::DragMotion(crate::actor::drag::DragMotion { point }));
+    }
+
+    /// The tiled windows, left to right.
+    fn tiles(&mut self) -> Vec<WindowId> {
+        let screen = CGRect::new(CGPoint::ZERO, CGSize::new(1000., 1000.));
+        let engine = &self.reactor.layout_manager.layout_engine;
+        let floating: Vec<_> = [WindowId::new(1, 1), self.wid]
+            .into_iter()
+            .filter(|window| engine.is_window_floating(*window))
+            .collect();
+        let mut tiles: Vec<_> = test_layout(&mut self.reactor, self.space, screen)
+            .into_iter()
+            .filter(|(window, _)| !floating.contains(window))
+            .collect();
+        tiles.sort_by(|a, b| a.1.origin.x.total_cmp(&b.1.origin.x));
+        tiles.into_iter().map(|(window, _)| window).collect()
+    }
+}
+
+/// The west edge of the settled window, which fills the screen.
+const WEST_EDGE: CGPoint = CGPoint { x: 50., y: 500. };
+
+/// A torn-out tab is a Rift drag like any other window's: not at creation, but from its
+/// first move, while the press still keeps it out of the layout.
 #[test]
-fn a_window_that_appears_under_the_press_is_not_a_rift_drag_and_joins_at_the_release() {
-    let tab = torn_tab_under_held_button();
-    window_server::set_cursor_location_override(Some(tab.info.frame.mid()));
-    let mut tab = tab.created();
+fn a_window_that_appears_under_the_press_becomes_a_rift_drag_on_its_first_move() {
+    let mut tab = torn_tab_under_held_button().created();
     assert!(
         !tab.reactor.is_in_drag(),
         "creation alone must not acquire drag ownership"
     );
 
-    let mut moved = tab.info.frame;
-    moved.origin.x += 25.;
-    let event =
-        Event::WindowFrameChanged(tab.wid, moved, None, Requested(false), Some(MouseState::Down));
-    tab.reactor.handle_event(event);
-    window_server::set_cursor_location_override(None);
-    assert!(
-        !tab.reactor.is_in_drag(),
-        "a move under the press must not become a Rift drag"
+    tab.first_move();
+    assert!(tab.reactor.is_dragging_window(tab.wid));
+    let source = tab.reactor.drag_manager.actor.source().unwrap();
+    assert_eq!(source.origin, crate::actor::drag::DragOrigin::Arriving);
+    assert_eq!(tab.reactor.assigned_space_for_window_id(tab.wid), None);
+    assert_eq!(
+        tab.frame_writes_for(tab.wid),
+        [],
+        "Rift moved the window while the button was held"
     );
+}
+
+#[test]
+fn a_torn_tab_shows_its_drop_target_and_lands_on_it_in_one_placement() {
+    let mut tab = torn_tab_under_held_button().created();
+    tab.first_move();
+    tab.pointer_at(WEST_EDGE);
+    let target = tab.reactor.drag_manager.actor.preview_target().expect("no drop target");
+    assert_eq!(target.intent.window, WindowId::new(1, 1));
+    assert_eq!(
+        target.intent.action,
+        crate::layout_engine::WindowDropAction::Insert(crate::layout_engine::Direction::Left)
+    );
+    assert_eq!(tab.frame_writes_for(tab.wid), []);
 
     release_left_button(&mut tab.reactor);
     assert!(!tab.reactor.is_in_drag());
     assert_eq!(
-        tab.reactor.assigned_space_for_window_id(tab.wid),
-        Some(tab.space)
+        tab.tiles(),
+        [tab.wid, WindowId::new(1, 1)],
+        "the drop did not place the window"
     );
+    // One placement: the window goes straight to its drop slot, never to the insertion slot.
+    let landed = test_layout(
+        &mut tab.reactor,
+        tab.space,
+        CGRect::new(CGPoint::ZERO, CGSize::new(1000., 1000.)),
+    )
+    .into_iter()
+    .find_map(|(window, frame)| (window == tab.wid).then_some(frame))
+    .unwrap();
+    let writes = tab.frame_writes_for(tab.wid);
+    assert!(
+        !writes.is_empty() && writes.iter().all(|frame| frame.same_as(landed)),
+        "{writes:?}"
+    );
+}
+
+#[test]
+fn a_torn_tab_released_over_no_target_joins_by_normal_insertion() {
+    let mut tab = torn_tab_under_held_button().created();
+    tab.first_move();
+    assert!(tab.reactor.drag_manager.actor.preview_target().is_none());
+
+    release_left_button(&mut tab.reactor);
+    assert_eq!(tab.tiles(), [WindowId::new(1, 1), tab.wid]);
+}
+
+#[test]
+fn a_torn_tab_an_app_rule_floats_ignores_the_tile_it_was_dropped_on() {
+    let settings = crate::common::config::VirtualWorkspaceSettings {
+        app_rules: vec![crate::common::config::AppWorkspaceRule {
+            app_id: Some("com.testapp1".into()),
+            title_substring: Some("Detached tab".into()),
+            floating: true,
+            ..Default::default()
+        }],
+        ..Default::default()
+    };
+    let mut tab =
+        torn_tab_in((Apps::new(), test_reactor_with_workspace_settings(&settings))).created();
+    tab.first_move();
+    tab.pointer_at(WEST_EDGE);
+
+    release_left_button(&mut tab.reactor);
+    assert_eq!(tab.tiles(), [WindowId::new(1, 1)]);
+    assert!(tab.reactor.layout_manager.layout_engine.is_window_floating(tab.wid));
 }
 
 #[test]

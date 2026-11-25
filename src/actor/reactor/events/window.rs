@@ -113,8 +113,12 @@ impl Reactor {
         if let Some(window) = self.state.windows.window_mut(wid) {
             window.frame_monotonic = new_frame;
         }
-        // The external owner has geometry authority; keep only native facts current.
+        // The external owner has geometry authority; keep only native facts current. A new
+        // window the press holds may be the drag's source, and moves it.
         if self.state.windows.is_claimed(wid) {
+            if self.drag_manager.actor.update_native(wid, new_frame) {
+                self.drag_manager.sync_preview();
+            }
             if old_space != new_space
                 && let Some(server) = server_id
             {

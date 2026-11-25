@@ -68,7 +68,7 @@ use crate::model::broadcast::{
 };
 use crate::model::space_activation::{SpaceActivationConfig, SpaceActivationPolicy};
 use crate::model::tx_store::WindowTxStore;
-use crate::model::window_store::{ClaimOwner, NativeFullscreenTransition};
+use crate::model::window_store::{ClaimHolder, ClaimOwner, NativeFullscreenTransition};
 use crate::sys::event::MouseState;
 use crate::sys::executor::Executor;
 use crate::sys::geometry::{CGRectDef, CGRectExt, SameAs};
@@ -1014,12 +1014,35 @@ impl Reactor {
             && self.state.windows.can_place_window(window)
     }
 
-    fn can_start_native_drag(&self, window: WindowId, frame: CGRect) -> bool {
-        self.can_start_drag(window)
-            && (self.communication_manager.events_tx.is_none()
-                || (crate::sys::event::left_button_down()
-                    && window_server::current_cursor_location()
-                        .is_ok_and(|point| super::drag::contains(frame, point, 12.0))))
+    /// Where a native drag of `window` at `frame` would come from, if one may start: a
+    /// window Rift manages, or a new window the press holds out of the layout.
+    fn native_drag_origin(
+        &self,
+        window: WindowId,
+        frame: CGRect,
+    ) -> Option<crate::actor::drag::DragOrigin> {
+        let origin = if self.can_start_drag(window) {
+            crate::actor::drag::DragOrigin::of(
+                self.layout_manager.layout_engine.is_window_floating(window),
+            )
+        } else if !self.is_in_drag()
+            && !self.is_mission_control_active()
+            && !self.refreshes_blocked()
+            && self
+                .state
+                .windows
+                .claim(window)
+                .is_some_and(|claim| claim.holder == ClaimHolder::Press)
+        {
+            crate::actor::drag::DragOrigin::Arriving
+        } else {
+            return None;
+        };
+        (self.communication_manager.events_tx.is_none()
+            || (crate::sys::event::left_button_down()
+                && window_server::current_cursor_location()
+                    .is_ok_and(|point| super::drag::contains(frame, point, 12.0))))
+        .then_some(origin)
     }
 
     fn take_drag_authority(&mut self, window: WindowId, frame: CGRect) {
@@ -1043,6 +1066,7 @@ impl Reactor {
         last_frame: CGRect,
         origin_space: Option<SpaceId>,
         current_space: Option<SpaceId>,
+        origin: crate::actor::drag::DragOrigin,
     ) {
         self.take_drag_authority(window, origin_frame);
         let source = crate::actor::drag::DragSource {
@@ -1051,9 +1075,7 @@ impl Reactor {
             last_frame,
             origin_space,
             current_space,
-            origin: crate::actor::drag::DragOrigin::of(
-                self.layout_manager.layout_engine.is_window_floating(window),
-            ),
+            origin,
         };
         let kind = crate::actor::drag::DragKind::native(origin_frame, last_frame);
         let scene = self.move_drag_scene(&source, kind).unwrap_or_default();
@@ -1888,7 +1910,7 @@ impl Reactor {
                     |space: Option<SpaceId>| space.is_some_and(|s| self.is_space_active(s));
                 if effective_mouse_state == Some(MouseState::Down)
                     && (active(old_space) || active(new_space))
-                    && self.can_start_native_drag(wid, new_frame)
+                    && let Some(origin) = self.native_drag_origin(wid, new_frame)
                 {
                     self.begin_native_drag(
                         wid,
@@ -1896,6 +1918,7 @@ impl Reactor {
                         new_frame,
                         assigned_space.or(old_space),
                         new_space,
+                        origin,
                     );
                 }
                 let dragging = self.is_dragging_window(wid);
@@ -2710,15 +2733,22 @@ impl Reactor {
         changes: &mut Changes,
         button: crate::actor::drag::MouseButton,
     ) {
+        let finishes = !self.is_mission_control_active()
+            && (!self.is_in_drag() || self.drag_manager.actor.owns_button(button));
+        // The drag ends before the press returns its windows, so a window the press held is
+        // returned and then dropped, both in this one reconciliation.
+        let commit = if finishes {
+            self.end_drag(button)
+        } else {
+            None
+        };
         if button == crate::actor::drag::MouseButton::Left {
             self.release_owner_claims(changes, ClaimOwner::Press);
         }
-        if self.is_mission_control_active()
-            || (self.is_in_drag() && !self.drag_manager.actor.owns_button(button))
-        {
+        if !finishes {
             return;
         }
-        if let Some(commit) = self.end_drag(button) {
+        if let Some(commit) = commit {
             self.land_drag(changes, commit);
         }
         if let Some(window) = self.window_id_under_cursor()
