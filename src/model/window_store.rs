@@ -344,6 +344,20 @@ impl WindowStore {
         self.claims.entry(holder.owner()).or_default().push(wid);
     }
 
+    /// Give a held window's claim to another holder, keeping its destination.
+    pub fn hand_over_claim(&mut self, wid: WindowId, holder: ClaimHolder) {
+        let Some(claim) = self.windows.get_mut(&wid).and_then(|record| record.claim.as_mut())
+        else {
+            return;
+        };
+        let previous = claim.owner();
+        claim.holder = holder;
+        if previous != holder.owner() {
+            self.unindex_claim(previous, wid);
+            self.claims.entry(holder.owner()).or_default().push(wid);
+        }
+    }
+
     /// A session's new focus policy for a window it already holds.
     pub fn set_claim_flags(&mut self, wid: WindowId, flags: WindowClaimFlags) {
         if let Some(WindowClaim {

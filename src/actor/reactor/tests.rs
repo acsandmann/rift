@@ -3083,6 +3083,251 @@ fn a_torn_tab_an_app_rule_floats_ignores_the_tile_it_was_dropped_on() {
     assert!(tab.reactor.layout_manager.layout_engine.is_window_floating(tab.wid));
 }
 
+/// Chrome during its own tab drag: the WindowServer reports each new window and its moves,
+/// but AX may stay silent until the drag ends (#689).
+struct SilentDrag {
+    apps: Apps,
+    reactor: Reactor,
+    space: SpaceId,
+}
+
+const SCREEN_1000: CGRect = CGRect {
+    origin: CGPoint { x: 0., y: 0. },
+    size: CGSize { width: 1000., height: 1000. },
+};
+
+fn silent_drag_under_held_button() -> SilentDrag {
+    let (mut apps, mut reactor) = test_context();
+    let space = SpaceId::new(1);
+    apps.make_app_and_settle_on_screen(&mut reactor, SCREEN_1000, space, 1, make_windows(1));
+    apps.requests();
+    crate::sys::event::TEST_MOUSE_STATE.with(|state| state.set(Some(MouseState::Down)));
+    SilentDrag { apps, reactor, space }
+}
+
+impl SilentDrag {
+    /// Rift names a window by its app and its WindowServer id.
+    fn wid(idx: u32) -> WindowId { WindowId::new(1, idx) }
+
+    fn appears(&mut self, idx: u32) {
+        let space = self.space;
+        window_server_appeared(
+            &mut self.reactor,
+            WindowServerId::new(idx),
+            space,
+            SpaceEventKind::User,
+        );
+    }
+
+    /// A WindowServer move notification, with the cursor on the window as Chrome drags it.
+    fn moves(&mut self, idx: u32, x: f64) {
+        let frame = CGRect::new(CGPoint::new(x, 200.), CGSize::new(500., 500.));
+        window_server::set_cursor_location_override(Some(frame.mid()));
+        let event = Event::WindowFrameChanged(
+            Self::wid(idx),
+            frame,
+            None,
+            Requested(false),
+            Some(MouseState::Down),
+        );
+        self.reactor.handle_event(event);
+        window_server::set_cursor_location_override(None);
+    }
+
+    fn destroyed(&mut self, idx: u32) {
+        let space = self.space;
+        window_server_destroyed(
+            &mut self.reactor,
+            WindowServerId::new(idx),
+            space,
+            SpaceEventKind::User,
+        );
+    }
+
+    fn ax_reports(&mut self, idx: u32) {
+        let frame = self.reactor.state.windows.window(Self::wid(idx)).map_or(
+            CGRect::new(CGPoint::new(200., 200.), CGSize::new(500., 500.)),
+            |window| window.frame_monotonic,
+        );
+        let info = make_window_info(frame, Some(WindowServerId::new(idx)), "Detached tab", None);
+        let mouse = crate::sys::event::get_mouse_state();
+        self.reactor
+            .handle_event(Event::WindowCreated(Self::wid(idx), info, None, mouse));
+    }
+
+    fn pointer_at(&mut self, point: CGPoint) {
+        self.reactor
+            .handle_event(Event::DragMotion(crate::actor::drag::DragMotion { point }));
+    }
+
+    fn release(&mut self) { release_left_button(&mut self.reactor); }
+
+    fn holder(&self, idx: u32) -> Option<crate::model::window_store::ClaimHolder> {
+        self.reactor.state.windows.claim(Self::wid(idx)).map(|claim| claim.holder)
+    }
+
+    /// The tiled windows, left to right.
+    fn tiles(&mut self) -> Vec<WindowId> {
+        let mut tiles = test_layout(&mut self.reactor, self.space, SCREEN_1000);
+        tiles.sort_by(|a, b| a.1.origin.x.total_cmp(&b.1.origin.x));
+        tiles.into_iter().map(|(window, _)| window).collect()
+    }
+
+    /// Every frame Rift wrote for the window equals its slot in the layout: one placement.
+    fn assert_placed_once(&mut self, idx: u32) {
+        let wid = Self::wid(idx);
+        let slot = test_layout(&mut self.reactor, self.space, SCREEN_1000)
+            .into_iter()
+            .find_map(|(window, frame)| (window == wid).then_some(frame))
+            .expect("not in the layout");
+        let writes: Vec<_> = frame_writes(&mut self.apps)
+            .into_iter()
+            .filter_map(|(window, frame)| (window == wid).then_some(frame))
+            .collect();
+        assert!(
+            !writes.is_empty() && writes.iter().all(|frame| frame.same_as(slot)),
+            "{writes:?}"
+        );
+    }
+
+    fn assert_untouched(&mut self, idx: u32) {
+        let wid = Self::wid(idx);
+        assert_eq!(self.reactor.assigned_space_for_window_id(wid), None);
+        let writes = frame_writes(&mut self.apps);
+        assert!(writes.iter().all(|(window, _)| *window != wid), "{writes:?}");
+    }
+}
+
+#[test]
+fn a_window_only_the_window_server_reports_is_held_and_becomes_a_rift_drag() {
+    use crate::model::window_store::{ClaimHolder, Seen};
+    let mut drag = silent_drag_under_held_button();
+    drag.appears(20_001);
+    drag.moves(20_001, 200.);
+    assert!(matches!(
+        drag.holder(20_001),
+        Some(ClaimHolder::Press(Seen::WindowServer))
+    ));
+    assert!(
+        !drag.reactor.is_in_drag(),
+        "recording the window alone must not start a drag"
+    );
+
+    drag.moves(20_001, 240.);
+    assert!(drag.reactor.is_dragging_window(SilentDrag::wid(20_001)));
+    drag.pointer_at(WEST_EDGE);
+    let target = drag.reactor.drag_manager.actor.preview_target().expect("no drop target");
+    assert_eq!(target.intent.window, WindowId::new(1, 1));
+    drag.assert_untouched(20_001);
+}
+
+#[test]
+fn ax_reporting_the_window_during_the_press_keeps_it_held_and_it_drops_at_the_release() {
+    use crate::model::window_store::{ClaimHolder, Seen};
+    let mut drag = silent_drag_under_held_button();
+    drag.appears(20_001);
+    drag.moves(20_001, 200.);
+    drag.moves(20_001, 240.);
+    drag.pointer_at(WEST_EDGE);
+    drag.ax_reports(20_001);
+    assert!(matches!(
+        drag.holder(20_001),
+        Some(ClaimHolder::Press(Seen::Accessibility))
+    ));
+    assert!(drag.reactor.is_dragging_window(SilentDrag::wid(20_001)));
+    drag.assert_untouched(20_001);
+
+    drag.release();
+    assert_eq!(drag.tiles(), [SilentDrag::wid(20_001), WindowId::new(1, 1)]);
+    drag.assert_placed_once(20_001);
+}
+
+#[test]
+fn a_window_ax_reports_only_after_the_release_lands_on_its_drop_then() {
+    use crate::model::window_store::ClaimHolder;
+    let mut drag = silent_drag_under_held_button();
+    drag.appears(20_001);
+    drag.moves(20_001, 200.);
+    drag.moves(20_001, 240.);
+    drag.pointer_at(WEST_EDGE);
+
+    drag.release();
+    assert!(matches!(
+        drag.holder(20_001),
+        Some(ClaimHolder::Landing(Some(_)))
+    ));
+    drag.assert_untouched(20_001);
+
+    drag.ax_reports(20_001);
+    assert!(drag.holder(20_001).is_none());
+    assert_eq!(drag.tiles(), [SilentDrag::wid(20_001), WindowId::new(1, 1)]);
+    drag.assert_placed_once(20_001);
+}
+
+#[test]
+fn a_window_destroyed_before_ax_reports_it_never_lands() {
+    for released_first in [false, true] {
+        let mut drag = silent_drag_under_held_button();
+        drag.appears(20_001);
+        drag.moves(20_001, 200.);
+        drag.moves(20_001, 240.);
+        drag.pointer_at(WEST_EDGE);
+        if released_first {
+            drag.release();
+        }
+        assert!(
+            drag.holder(20_001).is_some(),
+            "the window was not held before it vanished"
+        );
+        drag.destroyed(20_001);
+        assert!(drag.reactor.state.windows.record(SilentDrag::wid(20_001)).is_none());
+        assert!(!drag.reactor.is_in_drag());
+        drag.release();
+        assert!(drag.reactor.state.windows.claimed_windows().next().is_none());
+        assert_eq!(
+            drag.tiles(),
+            [WindowId::new(1, 1)],
+            "released_first: {released_first}"
+        );
+        drag.assert_untouched(20_001);
+    }
+}
+
+/// Chrome creates and destroys intermediate windows during one tab drag.
+#[test]
+fn windows_appearing_and_vanishing_under_one_press_leave_only_the_survivor() {
+    use crate::model::window_store::ClaimHolder;
+    let mut drag = silent_drag_under_held_button();
+    drag.appears(20_001);
+    drag.moves(20_001, 200.);
+    drag.moves(20_001, 240.);
+    drag.destroyed(20_001);
+    drag.appears(20_002);
+    drag.destroyed(20_002);
+    drag.appears(20_003);
+    drag.moves(20_003, 200.);
+    drag.moves(20_003, 240.);
+    drag.pointer_at(WEST_EDGE);
+    drag.appears(20_004);
+
+    drag.release();
+    for gone in [20_001, 20_002, 20_004] {
+        assert!(
+            drag.reactor.state.windows.record(SilentDrag::wid(gone)).is_none(),
+            "{gone}"
+        );
+    }
+    assert!(matches!(
+        drag.holder(20_003),
+        Some(ClaimHolder::Landing(Some(_)))
+    ));
+    assert!(drag.reactor.press_arrivals.is_empty());
+
+    drag.ax_reports(20_003);
+    assert_eq!(drag.tiles(), [SilentDrag::wid(20_003), WindowId::new(1, 1)]);
+    assert!(drag.reactor.state.windows.claimed_windows().next().is_none());
+}
+
 #[test]
 fn a_window_created_while_the_button_is_held_is_tiled_only_at_the_release() {
     let mut tab = torn_tab_under_held_button().created();

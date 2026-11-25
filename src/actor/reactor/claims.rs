@@ -8,7 +8,7 @@ use rift_protocol::WindowClaimFlags;
 use super::{Changes, LayoutEvent, Reactor};
 use crate::actor::app::WindowId;
 use crate::layout_engine::systems::{LayoutSystem, WindowChange};
-use crate::model::window_store::{ClaimHolder, ClaimOwner};
+use crate::model::window_store::{ClaimHolder, ClaimOwner, Seen};
 
 const OWNED_ELSEWHERE: &str = "Window owned by another external manager";
 
@@ -77,6 +77,46 @@ impl Reactor {
     pub(super) fn release_owner_claims(&mut self, changes: &mut Changes, owner: ClaimOwner) {
         let windows = self.state.windows.owner_claims(owner).to_vec();
         self.release_claims_of(changes, windows);
+    }
+
+    /// The left button was released. Windows AX has reported return now. The others wait for
+    /// AX in a landing claim, the dragged one with its drop, which is then no longer `commit`'s
+    /// to land now.
+    pub(super) fn release_press(
+        &mut self,
+        changes: &mut Changes,
+        mut commit: Option<crate::actor::drag::DragCommit>,
+    ) -> Option<crate::actor::drag::DragCommit> {
+        let mut reported = Vec::new();
+        for window in self.state.windows.owner_claims(ClaimOwner::Press).to_vec() {
+            let Some(ClaimHolder::Press(seen)) =
+                self.state.windows.claim(window).map(|claim| claim.holder)
+            else {
+                continue;
+            };
+            match seen {
+                Seen::Accessibility => reported.push(window),
+                Seen::WindowServer => {
+                    let drop = commit.take_if(|commit| commit.source.window == window);
+                    self.state.windows.hand_over_claim(window, ClaimHolder::Landing(drop));
+                }
+            }
+        }
+        self.release_claims_of(changes, reported);
+        commit
+    }
+
+    /// AX reported a window the press held: it joins the layout, on its drop if it has one.
+    pub(super) fn land_arrival(
+        &mut self,
+        changes: &mut Changes,
+        wid: WindowId,
+        drop: Option<crate::actor::drag::DragCommit>,
+    ) {
+        self.release_claims_of(changes, [wid]);
+        if let Some(drop) = drop {
+            self.land_drag(changes, drop);
+        }
     }
 
     fn release_claims_of(

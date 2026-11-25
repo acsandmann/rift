@@ -1,3 +1,4 @@
+use objc2_core_foundation::CGRect;
 use tracing::{debug, warn};
 
 use super::{Changes, Presentation, Reactor, RefocusState, utils};
@@ -251,14 +252,57 @@ impl Reactor {
         {
             changes.arrange(Some(space), Presentation::Animated);
         }
-        (
+        let observed = (
             new,
             !minimized
                 && (restored
                     || ax_returned
                     || previous.is_some()
                     || (!new && admitted && !was_admitted)),
-        )
+        );
+        // AX reports a window the WindowServer reported first, under the press or after it.
+        match self.state.windows.claim(wid).map(|claim| claim.holder) {
+            Some(ClaimHolder::Press(Seen::WindowServer)) => {
+                let holder = ClaimHolder::Press(Seen::Accessibility);
+                self.state.windows.hand_over_claim(wid, holder);
+            }
+            Some(ClaimHolder::Landing(drop)) => self.land_arrival(changes, wid, drop),
+            Some(ClaimHolder::Press(Seen::Accessibility) | ClaimHolder::Ipc { .. }) | None => {}
+        }
+        observed
+    }
+
+    /// The WindowServer moved a window under the held button before AX reported it. Record it
+    /// from what the WindowServer says and claim it for the press, so no path admits it and
+    /// its frame changes can drive a drag. AX fills in its facts when it reports the window.
+    pub(super) fn arrive_under_press(
+        &mut self,
+        changes: &mut Changes,
+        wid: WindowId,
+        frame: CGRect,
+    ) {
+        let wsid = WindowServerId::new(wid.idx.get());
+        self.press_arrivals.remove(&wsid);
+        let info = WindowInfo {
+            has_native_tabs: false,
+            is_standard: true,
+            is_root: true,
+            is_minimized: false,
+            is_resizable: true,
+            title: String::new(),
+            frame,
+            min_size: None,
+            max_size: None,
+            sys_id: Some(wsid),
+            bundle_id: None,
+            path: None,
+            ax_role: None,
+            ax_subrole: None,
+        };
+        self.state.windows.insert_window(wid, info.into());
+        self.state.windows.reconcile_ax_identity(wid, Some(wsid));
+        self.state.windows.insert_claim(wid, ClaimHolder::Press(Seen::WindowServer));
+        changes.refresh_notifications = true;
     }
 
     pub(super) fn observe_window_minimization(
