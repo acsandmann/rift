@@ -229,9 +229,9 @@ impl Reactor {
         matches!(&self.pointer, Pointer::Down(press) if match press.following {
             Some(window) => !self.is_dragging_window(window),
             None => {
-                !(press.arrivals.is_empty()
-                    && self.state.windows.owner_claims(ClaimOwner::Press).is_empty())
-                    && !self.is_in_drag()
+                let holds_nothing = press.arrivals.is_empty()
+                    && self.state.windows.owner_claims(ClaimOwner::Press).is_empty();
+                !holds_nothing && !self.is_in_drag()
             }
         })
     }
