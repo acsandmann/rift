@@ -436,7 +436,8 @@ pub fn resolve_action(zone: DropZone, center: MouseDropAction) -> WindowDropActi
 
 /// The drop under `point`. A window already in the layout uses the hovered tile's zones. A window
 /// that brings a new tile picks the drop whose landing frame holds the pointer, preferring the one
-/// the hovered tile's zone names, then the smallest; between frames, the nearest.
+/// the hovered tile's zone names (its West/East strips keep side by side), then the largest
+/// (a third of the stack over a half of one tile); between frames, the nearest.
 fn candidate(
     session: &Session,
     settings: &DragDropSettings,
@@ -478,7 +479,7 @@ fn candidate(
             .find(|slot| slot.intent.window == zone.window && slot.intent.action == zone.action)
     });
     named
-        .or_else(|| holding.iter().copied().min_by(|a, b| area(a).total_cmp(&area(b))))
+        .or_else(|| holding.iter().copied().max_by(|a, b| area(a).total_cmp(&area(b))))
         .or_else(|| {
             open.iter().copied().min_by(|a, b| {
                 distance_to_rect_squared(a.area, point)

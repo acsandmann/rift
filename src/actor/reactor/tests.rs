@@ -3527,6 +3527,69 @@ fn a_window_bringing_a_new_tile_lands_where_its_overlay_shows() {
     }
 }
 
+/// In the owner's two-tile stack, a window bringing a new tile previews and lands the top or
+/// bottom third of the stack from anywhere in that band at the column's centre, not only from
+/// the thin edge strip of the tile there, while the tile's West/East strips keep side by side:
+/// torn out, or dragged in from another display.
+#[test]
+fn a_window_bringing_a_new_tile_reaches_the_stack_ends_from_their_whole_band() {
+    let rect = |x: f64, y: f64, w: f64, h: f64| CGRect::new(CGPoint::new(x, y), CGSize::new(w, h));
+    let top_third = rect(1600., 0., 400., 333.);
+    let bottom_third = rect(1600., 667., 400., 333.);
+    let mut cases = Vec::new();
+    for y in [20., 166., 320.] {
+        cases.push((CGPoint::new(1800., y), top_third));
+    }
+    for y in [680., 833., 990.] {
+        cases.push((CGPoint::new(1800., y), bottom_third));
+    }
+    for y in [166., 320.] {
+        cases.push((CGPoint::new(1620., y), rect(1600., 0., 200., 500.)));
+        cases.push((CGPoint::new(1980., y), rect(1800., 0., 200., 500.)));
+    }
+    for y in [680., 833.] {
+        cases.push((CGPoint::new(1620., y), rect(1600., 500., 200., 500.)));
+        cases.push((CGPoint::new(1980., y), rect(1800., 500., 200., 500.)));
+    }
+    let near = |a: CGRect, b: CGRect| {
+        (a.origin.x - b.origin.x).abs() < 1.5
+            && (a.origin.y - b.origin.y).abs() < 1.5
+            && (a.size.width - b.size.width).abs() < 1.5
+            && (a.size.height - b.size.height).abs() < 1.5
+    };
+    for (point, expected) in cases {
+        for torn in [true, false] {
+            let mut f = owner_two_displays();
+            let window = if torn { f.tear_on_b() } else { f.drag_from_a() };
+            let (_, action, previewed) = f.offer_at(point).expect("a drop");
+            assert!(
+                near(previewed, expected),
+                "torn={torn} at {point:?}: {action:?} previews {previewed:?}, expected {expected:?}"
+            );
+            release_left_button(&mut f.reactor);
+            if torn {
+                let wsid = Some(WindowServerId::new(OwnerDisplays::TORN));
+                let info = make_window_info(previewed, wsid, "Torn", None);
+                f.reactor.handle_event(Event::WindowCreated(
+                    window,
+                    info,
+                    None,
+                    Some(MouseState::Up),
+                ));
+            }
+            let (space_b, screen_b) = (f.space_b, f.screen_b);
+            let landed = test_layout(&mut f.reactor, space_b, screen_b)
+                .into_iter()
+                .find_map(|(w, frame)| (w == window).then_some(frame))
+                .expect("the window is not on B");
+            assert!(
+                landed.same_as(previewed),
+                "torn={torn} at {point:?}: landed {landed:?}"
+            );
+        }
+    }
+}
+
 #[test]
 fn a_torn_tab_can_drop_onto_the_tile_it_was_torn_from() {
     let bottom = WindowId::new(1, 1);
