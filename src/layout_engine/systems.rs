@@ -748,11 +748,13 @@ impl LayoutSystemKind {
         groups: &mut Vec<crate::layout_engine::engine::GroupContainerInfo>,
         selection_path_only: bool,
     ) -> Option<Vec<(WindowId, CGRect)>> {
+        let projected;
         let (forest, root, regions) = match self {
             Self::Traditional(system) => (&system.tiles, system.tiles.root(layout), None),
             Self::MasterStack(system) => {
-                let (root, master, stack) = system.region_roots(layout);
-                (&system.tiles, root, Some((master, stack)))
+                projected = system.projection(layout);
+                let (root, master, stack) = projected.region_roots(layout);
+                (&projected.tiles, root, Some((master, stack)))
             }
             _ => return None,
         };

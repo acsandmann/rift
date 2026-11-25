@@ -1,3 +1,5 @@
+use std::borrow::Cow;
+
 use nix::libc::pid_t;
 use objc2_core_foundation::CGRect;
 use serde::{Deserialize, Serialize};
@@ -215,6 +217,37 @@ impl MasterStackLayoutSystem {
         let stack_size = (total - master_size).max(0.05);
         self.tiles.tree.map[master].layout.size = master_size;
         self.tiles.tree.map[stack].layout.size = stack_size;
+    }
+
+    /// The arrangement to project for `layout`.
+    ///
+    /// A window that is away (minimized, hidden, native fullscreen, invalid AX
+    /// identity) keeps its slot in the tree so it returns to the same place, but it
+    /// must not claim space. In the master region that includes the master quota:
+    /// otherwise the master area projects empty while stack windows wait for a
+    /// window that isn't shown. Project what the tree would be without the away
+    /// windows, leaving the tree itself untouched.
+    pub(super) fn projection(&self, layout: LayoutId) -> Cow<'_, Self> {
+        let (_, master, _) = self.region_roots(layout);
+        let map = self.tiles.map();
+        let away: Vec<_> = self
+            .tiles
+            .windows_with_nodes(layout)
+            .filter(|&(_, window)| !self.tiles.window_participates(window))
+            .collect();
+        // Away stack windows already take no space; only an away master shifts regions.
+        if !away
+            .iter()
+            .any(|&(node, _)| node.ancestors(map).any(|ancestor| ancestor == master))
+        {
+            return Cow::Borrowed(self);
+        }
+        let mut projected = self.clone();
+        // Remove every away window, so none is promoted into the vacated master area.
+        for (_, window) in away {
+            projected.update(WindowChange::Remove(window));
+        }
+        Cow::Owned(projected)
     }
 
     pub(super) fn region_roots(&self, layout: LayoutId) -> (NodeId, NodeId, NodeId) {
@@ -491,9 +524,10 @@ impl LayoutSystem for MasterStackLayoutSystem {
         gaps: &crate::common::config::GapSettings,
         stack_line: crate::common::config::StackLineReserve,
     ) -> Vec<(WindowId, CGRect)> {
-        let (root, master, stack) = self.region_roots(layout);
+        let projected = self.projection(layout);
+        let (root, master, stack) = projected.region_roots(layout);
         super::tiles::project(
-            &self.tiles,
+            &projected.tiles,
             root,
             |active| super::tiles::project_root(root, Some((master, stack)), active),
             screen,
@@ -797,6 +831,87 @@ mod tests {
         let legacy = legacy.replace(",master_first:Some(false)", "");
         let restored: MasterStackLayoutSystem = ron::from_str(&legacy).unwrap();
         assert_eq!(restored.container_tree(layout), after);
+    }
+
+    /// Every combination of away windows, for each master count: away windows take
+    /// no space (master quota included), the tree is never edited by projection,
+    /// and bringing every window back restores the original frames.
+    #[test]
+    fn away_windows_never_hold_the_master_area() {
+        use objc2_core_foundation::{CGPoint, CGSize};
+        let screen = CGRect::new(CGPoint::ZERO, CGSize::new(1200.0, 800.0));
+        let gaps = crate::common::config::GapSettings::default();
+        let constraints = Default::default();
+        let windows = [w(1), w(2), w(3), w(4), w(5)];
+        for master_count in 1..=3 {
+            let mut system = MasterStackLayoutSystem::new(MasterStackSettings {
+                master_count,
+                ..Default::default()
+            });
+            let layout = system.create_layout();
+            for window in windows {
+                system.update(WindowChange::Add(layout, window, None));
+            }
+            let frames = |system: &MasterStackLayoutSystem| {
+                system.calculate_layout(
+                    layout,
+                    screen,
+                    0.0,
+                    &constraints,
+                    &gaps,
+                    Default::default(),
+                )
+            };
+            let original = frames(&system);
+            let tree = system.draw_tree(layout);
+            let left = original.iter().map(|(_, f)| f.origin.x).fold(f64::INFINITY, f64::min);
+            let full_width = original.iter().map(|(_, f)| f.max().x).fold(0.0, f64::max) - left;
+            for away_mask in 0u32..(1 << windows.len()) {
+                let away = |index: usize| away_mask & (1 << index) != 0;
+                for (index, &window) in windows.iter().enumerate() {
+                    system.set_window_participation(window, !away(index));
+                }
+                let shown: Vec<_> = (0..windows.len())
+                    .filter(|&index| !away(index))
+                    .map(|index| windows[index])
+                    .collect();
+                let projected = frames(&system);
+                let context = format!("master_count={master_count} away={away_mask:05b}");
+
+                let mut framed: Vec<_> = projected.iter().map(|(wid, _)| *wid).collect();
+                framed.sort();
+                assert_eq!(framed, shown, "{context}: only shown windows, once each");
+                assert_eq!(
+                    system.draw_tree(layout),
+                    tree,
+                    "{context}: projection edits the tree"
+                );
+                if shown.is_empty() {
+                    continue;
+                }
+                let in_master = projected.iter().filter(|(_, f)| f.origin.x == left).count();
+                if shown.len() <= master_count {
+                    assert_eq!(in_master, shown.len(), "{context}: {projected:?}");
+                    assert!(
+                        projected.iter().all(|(_, f)| f.size.width == full_width),
+                        "{context}: with no stack the master region fills the screen"
+                    );
+                } else {
+                    assert_eq!(
+                        in_master, master_count,
+                        "{context}: the master area holds master_count shown windows, got {projected:?}"
+                    );
+                    assert!(
+                        projected.iter().all(|(_, f)| f.size.width < full_width),
+                        "{context}: neither region may fill the screen, got {projected:?}"
+                    );
+                }
+            }
+            for window in windows {
+                system.set_window_participation(window, true);
+            }
+            assert_eq!(frames(&system), original, "master_count={master_count}");
+        }
     }
 
     #[test]
