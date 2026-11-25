@@ -369,7 +369,6 @@ pub(crate) struct ViewportPresentation {
     viewport: Viewport,
     motion: Arc<Mutex<MotionHistory>>,
     bounds: (f64, f64),
-    width: f64,
     tiling: CGRect,
     screen: CGRect,
 }
@@ -415,7 +414,9 @@ impl ViewportPresentation {
 
     pub fn update(&mut self, delta: f64, time: Duration) {
         if let Viewport::Gesture(offset) = &mut self.viewport {
-            self.motion.lock().update(offset, self.bounds, delta * self.width, time);
+            self.motion
+                .lock()
+                .update(offset, self.bounds, delta * self.tiling.size.width, time);
         }
     }
 
@@ -1632,7 +1633,6 @@ impl ScrollingLayoutSystem {
             viewport: state.camera.viewport.clone(),
             motion: Arc::new(Mutex::new(motion)),
             bounds: g.bounds,
-            width: g.tiling.size.width,
             tiling: g.tiling,
             screen: g.screen,
         };
