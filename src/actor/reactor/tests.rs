@@ -438,7 +438,7 @@ fn inventory_does_not_replace_geometry_owned_by_pending_rift_transaction() {
 
     let mut target = frame;
     target.origin.x = 200.0;
-    let txid = reactor.tx_store.begin(wsid, None);
+    let txid = reactor.tx_store.fence(wsid);
     reactor.tx_store.insert(wsid, txid, target);
 
     let mut parked = frame;
@@ -1948,7 +1948,7 @@ fn reactor_with_window_moved_to_space2()
 
     assert!(reactor.assign_test_window_to_workspace(space1, wid, space1_workspace));
     assert!(reactor.assign_test_window_to_workspace(space2, wid, space2_workspace));
-    let txid = reactor.tx_store.begin(wsid, None);
+    let txid = reactor.tx_store.fence(wsid);
     reactor.tx_store.insert(wsid, txid, moved_frame);
     assert_eq!(reactor.assigned_space_for_window_id(wid), Some(space2));
 
@@ -2557,7 +2557,7 @@ fn events_that_change_no_managed_layout_do_not_arrange() {
     let moved = |wid, frame, txid, requested| {
         Event::WindowFrameChanged(wid, frame, txid, Requested(requested), Some(MouseState::Up))
     };
-    let txid = reactor.tx_store.begin(wsid, None);
+    let txid = reactor.tx_store.fence(wsid);
     reactor.tx_store.insert(wsid, txid, at(40.0));
     // Acknowledged, unchanged, and explicitly requested frames.
     for event in [
@@ -2572,7 +2572,7 @@ fn events_that_change_no_managed_layout_do_not_arrange() {
 
     // A stale transaction while a newer target is pending, duplicate minimize
     // edges, and events for unknown windows.
-    let current = reactor.tx_store.begin(wsid, None);
+    let current = reactor.tx_store.fence(wsid);
     reactor.tx_store.insert(wsid, current, at(40.0));
     let unknown = WindowId::new(wid.pid + 100, wid.idx.get());
     for (case, (event, checked)) in [
@@ -3137,7 +3137,7 @@ fn stale_user_space_appearance_is_ignored_when_server_state_already_matches_pend
 
     assert!(reactor.assign_test_window_to_workspace(space1, wid, space1_workspace));
     reactor.state.windows.set_window_server_space(wsid, Some(space1));
-    let txid = reactor.tx_store.begin(wsid, None);
+    let txid = reactor.tx_store.fence(wsid);
     let target_frame = CGRect::new(CGPoint::new(100., 100.), CGSize::new(800., 600.));
     reactor.tx_store.insert(wsid, txid, target_frame);
 
@@ -4239,7 +4239,7 @@ fn topology_change_clears_stale_pending_hide_target_before_next_workspace_layout
         .map(|(_, frame)| frame)
         .expect("inactive-workspace window should still be laid out to a hidden position");
 
-    let txid = reactor.tx_store.begin(wsid, None);
+    let txid = reactor.tx_store.fence(wsid);
     reactor.tx_store.insert(wsid, txid, hidden_target);
 
     assert!(!reactor.arrange_test(true, None));

@@ -248,7 +248,7 @@ fn claim_cancels_drag_animation_and_pending_geometry() {
         crate::common::config::MouseAction::Move,
         crate::actor::drag::DragScene::default(),
     );
-    let txid = reactor.tx_store.begin(wsid, None);
+    let txid = reactor.tx_store.fence(wsid);
     reactor.tx_store.insert(wsid, txid, frame);
     let (animation_tx, animation_rx) = animation::AnimationSender::channel();
     reactor.animation_tx = Some(animation_tx);

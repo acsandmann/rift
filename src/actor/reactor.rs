@@ -1030,7 +1030,7 @@ impl Reactor {
         if let Some(window) = self.state.windows.window_mut(window) {
             window.record_actual(frame);
             if let Some(server) = window.info.sys_id {
-                self.tx_store.begin(server, None);
+                self.tx_store.fence(server);
             }
         }
     }
@@ -2780,7 +2780,7 @@ impl Reactor {
         let window_server_id =
             self.state.windows.window(window).and_then(|window| window.info.sys_id);
         let transaction = if let Some(window_server_id) = window_server_id {
-            self.tx_store.begin(window_server_id, Some(frame))
+            self.tx_store.begin(window_server_id, frame)
         } else {
             TransactionId::default()
         };

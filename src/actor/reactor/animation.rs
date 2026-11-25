@@ -472,9 +472,10 @@ impl CameraAnimation {
                 let frame = self.presentation.target_frame(window.to, window.fixed, self.scale);
                 self.bound.map_or(frame, |bounds| bounds.apply(frame))
             });
-            window.txid = window
-                .wsid
-                .map_or_else(TransactionId::default, |wsid| self.store.begin(wsid, target));
+            window.txid = window.wsid.map_or_else(TransactionId::default, |wsid| match target {
+                Some(target) => self.store.begin(wsid, target),
+                None => self.store.fence(wsid),
+            });
             // Growing at the old origin can push a visible window past the display
             // edge and trigger parking before the first sample places it.
             window.begin(target.filter(|_| !self.animate));
@@ -1133,7 +1134,7 @@ impl AnimationManager {
             };
             any_frame_changed = true;
             let txid = window_server_id
-                .map(|wsid| transactions.begin(wsid, Some(target_frame)))
+                .map(|wsid| transactions.begin(wsid, target_frame))
                 .unwrap_or_default();
             let is_active = reactor.state.windows.workspace_for_window(wid) == Some(active_ws);
 

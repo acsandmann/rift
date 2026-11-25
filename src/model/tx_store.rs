@@ -88,13 +88,17 @@ impl WindowTxStore {
         })
     }
 
-    pub fn begin(&self, id: WindowServerId, target: Option<CGRect>) -> TransactionId {
-        let mut record = self.0.records.entry(id).or_default();
+    /// Starts a write to `target` under a fresh id.
+    pub fn begin(&self, id: WindowServerId, target: CGRect) -> TransactionId {
         let txid = self.next_id();
-        *record = TxRecord {
-            txid,
-            write: target.map_or(FrameWrite::Idle, FrameWrite::Pending),
-        };
+        self.insert(id, txid, target);
+        txid
+    }
+
+    /// Issues a fresh id with no write, so writes still in flight stop being current.
+    pub fn fence(&self, id: WindowServerId) -> TransactionId {
+        let txid = self.next_id();
+        self.0.records.insert(id, TxRecord { txid, write: FrameWrite::Idle });
         txid
     }
 
@@ -166,7 +170,7 @@ mod tests {
         let store = WindowTxStore::new();
         let wsid = WindowServerId::new(1);
         let target = CGRect::new(CGPoint::new(10.0, 20.0), CGSize::new(30.0, 40.0));
-        let txid = store.begin(wsid, None);
+        let txid = store.fence(wsid);
         store.insert(wsid, txid, target);
         assert_eq!(txid, TransactionId::default().next());
         assert_eq!(store.get(&wsid).unwrap().target(), Some(target));
@@ -177,7 +181,7 @@ mod tests {
         assert_eq!(record.txid, txid);
         assert_eq!(record.target(), None);
 
-        let newer = store.begin(wsid, None);
+        let newer = store.fence(wsid);
         store.insert(wsid, newer, target);
         store.clear_target_if_current(&wsid, txid);
         assert_eq!(
@@ -195,12 +199,12 @@ mod tests {
         let store = WindowTxStore::new();
         let wsid = WindowServerId::new(2);
 
-        let txid_1 = store.begin(wsid, None);
+        let txid_1 = store.fence(wsid);
         let target = CGRect::new(CGPoint::new(1.0, 2.0), CGSize::new(3.0, 4.0));
         store.insert(wsid, txid_1, target);
         store.clear_target(&wsid);
 
-        let txid_2 = store.begin(wsid, None);
+        let txid_2 = store.fence(wsid);
         assert_eq!(txid_2, txid_1.next());
     }
 }
