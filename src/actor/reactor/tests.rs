@@ -2625,7 +2625,7 @@ fn layout_events_defer_arrangement_during_drag_except_removal() {
             last_frame: frame,
             origin_space: Some(space),
             current_space: Some(space),
-            tiled: true,
+            origin: crate::actor::drag::DragOrigin::Tiled,
         };
         if modifier {
             reactor.drag_manager.actor.begin_modifier(
@@ -2700,7 +2700,7 @@ fn drag_time_removal_consumes_only_covered_deferred_work() {
                 last_frame: frames[0],
                 origin_space: Some(spaces[0]),
                 current_space: Some(spaces[0]),
-                tiled: true,
+                origin: crate::actor::drag::DragOrigin::Tiled,
             },
             Default::default(),
         );
@@ -3200,7 +3200,7 @@ fn cancelling_tiled_modifier_move_reconciles_layout() {
         last_frame: frame,
         origin_space: Some(space),
         current_space: Some(space),
-        tiled: true,
+        origin: crate::actor::drag::DragOrigin::Tiled,
     };
 
     reactor.drag_manager.actor.begin_modifier(
@@ -3249,7 +3249,7 @@ fn frame_echo_reading_mouse_up_does_not_end_a_modifier_drag() {
             last_frame: frame,
             origin_space: Some(space),
             current_space: Some(space),
-            tiled: true,
+            origin: crate::actor::drag::DragOrigin::Tiled,
         },
         crate::actor::drag::MouseButton::Left,
         frame.mid(),

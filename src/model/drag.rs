@@ -72,7 +72,42 @@ pub struct DragSource {
     pub last_frame: CGRect,
     pub origin_space: Option<SpaceId>,
     pub current_space: Option<SpaceId>,
-    pub tiled: bool,
+    pub origin: DragOrigin,
+}
+
+/// Where a dragged window comes from, which decides what it can drop onto.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DragOrigin {
+    /// A tile: it drops onto other tiles, or back onto its own slot.
+    Tiled,
+    /// A floating window: it moves freely and drops onto no tile.
+    Floating,
+}
+
+impl DragOrigin {
+    pub fn of(floating: bool) -> Self {
+        if floating {
+            Self::Floating
+        } else {
+            Self::Tiled
+        }
+    }
+
+    /// Whether the drag hit-tests the tiles it passes over.
+    pub fn targets_tiles(self) -> bool {
+        match self {
+            Self::Tiled => true,
+            Self::Floating => false,
+        }
+    }
+
+    /// Whether the window has a slot to drop back onto.
+    pub fn has_slot(self) -> bool {
+        match self {
+            Self::Tiled => true,
+            Self::Floating => false,
+        }
+    }
 }
 
 #[derive(Debug, Clone)]

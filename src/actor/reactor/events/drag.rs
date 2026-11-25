@@ -37,7 +37,7 @@ impl Reactor {
         let Some(cancelled) = cancelled else { return };
         let source = cancelled.source;
         if cancelled.kind == crate::actor::drag::DragKind::ModifierMove
-            && !source.tiled
+            && source.origin == crate::actor::drag::DragOrigin::Floating
             && source.last_frame != source.origin_frame
         {
             self.write_window_frame(source.window, source.origin_frame, false, None);

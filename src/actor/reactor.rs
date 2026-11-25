@@ -1051,7 +1051,9 @@ impl Reactor {
             last_frame,
             origin_space,
             current_space,
-            tiled: !self.layout_manager.layout_engine.is_window_floating(window),
+            origin: crate::actor::drag::DragOrigin::of(
+                self.layout_manager.layout_engine.is_window_floating(window),
+            ),
         };
         let kind = crate::actor::drag::DragKind::native(origin_frame, last_frame);
         let scene = self.move_drag_scene(&source, kind).unwrap_or_default();
@@ -2046,7 +2048,9 @@ impl Reactor {
                     last_frame: frame,
                     origin_space: space,
                     current_space: space,
-                    tiled: !self.layout_manager.layout_engine.is_window_floating(window),
+                    origin: crate::actor::drag::DragOrigin::of(
+                        self.layout_manager.layout_engine.is_window_floating(window),
+                    ),
                 };
                 let scene = self
                     .move_drag_scene(&source, crate::actor::drag::DragKind::ModifierMove)
@@ -4455,7 +4459,9 @@ impl Reactor {
         source: &crate::actor::drag::DragSource,
         kind: crate::actor::drag::DragKind,
     ) -> Option<crate::actor::drag::DragScene> {
-        let space = source.current_space.filter(|_| source.tiled && kind.is_move())?;
+        let space = source
+            .current_space
+            .filter(|_| source.origin.targets_tiles() && kind.is_move())?;
         Some(self.drag_scene(source.window, space))
     }
 
@@ -4485,7 +4491,7 @@ impl Reactor {
                     last_frame: *frame,
                     origin_space,
                     current_space: origin_space,
-                    tiled: true,
+                    origin: crate::actor::drag::DragOrigin::Tiled,
                 },
                 crate::actor::drag::DragScene::default(),
             );

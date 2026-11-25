@@ -260,7 +260,7 @@ fn claim_cancels_drag_animation_and_pending_geometry() {
             last_frame: frame,
             origin_space: Some(space),
             current_space: Some(space),
-            tiled: true,
+            origin: crate::actor::drag::DragOrigin::Tiled,
         },
         crate::actor::drag::MouseButton::Left,
         frame.mid(),
