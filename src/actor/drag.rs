@@ -434,7 +434,7 @@ pub fn classify_zone(frame: CGRect, point: CGPoint, fraction: f64) -> Option<Dro
     Some(nearest.1)
 }
 
-pub fn zone_frame(frame: CGRect, zone: DropZone, fraction: f64) -> CGRect {
+fn zone_frame(frame: CGRect, zone: DropZone, fraction: f64) -> CGRect {
     let (x, y, width, height) = match zone {
         DropZone::Center => (fraction, fraction, 1.0 - 2.0 * fraction, 1.0 - 2.0 * fraction),
         DropZone::West => (0.0, 0.0, fraction, 1.0),
@@ -448,6 +448,23 @@ pub fn zone_frame(frame: CGRect, zone: DropZone, fraction: f64) -> CGRect {
             frame.origin.y + frame.size.height * y,
         ),
         objc2_core_foundation::CGSize::new(frame.size.width * width, frame.size.height * height),
+    )
+}
+
+/// What a drop on `zone` of a tile at `frame` takes of that tile, as it is now: all of it at the
+/// centre (a swap or a stack), the half on that side at an edge (an insert splits the tile).
+pub fn zone_share(frame: CGRect, zone: DropZone) -> CGRect {
+    let (width, height) = (frame.size.width / 2.0, frame.size.height / 2.0);
+    let (x, y, w, h) = match zone {
+        DropZone::Center => (0.0, 0.0, frame.size.width, frame.size.height),
+        DropZone::West => (0.0, 0.0, width, frame.size.height),
+        DropZone::East => (width, 0.0, width, frame.size.height),
+        DropZone::North => (0.0, 0.0, frame.size.width, height),
+        DropZone::South => (0.0, height, frame.size.width, height),
+    };
+    CGRect::new(
+        CGPoint::new(frame.origin.x + x, frame.origin.y + y),
+        objc2_core_foundation::CGSize::new(w, h),
     )
 }
 
@@ -903,6 +920,28 @@ mod tests {
         actor.set_preview(intent, Some(frame(200.0, 0.0, 100.0, 100.0)));
         assert!(actor.preview_target().is_some());
         assert!(actor.finish(MouseButton::Left).unwrap().target.is_some());
+    }
+
+    #[test]
+    fn a_zone_takes_the_whole_tile_at_the_centre_and_half_at_an_edge() {
+        let tile = frame(100.0, 200.0, 400.0, 300.0);
+        assert_eq!(zone_share(tile, DropZone::Center), tile);
+        assert_eq!(
+            zone_share(tile, DropZone::West),
+            frame(100.0, 200.0, 200.0, 300.0)
+        );
+        assert_eq!(
+            zone_share(tile, DropZone::East),
+            frame(300.0, 200.0, 200.0, 300.0)
+        );
+        assert_eq!(
+            zone_share(tile, DropZone::North),
+            frame(100.0, 200.0, 400.0, 150.0)
+        );
+        assert_eq!(
+            zone_share(tile, DropZone::South),
+            frame(100.0, 350.0, 400.0, 150.0)
+        );
     }
 
     #[test]

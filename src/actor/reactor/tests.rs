@@ -3288,8 +3288,8 @@ impl SilentDrag {
 /// The tab was torn from the bottom tile of a master-stack, which stays selected, so a new
 /// window joins right after it. Every zone of that tile is still a drop target, and the window
 /// lands where the zone says.
-/// A torn tab's overlay sits under the pointer: for each tile, its centre and edges preview the
-/// zone of that tile as it is on screen, the tab's own source tile included. Where the window
+/// A torn tab's overlay sits under the pointer: for each tile, its centre previews the whole tile
+/// and its edges the half on that side, as the tile is on screen, the tab's own source tile included. Where the window
 /// lands still comes from the layout it would join.
 #[test]
 fn a_torn_tabs_overlay_is_the_zone_under_the_pointer() {
@@ -3322,17 +3322,24 @@ fn a_torn_tabs_overlay_is_the_zone_under_the_pointer() {
             };
             assert_eq!(target.intent.window, window, "{point:?}");
             let area = target.preview_area;
+            let zones = [
+                crate::actor::drag::DropZone::Center,
+                crate::actor::drag::DropZone::West,
+                crate::actor::drag::DropZone::East,
+                crate::actor::drag::DropZone::North,
+                crate::actor::drag::DropZone::South,
+            ];
+            assert_eq!(target.intent.zone, zones[index], "{point:?}");
+            // What the drop takes of the tile as it is now: all of it, or the half on that side.
+            let share = crate::actor::drag::zone_share(tile, zones[index]);
+            assert!(area.same_as(share), "{area:?} is not {share:?} of {window:?}");
             assert!(
                 crate::actor::drag::contains(area, point, 0.5),
                 "{area:?} is not under {point:?}"
             );
-            assert!(
-                area.origin.x >= tile.origin.x - 0.5
-                    && area.origin.y >= tile.origin.y - 0.5
-                    && area.max().x <= tile.max().x + 0.5
-                    && area.max().y <= tile.max().y + 0.5,
-                "{area:?} is outside {window:?} at {tile:?}"
-            );
+            if index == 0 {
+                assert!(area.same_as(tile), "the centre overlay is the whole tile");
+            }
         }
     }
 }
@@ -3359,9 +3366,12 @@ fn a_torn_tabs_overlay_stays_on_the_display() {
         .expect("no target on the south edge");
     assert_eq!(target.intent.window, bottom);
     assert!(overflowing.max().y > SCREEN_1000.max().y);
+    // The bottom half of the tile, cut at the display's edge.
+    let half = crate::actor::drag::zone_share(overflowing, crate::actor::drag::DropZone::South);
+    let visible = half.intersection(&SCREEN_1000);
     assert!(
-        target.preview_area.max().y <= SCREEN_1000.max().y + 0.5,
-        "{:?}",
+        target.preview_area.same_as(visible),
+        "{:?} is not {visible:?}",
         target.preview_area
     );
 }
