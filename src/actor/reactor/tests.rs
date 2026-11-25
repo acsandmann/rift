@@ -3760,6 +3760,63 @@ fn a_first_tear_reported_by_ax_first_is_dragged_from_the_first_pointer_sample() 
     assert_eq!(target.intent.window, WindowId::new(1, 1));
 }
 
+/// A torn tab may never take focus (one torn from the focused window): the arrival at the normal
+/// level whose WindowServer bounds hold the pointer follows the cursor, and the pointer's first
+/// sample drags it to a target.
+#[test]
+fn a_torn_tab_that_never_takes_focus_drags_from_the_first_pointer_sample() {
+    let mut drag = silent_drag_under_held_button();
+    drag.appears(20_001);
+    let frame = CGRect::new(
+        CGPoint::new(WEST_EDGE.x - 100., WEST_EDGE.y - 20.),
+        CGSize::new(500., 400.),
+    );
+    window_server::set_direct_window_for_test(WindowServerId::new(20_001), frame, 1, 0);
+    assert!(
+        drag.reactor
+            .drag_manager
+            .native_motion_active
+            .load(std::sync::atomic::Ordering::Acquire),
+        "the press wants the pointer's samples to find the window following the cursor"
+    );
+    drag.pointer_at(WEST_EDGE);
+    assert!(drag.reactor.is_dragging_window(SilentDrag::wid(20_001)));
+    assert!(
+        drag.reactor.drag_manager.actor.preview_target().is_some(),
+        "no target on the first sample"
+    );
+}
+
+/// What follows the cursor is a window, not a helper: a window above the normal level (a
+/// tooltip, a menu, a drag image), one away from the pointer, or one of two that both hold it
+/// is not dragged without focus.
+#[test]
+fn a_helper_window_that_never_takes_focus_is_not_dragged() {
+    let around = CGRect::new(
+        CGPoint::new(WEST_EDGE.x - 100., WEST_EDGE.y - 20.),
+        CGSize::new(500., 400.),
+    );
+    let away = CGRect::new(
+        CGPoint::new(WEST_EDGE.x + 300., WEST_EDGE.y + 300.),
+        CGSize::new(50., 50.),
+    );
+    let cases: [&[(u32, CGRect, i32)]; 3] = [&[(20_002, around, 101)], &[(20_003, away, 0)], &[
+        (20_004, around, 0),
+        (20_005, around, 0),
+    ]];
+    for windows in cases {
+        let mut drag = silent_drag_under_held_button();
+        for &(idx, frame, level) in windows {
+            drag.appears(idx);
+            window_server::set_direct_window_for_test(WindowServerId::new(idx), frame, 1, level);
+        }
+        drag.pointer_at(WEST_EDGE);
+        assert!(!drag.reactor.is_in_drag(), "{windows:?}");
+        drag.release();
+        assert_eq!(drag.tiles(), [WindowId::new(1, 1)], "{windows:?}");
+    }
+}
+
 #[test]
 fn a_window_that_never_takes_focus_is_not_dragged() {
     let mut drag = silent_drag_under_held_button();

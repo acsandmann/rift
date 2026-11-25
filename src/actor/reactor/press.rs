@@ -24,11 +24,12 @@ pub(super) enum Pointer {
 pub(super) struct Press {
     pub(super) button: MouseButton,
     /// Native windows that appeared under the left button. AX can stay silent about them
-    /// while an app runs its own drag, and the WindowServer reports no moves, so the one that
-    /// takes focus is recorded from that (`follow_focused_arrival`).
+    /// while an app runs its own drag, the WindowServer reports no moves, and the window may
+    /// never take focus, so the one following the cursor is the one that takes focus
+    /// (`follow_focused_arrival`) or the one the pointer holds (`follow_arrival_under`).
     pub(super) arrivals: HashSet<WindowServerId>,
-    /// The arrival that took focus: the window following the cursor (a torn-out tab). The
-    /// next pointer sample starts its drag.
+    /// The arrival following the cursor (a torn-out tab). The next pointer sample starts its
+    /// drag.
     pub(super) following: Option<WindowId>,
     /// Layouts made while the button is held, not yet on screen.
     pub(super) held_layout: HeldLayout,
@@ -150,10 +151,34 @@ impl Reactor {
     }
 
     /// A window that appeared under the press took focus: it is the one following the cursor.
-    /// Record it (AX may not have reported it) and claim it, so the pointer can drag it. It may
-    /// have reached Rift as a WindowServer appearance or, first, as an AX report the press
-    /// already claimed.
+    /// It may have reached Rift as a WindowServer appearance or, first, as an AX report the
+    /// press already claimed.
     pub(super) fn follow_focused_arrival(&mut self, changes: &mut Changes, window: WindowId) {
+        self.follow_arrival(changes, window, "took focus");
+    }
+
+    /// No arrival has taken focus (a tab torn from the focused window may never take it): the
+    /// one following the cursor is the only arrival at the normal window level whose bounds
+    /// hold the pointer. Helpers (tooltips, menus, drag images) sit above that level.
+    fn follow_arrival_under(&mut self, changes: &mut Changes, point: CGPoint) {
+        let Pointer::Down(press) = &self.pointer else {
+            return;
+        };
+        let mut under = press.arrivals.iter().filter_map(|&wsid| {
+            let (frame, pid) = window_server::window_bounds_and_pid(wsid)?;
+            let level = window_server::direct_window_level(wsid);
+            let holds = level == Some(0) && crate::actor::drag::contains(frame, point, 12.0);
+            debug!(?wsid, ?frame, ?level, holds, "press-arrival: under the pointer?");
+            holds.then(|| WindowId::new(pid, wsid.as_u32()))
+        });
+        if let (Some(window), None) = (under.next(), under.next()) {
+            self.follow_arrival(changes, window, "holds the pointer");
+        }
+    }
+
+    /// Record the window following the cursor (AX may not have reported it) and claim it, so
+    /// the pointer can drag it.
+    fn follow_arrival(&mut self, changes: &mut Changes, window: WindowId, why: &'static str) {
         let wsid = WindowServerId::new(window.idx.get());
         let held = self
             .state
@@ -167,7 +192,7 @@ impl Reactor {
             return;
         }
         press.following = Some(window);
-        debug!(?window, "press-arrival: follows the cursor");
+        debug!(?window, why, "press-arrival: follows the cursor");
         if self.state.windows.record(window).is_none() {
             let frame = window_server::window_bounds_and_pid(wsid)
                 .map_or(CGRect::default(), |(frame, _)| frame);
@@ -175,15 +200,23 @@ impl Reactor {
         }
     }
 
-    /// Whether the pointer's samples are wanted for the window following the cursor.
+    /// Whether the pointer's samples are wanted: for the window following the cursor, or, while
+    /// windows have arrived and none follows and nothing is dragged, to find the one that does.
     pub(super) fn follower_awaits_drag(&self) -> bool {
-        matches!(&self.pointer, Pointer::Down(press)
-            if press.following.is_some_and(|window| !self.is_dragging_window(window)))
+        matches!(&self.pointer, Pointer::Down(press) if match press.following {
+            Some(window) => !self.is_dragging_window(window),
+            None => !press.arrivals.is_empty() && !self.is_in_drag(),
+        })
     }
 
     /// The pointer moved under the press: the window following the cursor gets the drag, from
     /// this first sample, whatever the app and the WindowServer have reported of it.
     pub(super) fn drag_follower(&mut self, changes: &mut Changes, point: CGPoint) {
+        if matches!(&self.pointer, Pointer::Down(press) if press.following.is_none())
+            && !self.is_in_drag()
+        {
+            self.follow_arrival_under(changes, point);
+        }
         let Pointer::Down(press) = &self.pointer else {
             return;
         };

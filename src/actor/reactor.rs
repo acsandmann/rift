@@ -1841,7 +1841,16 @@ impl Reactor {
                     && let Pointer::Down(press) = &mut self.pointer
                     && press.arrivals.insert(wsid)
                 {
-                    debug!(?wsid, ?sid, ?kind, "press-arrival: appeared under the press");
+                    let direct = window_server::window_bounds_and_pid(wsid);
+                    let level = window_server::direct_window_level(wsid);
+                    debug!(
+                        ?wsid,
+                        ?sid,
+                        ?kind,
+                        ?direct,
+                        ?level,
+                        "press-arrival: appeared under the press"
+                    );
                     changes.refresh_notifications = true;
                 }
                 let queried = window_server::get_window_with_transient(wsid)

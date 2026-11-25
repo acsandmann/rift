@@ -594,8 +594,39 @@ pub fn window_bounds_and_pid(id: WindowServerId) -> Option<(CGRect, pid_t)> {
     Some((frame, pid))
 }
 
+/// A window's level, asked of the WindowServer directly, which answers for a window the window
+/// query can miss (see `window_bounds_and_pid`). 0 is the normal level: a document window;
+/// tooltips, menus and other helpers sit above it.
+#[cfg(not(test))]
+pub fn direct_window_level(id: WindowServerId) -> Option<i32> {
+    let mut level = 0;
+    (unsafe { SLSGetWindowLevel(*G_CONNECTION, id.as_u32(), &mut level) } == CGError::Success)
+        .then_some(level)
+}
+
 #[cfg(test)]
-pub fn window_bounds_and_pid(_id: WindowServerId) -> Option<(CGRect, pid_t)> { None }
+thread_local! {
+    /// What the WindowServer answers about a window directly, as a test sets it.
+    static TEST_DIRECT_WINDOWS: RefCell<HashMap<WindowServerId, (CGRect, pid_t, i32)>> =
+        RefCell::new(HashMap::default());
+}
+
+/// Tests: the WindowServer answers `window_bounds_and_pid` and `direct_window_level` for `id`.
+#[cfg(test)]
+pub fn set_direct_window_for_test(id: WindowServerId, frame: CGRect, pid: pid_t, level: i32) {
+    TEST_DIRECT_WINDOWS.with(|windows| windows.borrow_mut().insert(id, (frame, pid, level)));
+}
+
+#[cfg(test)]
+pub fn window_bounds_and_pid(id: WindowServerId) -> Option<(CGRect, pid_t)> {
+    TEST_DIRECT_WINDOWS
+        .with(|windows| windows.borrow().get(&id).map(|&(frame, pid, _)| (frame, pid)))
+}
+
+#[cfg(test)]
+pub fn direct_window_level(id: WindowServerId) -> Option<i32> {
+    TEST_DIRECT_WINDOWS.with(|windows| windows.borrow().get(&id).map(|&(_, _, level)| level))
+}
 
 pub fn get_window(id: WindowServerId) -> Option<WindowServerInfo> {
     get_window_with_transient(id).map(|(info, _)| info)
