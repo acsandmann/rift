@@ -55,7 +55,7 @@ impl std::fmt::Debug for ReleaseClaims {
 impl ReleaseClaims {
     /// The claims lease outlives the claims, so the port name cannot be reused before this.
     pub(crate) fn apply(self, reactor: &mut reactor::Reactor) {
-        reactor.release_claims(ClaimOwner(self.port));
+        reactor.release_claims(self.port);
         self.server_state.set_lease(self.port, PortLease::Claims, false);
     }
 }
@@ -152,15 +152,14 @@ impl IpcRequestHandler {
     fn update_claims(
         &self,
         port: ClientPort,
-        change: impl FnOnce(&mut reactor::Reactor, ClaimOwner) -> Result<(), &'static str>,
+        change: impl FnOnce(&mut reactor::Reactor, ClientPort) -> Result<(), &'static str>,
         data: serde_json::Value,
     ) -> Vec<u8> {
         let Ok(mut reactor) = self.reactor.try_borrow_mut() else {
             return encode_error(serde_json::json!({ "message": "Reactor is busy" }));
         };
-        let owner = ClaimOwner(port);
-        let result = change(&mut reactor, owner);
-        if reactor.state.windows.owner_claims(owner).is_empty() {
+        let result = change(&mut reactor, port);
+        if reactor.state.windows.owner_claims(ClaimOwner::Ipc(port)).is_empty() {
             self.server_state.set_lease(port, PortLease::Claims, false);
         }
         match result {
@@ -252,18 +251,18 @@ impl IpcRequestHandler {
             }
             RiftRequest::ClaimWindow { window_id, flags } => self.update_claims(
                 client_port,
-                |reactor, owner| {
+                |reactor, port| {
                     // A claim may only exist while its owner's port is watched.
                     if !self.server_state.set_lease(client_port, PortLease::Claims, true) {
                         return Err("Failed to monitor management port");
                     }
-                    reactor.claim_window(window_id_from(window_id)?, owner, flags)
+                    reactor.claim_window(window_id_from(window_id)?, port, flags)
                 },
                 serde_json::json!({ "claimed": window_id }),
             ),
             RiftRequest::ReleaseWindow { window_id } => self.update_claims(
                 client_port,
-                |reactor, owner| reactor.release_window(window_id_from(window_id)?, owner),
+                |reactor, port| reactor.release_window(window_id_from(window_id)?, port),
                 serde_json::json!({ "released": window_id }),
             ),
             request => match self.reactor.try_borrow_mut() {

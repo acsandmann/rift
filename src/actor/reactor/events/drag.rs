@@ -1,4 +1,4 @@
-use tracing::trace;
+use tracing::{debug, trace};
 
 use super::super::{Changes, Presentation, Reactor};
 use crate::actor::reactor::managers::LayoutManager;
@@ -13,7 +13,9 @@ pub fn build_drag_scene(
 ) -> crate::actor::drag::DragScene {
     crate::actor::drag::DragScene {
         action_override: layout.layout_engine.drop_action_override(space),
-        source_neighbors: layout.layout_engine.source_move_neighbors(space, source),
+        place: crate::actor::drag::ScenePlace::Home {
+            neighbors: layout.layout_engine.source_move_neighbors(space, source),
+        },
         targets: layout
             .layout_engine
             .drop_scene_windows(space, source)
@@ -37,7 +39,7 @@ impl Reactor {
         let Some(cancelled) = cancelled else { return };
         let source = cancelled.source;
         if cancelled.kind == crate::actor::drag::DragKind::ModifierMove
-            && !source.tiled
+            && source.origin == crate::actor::drag::DragOrigin::Floating
             && source.last_frame != source.origin_frame
         {
             self.write_window_frame(source.window, source.origin_frame, false, None);
@@ -49,19 +51,37 @@ impl Reactor {
         }
     }
 
-    pub(in crate::actor::reactor) fn finish_drag(
+    /// End the drag `button` finishes and hide its preview. It lands in `land_drag`.
+    pub(in crate::actor::reactor) fn end_drag(
+        &mut self,
+        button: crate::actor::drag::MouseButton,
+    ) -> Option<crate::actor::drag::DragCommit> {
+        let commit = self.drag_manager.actor.finish(button)?;
+        self.drag_manager.release_preview();
+        debug!(
+            source = ?commit.source.window,
+            origin = ?commit.source.origin,
+            target = ?commit.target.map(|target| (target.intent.window, target.intent.action)),
+            "drag ended"
+        );
+        Some(commit)
+    }
+
+    pub(in crate::actor::reactor) fn land_drag(
         &mut self,
         changes: &mut Changes,
-        button: crate::actor::drag::MouseButton,
+        commit: crate::actor::drag::DragCommit,
     ) {
-        let kind = self.drag_manager.actor.kind();
-        let Some(commit) = self.drag_manager.actor.finish(button) else {
-            return;
-        };
-        self.drag_manager.release_preview();
+        debug!(
+            source = ?commit.source.window,
+            target = ?commit.target.map(|target| (target.intent.window, target.intent.action)),
+            blocked = self.refreshes_blocked(),
+            "drag landing"
+        );
         if self.refreshes_blocked() {
             return;
         }
+        let kind = commit.kind;
         let source = commit.source;
         let window = source.window;
         let Some(workspace) = self.state.windows.workspace_for_window(window) else {
@@ -72,7 +92,7 @@ impl Reactor {
         };
         changes.arrange(Some(owner), Presentation::Animated);
 
-        if kind == Some(crate::actor::drag::DragKind::NativeResize) {
+        if kind == crate::actor::drag::DragKind::NativeResize {
             let engine = &mut self.layout_manager.layout_engine;
             if engine.is_window_floating(window) {
                 engine.store_floating_position(workspace, window, source.last_frame);
@@ -92,7 +112,7 @@ impl Reactor {
         let crossing = crossing.or_else(|| {
             // The last AX frame can lag mouse-up. Use a complete membership sample
             // only when current WindowServer membership corroborates its destination.
-            if kind != Some(crate::actor::drag::DragKind::NativeMove)
+            if kind != crate::actor::drag::DragKind::NativeMove
                 || !self.space_state.membership_complete
             {
                 return None;
@@ -123,14 +143,22 @@ impl Reactor {
                 && self.state.windows.contains_window(target.intent.window)
             {
                 trace!(source=?window, target=?target.intent.window, action=?target.intent.action, "performing window drop");
-                if self.layout_manager.layout_engine.apply_window_drop(
-                    crate::layout_engine::WindowDropRequest {
-                        source: window,
-                        target: target.intent.window,
-                        space,
-                        action: target.intent.action,
-                    },
-                ) {
+                let request = crate::layout_engine::WindowDropRequest {
+                    source: window,
+                    target: target.intent.window,
+                    space,
+                    action: target.intent.action,
+                };
+                // A window that arrived with no slot lands exactly as its preview placed it.
+                let engine = &mut self.layout_manager.layout_engine;
+                let dropped = match source.origin {
+                    crate::actor::drag::DragOrigin::Arriving => {
+                        engine.land_arriving_window(request)
+                    }
+                    crate::actor::drag::DragOrigin::Tiled
+                    | crate::actor::drag::DragOrigin::Floating => engine.apply_window_drop(request),
+                };
+                if dropped {
                     changes.space(space).layout_changed = true;
                     changes.drop_haptic = self.drag_manager.haptics_enabled;
                 }

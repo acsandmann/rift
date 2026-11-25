@@ -74,15 +74,18 @@ impl Changes {
         }
     }
 
-    pub(super) fn defer_drag_layouts(
+    /// Hand every presentation to `defer`. While a drag runs, work marked `during_drag` (a live
+    /// resize, a removal the drag scene must see) still goes out; with no drag, nothing does.
+    pub(super) fn hold_layouts(
         &mut self,
+        dragging: bool,
         mut defer: impl FnMut(Option<SpaceId>, Presentation, bool),
     ) {
         if let Some(policy) = self.all.presentation.take() {
             defer(None, policy, self.all.layout_changed);
         }
         for (space, change) in self.inline.iter_mut().flatten().chain(&mut self.extra) {
-            if !change.during_drag
+            if !(dragging && change.during_drag)
                 && let Some(policy) = change.presentation.take()
             {
                 defer(Some(*space), policy, change.layout_changed);

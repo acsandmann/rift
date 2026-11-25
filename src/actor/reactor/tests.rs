@@ -2625,7 +2625,7 @@ fn layout_events_defer_arrangement_during_drag_except_removal() {
             last_frame: frame,
             origin_space: Some(space),
             current_space: Some(space),
-            tiled: true,
+            origin: crate::actor::drag::DragOrigin::Tiled,
         };
         if modifier {
             reactor.drag_manager.actor.begin_modifier(
@@ -2700,7 +2700,7 @@ fn drag_time_removal_consumes_only_covered_deferred_work() {
                 last_frame: frames[0],
                 origin_space: Some(spaces[0]),
                 current_space: Some(spaces[0]),
-                tiled: true,
+                origin: crate::actor::drag::DragOrigin::Tiled,
             },
             Default::default(),
         );
@@ -2884,42 +2884,1316 @@ fn cross_display_drag_relocates_the_window_once_and_preserves_floating() {
     }
 }
 
-#[test]
-fn new_window_under_a_held_pointer_waits_for_a_frame_change_before_dragging() {
-    let (mut apps, mut reactor) = test_context();
+/// #689: a browser tab dragged out of its window becomes a new window while the left
+/// button is still held. The window server reports it first; Rift then hears of it
+/// through the created notification or a window-list refresh, whichever comes first.
+struct TornTab {
+    apps: Apps,
+    reactor: Reactor,
+    screen: CGRect,
+    space: SpaceId,
+    wid: WindowId,
+    info: WindowInfo,
+}
+
+fn torn_tab_under_held_button() -> TornTab { torn_tab_in(test_context()) }
+
+fn torn_tab_in((mut apps, mut reactor): (Apps, Reactor)) -> TornTab {
     let screen = CGRect::new(CGPoint::ZERO, CGSize::new(1000., 1000.));
     let space = SpaceId::new(1);
     apps.make_app_and_settle_on_screen(&mut reactor, screen, space, 1, make_windows(1));
     apps.requests();
     let wid = WindowId::new(1, 2);
     let frame = CGRect::new(CGPoint::new(200., 200.), CGSize::new(500., 500.));
-    window_server::set_cursor_location_override(Some(frame.mid()));
-    reactor.handle_event(Event::WindowCreated(
+    let wsid = WindowServerId::new(10_002);
+    reactor.track_test_window_server_info(wsid, 1, frame);
+    window_server::set_direct_window_for_test(wsid, frame, 1, 0);
+    reactor.mark_test_window_visible_in_space(wsid, space);
+    crate::sys::event::TEST_MOUSE_STATE.with(|state| state.set(Some(MouseState::Down)));
+    let info = make_window_info(frame, Some(wsid), "Detached tab", None);
+    TornTab {
+        apps,
+        reactor,
+        screen,
+        space,
         wid,
-        make_window_info(frame, None, "Detached tab", None),
-        None,
-        Some(MouseState::Down),
-    ));
-    window_server::set_cursor_location_override(None);
-    assert!(reactor.state.windows.is_admitted(wid));
+        info,
+    }
+}
+
+impl TornTab {
+    fn created(mut self) -> Self {
+        let event = Event::WindowCreated(self.wid, self.info.clone(), None, Some(MouseState::Down));
+        self.reactor.handle_event(event);
+        self
+    }
+
+    fn discovered(mut self) -> Self {
+        self.discover(self.wid);
+        self
+    }
+
+    /// A window-list refresh reporting the tab as `wid`, which may be a new AX identity.
+    fn discover(&mut self, wid: WindowId) {
+        let windows = vec![(wid, self.info.clone())];
+        self.reactor.discover_test_windows(1, windows, vec![WindowId::new(1, 1), wid]);
+    }
+
+    fn frame_writes_for(&mut self, wid: WindowId) -> Vec<CGRect> {
+        frame_writes(&mut self.apps)
+            .into_iter()
+            .filter_map(|(window, frame)| (window == wid).then_some(frame))
+            .collect()
+    }
+}
+
+fn release_left_button(reactor: &mut Reactor) {
+    crate::sys::event::TEST_MOUSE_STATE.with(|state| state.set(Some(MouseState::Up)));
+    reactor.handle_event(Event::MouseUp(crate::actor::drag::MouseButton::Left));
+}
+
+impl TornTab {
+    /// The app moves its new window under the cursor: the first move of a tab dragged out.
+    fn first_move(&mut self) {
+        let mut moved = self.info.frame;
+        moved.origin.x += 25.;
+        window_server::set_cursor_location_override(Some(moved.mid()));
+        let event = Event::WindowFrameChanged(
+            self.wid,
+            moved,
+            None,
+            Requested(false),
+            Some(MouseState::Down),
+        );
+        self.reactor.handle_event(event);
+        window_server::set_cursor_location_override(None);
+    }
+
+    fn pointer_at(&mut self, point: CGPoint) {
+        self.reactor
+            .handle_event(Event::DragMotion(crate::actor::drag::DragMotion { point }));
+    }
+
+    /// `wid`'s frame in the layout.
+    fn frame_of(&mut self, wid: WindowId) -> CGRect {
+        test_layout(&mut self.reactor, self.space, self.screen)
+            .into_iter()
+            .find_map(|(window, frame)| (window == wid).then_some(frame))
+            .expect("not in the layout")
+    }
+
+    /// The tiled windows, left to right.
+    fn tiles(&mut self) -> Vec<WindowId> {
+        let screen = self.screen;
+        let engine = &self.reactor.layout_manager.layout_engine;
+        let floating: Vec<_> = [WindowId::new(1, 1), self.wid]
+            .into_iter()
+            .filter(|window| engine.is_window_floating(*window))
+            .collect();
+        let mut tiles: Vec<_> = test_layout(&mut self.reactor, self.space, screen)
+            .into_iter()
+            .filter(|(window, _)| !floating.contains(window))
+            .collect();
+        tiles.sort_by(|a, b| a.1.origin.x.total_cmp(&b.1.origin.x));
+        tiles.into_iter().map(|(window, _)| window).collect()
+    }
+}
+
+/// The west edge of the settled window, which fills the screen.
+const WEST_EDGE: CGPoint = CGPoint { x: 50., y: 500. };
+
+/// A torn-out tab is a Rift drag like any other window's: not at creation, but from its
+/// first move, while the press still keeps it out of the layout.
+#[test]
+fn a_window_that_appears_under_the_press_becomes_a_rift_drag_on_its_first_move() {
+    let mut tab = torn_tab_under_held_button().created();
     assert!(
-        !reactor.is_in_drag(),
+        !tab.reactor.is_in_drag(),
         "creation alone must not acquire drag ownership"
     );
 
-    let original = reactor.state.windows.window(wid).unwrap().frame_monotonic;
-    let frame_changed = |frame| {
-        Event::WindowFrameChanged(wid, frame, None, Requested(false), Some(MouseState::Down))
-    };
-    reactor.handle_event(frame_changed(original));
-    assert!(!reactor.is_in_drag());
+    tab.first_move();
+    assert!(tab.reactor.is_dragging_window(tab.wid));
+    let source = tab.reactor.drag_manager.actor.source().unwrap();
+    assert_eq!(source.origin, crate::actor::drag::DragOrigin::Arriving);
+    assert_eq!(tab.reactor.assigned_space_for_window_id(tab.wid), None);
+    assert_eq!(
+        tab.frame_writes_for(tab.wid),
+        [],
+        "Rift moved the window while the button was held"
+    );
+}
 
-    let mut moved = original;
+#[test]
+fn a_torn_tab_shows_its_drop_target_and_lands_on_it_in_one_placement() {
+    let mut tab = torn_tab_under_held_button().created();
+    tab.first_move();
+    tab.pointer_at(WEST_EDGE);
+    let target = tab.reactor.drag_manager.actor.preview_target().expect("no drop target");
+    assert_eq!(target.intent.window, WindowId::new(1, 1));
+    assert_eq!(
+        target.intent.action,
+        crate::layout_engine::WindowDropAction::Insert(crate::layout_engine::Direction::Left)
+    );
+    assert_eq!(tab.frame_writes_for(tab.wid), []);
+
+    release_left_button(&mut tab.reactor);
+    assert!(!tab.reactor.is_in_drag());
+    assert_eq!(
+        tab.tiles(),
+        [tab.wid, WindowId::new(1, 1)],
+        "the drop did not place the window"
+    );
+    // One placement: the window goes straight to its drop slot, never to the insertion slot.
+    let landed = tab.frame_of(tab.wid);
+    let writes = tab.frame_writes_for(tab.wid);
+    assert!(
+        !writes.is_empty() && writes.iter().all(|frame| frame.same_as(landed)),
+        "{writes:?}"
+    );
+}
+
+/// Tear a tab out, dock it into another window and tear it out again, all in one press:
+/// Chrome moves the tab into a new window each time, and the previous one lingers a moment
+/// (hidden, its AX element stale) before it is closed. The new window, which now follows the
+/// cursor, takes the drag over and gets its drop targets.
+#[test]
+fn tearing_a_tab_out_again_in_the_same_press_keeps_its_drop_targets() {
+    let mut tab = torn_tab_under_held_button().created();
+    tab.first_move();
+    let first = tab.wid;
+    assert!(tab.reactor.is_dragging_window(first));
+
+    // Docked: the first window is hidden and its AX element goes stale, but it is not gone yet.
+    let first_wsid = tab.reactor.test_window_server_id(first);
+    tab.reactor.handle_event(Event::WindowServerHidden(first_wsid));
+    tab.reactor.handle_event(Event::WindowInvalidated(
+        first,
+        WindowInvalidationSource::StaleAxElement,
+    ));
+
+    // Torn out again: a new window under the same press, following the cursor.
+    let again = WindowId::new(1, 3);
+    let wsid = WindowServerId::new(10_003);
+    let frame = CGRect::new(CGPoint::new(300., 250.), CGSize::new(500., 500.));
+    tab.reactor.track_test_window_server_info(wsid, 1, frame);
+    tab.reactor.mark_test_window_visible_in_space(wsid, tab.space);
+    let info = make_window_info(frame, Some(wsid), "Torn out again", None);
+    tab.reactor
+        .handle_event(Event::WindowCreated(again, info, None, Some(MouseState::Down)));
+    let mut moved = frame;
     moved.origin.x += 25.;
-    reactor.handle_event(frame_changed(moved));
-    assert!(reactor.is_dragging_window(wid));
-    reactor.handle_event(Event::MouseUp(crate::actor::drag::MouseButton::Left));
-    assert!(!reactor.is_in_drag());
+    window_server::set_cursor_location_override(Some(moved.mid()));
+    tab.reactor.handle_event(Event::WindowFrameChanged(
+        again,
+        moved,
+        None,
+        Requested(false),
+        Some(MouseState::Down),
+    ));
+    window_server::set_cursor_location_override(None);
+    assert!(
+        tab.reactor.is_dragging_window(again),
+        "the new window did not take the drag over"
+    );
+
+    tab.pointer_at(WEST_EDGE);
+    let target = tab
+        .reactor
+        .drag_manager
+        .actor
+        .preview_target()
+        .expect("no drop target the second time");
+    assert_eq!(target.intent.window, WindowId::new(1, 1));
+
+    // The first window closes; the drag of the new one goes on.
+    tab.reactor.handle_event(Event::WindowDestroyed(first));
+    assert!(tab.reactor.is_dragging_window(again));
+
+    release_left_button(&mut tab.reactor);
+    assert_eq!(tab.tiles(), [again, WindowId::new(1, 1)]);
+}
+
+#[test]
+fn a_torn_tab_released_over_no_target_joins_by_normal_insertion() {
+    let mut tab = torn_tab_under_held_button().created();
+    tab.first_move();
+    assert!(tab.reactor.drag_manager.actor.preview_target().is_none());
+
+    release_left_button(&mut tab.reactor);
+    assert_eq!(tab.tiles(), [WindowId::new(1, 1), tab.wid]);
+}
+
+#[test]
+fn a_torn_tab_an_app_rule_floats_ignores_the_tile_it_was_dropped_on() {
+    let settings = crate::common::config::VirtualWorkspaceSettings {
+        app_rules: vec![crate::common::config::AppWorkspaceRule {
+            app_id: Some("com.testapp1".into()),
+            title_substring: Some("Detached tab".into()),
+            floating: true,
+            ..Default::default()
+        }],
+        ..Default::default()
+    };
+    let mut tab =
+        torn_tab_in((Apps::new(), test_reactor_with_workspace_settings(&settings))).created();
+    tab.first_move();
+    tab.pointer_at(WEST_EDGE);
+
+    release_left_button(&mut tab.reactor);
+    assert_eq!(tab.tiles(), [WindowId::new(1, 1)]);
+    assert!(tab.reactor.layout_manager.layout_engine.is_window_floating(tab.wid));
+}
+
+/// Chrome during its own tab drag: the WindowServer reports each new window and its moves,
+/// but AX may stay silent until the drag ends (#689).
+struct SilentDrag {
+    apps: Apps,
+    reactor: Reactor,
+    space: SpaceId,
+}
+
+const SCREEN_1000: CGRect = CGRect {
+    origin: CGPoint { x: 0., y: 0. },
+    size: CGSize { width: 1000., height: 1000. },
+};
+
+fn silent_drag_under_held_button() -> SilentDrag { silent_drag_over(None, 1) }
+
+/// `count` settled windows, in `mode` if given, and the button down.
+fn silent_drag_over(mode: Option<LayoutMode>, count: usize) -> SilentDrag {
+    let (mut apps, mut reactor) = test_context();
+    let space = SpaceId::new(1);
+    reactor.handle_event(space_state_event(vec![SCREEN_1000], vec![Some(space)]));
+    if let Some(mode) = mode {
+        reactor.handle_test_layout_command(LayoutCommand::SetWorkspaceLayout {
+            workspace: None,
+            mode,
+        });
+    }
+    apps.make_app_and_settle_on_screen(&mut reactor, SCREEN_1000, space, 1, make_windows(count));
+    apps.requests();
+    crate::sys::event::TEST_MOUSE_STATE.with(|state| state.set(Some(MouseState::Down)));
+    SilentDrag { apps, reactor, space }
+}
+
+impl SilentDrag {
+    /// Rift names a window by its app and its WindowServer id.
+    fn wid(idx: u32) -> WindowId { WindowId::new(1, idx) }
+
+    fn appears(&mut self, idx: u32) {
+        let space = self.space;
+        window_server_appeared(
+            &mut self.reactor,
+            WindowServerId::new(idx),
+            space,
+            SpaceEventKind::User,
+        );
+    }
+
+    /// The window takes focus: the WindowServer's key window is now the one following the
+    /// cursor. The WindowServer reports no moves, and AX may stay silent.
+    fn takes_focus(&mut self, idx: u32) {
+        let wsid = WindowServerId::new(idx);
+        if window_server::DirectWindow(wsid).bounds().is_none() {
+            let frame = CGRect::new(CGPoint::new(200., 200.), CGSize::new(500., 500.));
+            window_server::set_direct_window_for_test(wsid, frame, 1, 0);
+        }
+        let space = self.space;
+        self.reactor
+            .handle_event(Event::WindowServerFocusChanged(Self::wid(idx), space));
+    }
+
+    /// The pointer drags the window: it takes focus if it had not, then the pointer moves on it.
+    fn moves(&mut self, idx: u32, x: f64) {
+        self.moves_to(idx, CGRect::new(CGPoint::new(x, 200.), CGSize::new(500., 500.)));
+    }
+
+    fn moves_to(&mut self, idx: u32, frame: CGRect) {
+        let following = matches!(&self.reactor.pointer, Pointer::Down(press)
+            if press.following == Some(Self::wid(idx)));
+        if !following {
+            self.takes_focus(idx);
+        }
+        window_server::set_direct_window_for_test(WindowServerId::new(idx), frame, 1, 0);
+        window_server::set_cursor_location_override(Some(frame.mid()));
+        self.pointer_at(frame.mid());
+        window_server::set_cursor_location_override(None);
+    }
+
+    fn destroyed(&mut self, idx: u32) {
+        let space = self.space;
+        window_server_destroyed(
+            &mut self.reactor,
+            WindowServerId::new(idx),
+            space,
+            SpaceEventKind::User,
+        );
+    }
+
+    fn ax_reports(&mut self, idx: u32) {
+        // Where the WindowServer last saw it.
+        let frame = self
+            .reactor
+            .state
+            .windows
+            .get_window_server_info(WindowServerId::new(idx))
+            .map(|info| info.frame)
+            .filter(|frame| frame.size.width > 0. && frame.size.height > 0.)
+            .unwrap_or(CGRect::new(CGPoint::new(200., 200.), CGSize::new(500., 500.)));
+        let info = make_window_info(frame, Some(WindowServerId::new(idx)), "Detached tab", None);
+        let mouse = crate::sys::event::get_mouse_state();
+        self.reactor
+            .handle_event(Event::WindowCreated(Self::wid(idx), info, None, mouse));
+    }
+
+    fn pointer_at(&mut self, point: CGPoint) {
+        self.reactor
+            .handle_event(Event::DragMotion(crate::actor::drag::DragMotion { point }));
+    }
+
+    fn release(&mut self) { release_left_button(&mut self.reactor); }
+
+    fn holder(&self, idx: u32) -> Option<crate::model::window_store::ClaimHolder> {
+        self.reactor.state.windows.claim(Self::wid(idx)).map(|claim| claim.holder)
+    }
+
+    /// The tiled windows, left to right, then top to bottom.
+    fn tiles(&mut self) -> Vec<WindowId> {
+        let mut tiles = test_layout(&mut self.reactor, self.space, SCREEN_1000);
+        tiles.sort_by(|a, b| {
+            (a.1.origin.x.total_cmp(&b.1.origin.x)).then(a.1.origin.y.total_cmp(&b.1.origin.y))
+        });
+        tiles.into_iter().map(|(window, _)| window).collect()
+    }
+
+    /// Every frame Rift wrote for the window equals its slot in the layout: one placement.
+    fn assert_placed_once(&mut self, idx: u32) {
+        let wid = Self::wid(idx);
+        let slot = test_layout(&mut self.reactor, self.space, SCREEN_1000)
+            .into_iter()
+            .find_map(|(window, frame)| (window == wid).then_some(frame))
+            .expect("not in the layout");
+        let writes: Vec<_> = frame_writes(&mut self.apps)
+            .into_iter()
+            .filter_map(|(window, frame)| (window == wid).then_some(frame))
+            .collect();
+        assert!(
+            !writes.is_empty() && writes.iter().all(|frame| frame.same_as(slot)),
+            "{writes:?}"
+        );
+    }
+
+    fn assert_untouched(&mut self, idx: u32) {
+        let wid = Self::wid(idx);
+        assert_eq!(self.reactor.assigned_space_for_window_id(wid), None);
+        let writes = frame_writes(&mut self.apps);
+        assert!(writes.iter().all(|(window, _)| *window != wid), "{writes:?}");
+    }
+}
+
+/// The tab was torn from the bottom tile of a master-stack, which stays selected, so a new
+/// window joins right after it. Every zone of that tile is still a drop target, and the window
+/// lands where the zone says.
+/// The owner's master-stack: new windows join at the end of the stack.
+fn owner_master_stack() -> crate::common::config::LayoutSettings {
+    use crate::common::config::{
+        BaseLayoutSettings, LayoutSettings, MasterStackNewWindowPlacement, MasterStackSettings,
+        WindowInsertionPoint,
+    };
+    LayoutSettings {
+        mode: LayoutMode::MasterStack,
+        master_stack: MasterStackSettings {
+            base: BaseLayoutSettings {
+                window_insertion_point: Some(WindowInsertionPoint::EndOfTree),
+            },
+            new_window_placement: MasterStackNewWindowPlacement::Stack,
+            ..Default::default()
+        },
+        ..Default::default()
+    }
+}
+
+/// Two displays: A holds a tiled window of app 2 to drag across, B the owner's master-stack of
+/// app 1 with a master and two stack tiles.
+struct OwnerDisplays {
+    _apps: Apps,
+    reactor: Reactor,
+    space_a: SpaceId,
+    space_b: SpaceId,
+    screen_b: CGRect,
+}
+
+fn owner_two_displays() -> OwnerDisplays {
+    let mut reactor =
+        Reactor::new_for_test(LayoutEngine::new(&Default::default(), &owner_master_stack()));
+    let mut apps = Apps::new();
+    let screen_a = CGRect::new(CGPoint::ZERO, CGSize::new(1000., 1000.));
+    let screen_b = CGRect::new(CGPoint::new(1000., 0.), CGSize::new(1000., 1000.));
+    let (space_a, space_b) = (SpaceId::new(1), SpaceId::new(2));
+    reactor.handle_event(space_state_event(vec![screen_a, screen_b], vec![
+        Some(space_a),
+        Some(space_b),
+    ]));
+    let on_b = (1..=3)
+        .map(|idx| {
+            let frame = CGRect::new(
+                CGPoint::new(1000. + 100. * f64::from(idx), 100.),
+                CGSize::new(50., 50.),
+            );
+            make_window_info(frame, Some(WindowServerId::new(idx)), &format!("B{idx}"), None)
+        })
+        .collect();
+    apps.make_app_and_settle(&mut reactor, 1, on_b);
+    let on_a = make_window_info(
+        CGRect::new(CGPoint::new(100., 100.), CGSize::new(300., 300.)),
+        Some(WindowServerId::new(11)),
+        "A",
+        None,
+    );
+    apps.make_app_and_settle(&mut reactor, 2, vec![on_a]);
+    apps.simulate_until_quiet(&mut reactor);
+    apps.requests();
+    crate::sys::event::TEST_MOUSE_STATE.with(|state| state.set(Some(MouseState::Down)));
+    OwnerDisplays {
+        _apps: apps,
+        reactor,
+        space_a,
+        space_b,
+        screen_b,
+    }
+}
+
+/// The drop a drag offers at a point, and its overlay.
+type Offer = Option<(WindowId, crate::layout_engine::WindowDropAction, CGRect)>;
+
+impl OwnerDisplays {
+    const TORN: u32 = 30_001;
+
+    /// A window torn out on B, following the cursor.
+    fn tear_on_b(&mut self) -> WindowId {
+        let torn = WindowId::new(1, Self::TORN);
+        let space = self.space_b;
+        let frame = CGRect::new(CGPoint::new(1700., 400.), CGSize::new(300., 300.));
+        window_server::set_direct_window_for_test(WindowServerId::new(Self::TORN), frame, 1, 0);
+        window_server_appeared(
+            &mut self.reactor,
+            WindowServerId::new(Self::TORN),
+            space,
+            SpaceEventKind::User,
+        );
+        self.reactor.handle_event(Event::WindowServerFocusChanged(torn, space));
+        torn
+    }
+
+    /// The tiled window from display A, dragged onto B.
+    fn drag_from_a(&mut self) -> WindowId {
+        let dragged = WindowId::new(2, 1);
+        assert_eq!(
+            self.reactor.assigned_space_for_window_id(dragged),
+            Some(self.space_a)
+        );
+        let frame = self.reactor.state.windows.window(dragged).unwrap().frame_monotonic;
+        let moved = CGRect {
+            origin: CGPoint::new(frame.origin.x + 30., frame.origin.y),
+            ..frame
+        };
+        window_server::set_cursor_location_override(Some(moved.mid()));
+        self.reactor.handle_event(Event::WindowFrameChanged(
+            dragged,
+            moved,
+            None,
+            Requested(false),
+            Some(MouseState::Down),
+        ));
+        window_server::set_cursor_location_override(None);
+        self.offer_at(CGPoint::new(1500., 500.));
+        let wsid = self.reactor.test_window_server_id(dragged);
+        let space = self.space_b;
+        window_server_appeared(&mut self.reactor, wsid, space, SpaceEventKind::User);
+        dragged
+    }
+
+    fn offer_at(&mut self, point: CGPoint) -> Offer {
+        self.reactor
+            .handle_event(Event::DragMotion(crate::actor::drag::DragMotion { point }));
+        self.reactor
+            .drag_manager
+            .actor
+            .preview_target()
+            .map(|target| (target.intent.window, target.intent.action, target.preview_area))
+    }
+
+    /// Pointer positions every 20 pt over display B.
+    fn sweep(&self) -> Vec<CGPoint> {
+        let origin = self.screen_b.origin;
+        (0..50)
+            .flat_map(|row| {
+                (0..50).map(move |col| {
+                    CGPoint::new(
+                        origin.x + 10. + 20. * f64::from(col),
+                        origin.y + 10. + 20. * f64::from(row),
+                    )
+                })
+            })
+            .collect()
+    }
+}
+
+fn rounded(offer: Offer) -> Option<(WindowId, crate::layout_engine::WindowDropAction, [i64; 4])> {
+    offer.map(|(window, action, r)| {
+        let n = |v: f64| v.round() as i64;
+        (window, action, [
+            n(r.origin.x),
+            n(r.origin.y),
+            n(r.size.width),
+            n(r.size.height),
+        ])
+    })
+}
+
+/// A window that brings a new tile, torn out or dragged in from another display, offers the drop
+/// whose landing holds the pointer: wherever there is an overlay it is under the pointer, and a
+/// torn tab and a window from another display offer the same drop at every point.
+#[test]
+fn a_window_bringing_a_new_tile_previews_the_slot_under_the_pointer() {
+    let mut torn = owner_two_displays();
+    torn.tear_on_b();
+    let mut cross = owner_two_displays();
+    cross.drag_from_a();
+    let mut offered = 0;
+    for point in torn.sweep() {
+        let torn_offer = torn.offer_at(point);
+        let cross_offer = cross.offer_at(point);
+        assert_eq!(rounded(torn_offer), rounded(cross_offer), "{point:?}");
+        if let Some((_, _, area)) = torn_offer {
+            assert!(
+                point.x >= area.origin.x - 0.5
+                    && point.x <= area.max().x + 0.5
+                    && point.y >= area.origin.y - 0.5
+                    && point.y <= area.max().y + 0.5,
+                "{area:?} is not under {point:?}"
+            );
+            offered += 1;
+        }
+    }
+    assert!(offered >= 2000, "only {offered} of 2500 points offered a drop");
+}
+
+/// Each drop a torn tab or a window from another display offers lands exactly where it previewed.
+#[test]
+fn a_window_bringing_a_new_tile_lands_where_its_overlay_shows() {
+    let mut drops: Vec<CGPoint> = Vec::new();
+    let mut seen = Vec::new();
+    {
+        let mut probe = owner_two_displays();
+        probe.tear_on_b();
+        for point in probe.sweep() {
+            let offer = rounded(probe.offer_at(point));
+            if offer.is_some() && !seen.contains(&offer) {
+                seen.push(offer);
+                drops.push(point);
+            }
+        }
+    }
+    assert!(drops.len() >= 6, "only {} distinct drops", drops.len());
+    for point in drops {
+        let mut torn = owner_two_displays();
+        let tab = torn.tear_on_b();
+        let (_, action, previewed) = torn.offer_at(point).unwrap();
+        release_left_button(&mut torn.reactor);
+        let info = make_window_info(
+            previewed,
+            Some(WindowServerId::new(OwnerDisplays::TORN)),
+            "Torn",
+            None,
+        );
+        torn.reactor
+            .handle_event(Event::WindowCreated(tab, info, None, Some(MouseState::Up)));
+        let screen_b = torn.screen_b;
+        let space_b = torn.space_b;
+        let landed = test_layout(&mut torn.reactor, space_b, screen_b)
+            .into_iter()
+            .find_map(|(w, frame)| (w == tab).then_some(frame))
+            .expect("the torn tab is not in the layout");
+        assert!(
+            landed.same_as(previewed),
+            "torn {action:?} at {point:?}: landed {landed:?}, previewed {previewed:?}"
+        );
+
+        let mut cross = owner_two_displays();
+        let dragged = cross.drag_from_a();
+        let (_, action, previewed) = cross.offer_at(point).unwrap();
+        release_left_button(&mut cross.reactor);
+        let landed = test_layout(&mut cross.reactor, space_b, screen_b)
+            .into_iter()
+            .find_map(|(w, frame)| (w == dragged).then_some(frame))
+            .expect("the dragged window is not on B");
+        assert!(
+            landed.same_as(previewed),
+            "cross {action:?} at {point:?}: landed {landed:?}, previewed {previewed:?}"
+        );
+    }
+}
+
+/// In the owner's two-tile stack, a window bringing a new tile previews and lands the top or
+/// bottom third of the stack from anywhere in that band at the column's centre, not only from
+/// the thin edge strip of the tile there, while the tile's West/East strips keep side by side:
+/// torn out, or dragged in from another display.
+#[test]
+fn a_window_bringing_a_new_tile_reaches_the_stack_ends_from_their_whole_band() {
+    let rect = |x: f64, y: f64, w: f64, h: f64| CGRect::new(CGPoint::new(x, y), CGSize::new(w, h));
+    let top_third = rect(1600., 0., 400., 333.);
+    let bottom_third = rect(1600., 667., 400., 333.);
+    let mut cases = Vec::new();
+    for y in [20., 166., 320.] {
+        cases.push((CGPoint::new(1800., y), top_third));
+    }
+    for y in [680., 833., 990.] {
+        cases.push((CGPoint::new(1800., y), bottom_third));
+    }
+    for y in [166., 320.] {
+        cases.push((CGPoint::new(1620., y), rect(1600., 0., 200., 500.)));
+        cases.push((CGPoint::new(1980., y), rect(1800., 0., 200., 500.)));
+    }
+    for y in [680., 833.] {
+        cases.push((CGPoint::new(1620., y), rect(1600., 500., 200., 500.)));
+        cases.push((CGPoint::new(1980., y), rect(1800., 500., 200., 500.)));
+    }
+    let near = |a: CGRect, b: CGRect| {
+        (a.origin.x - b.origin.x).abs() < 1.5
+            && (a.origin.y - b.origin.y).abs() < 1.5
+            && (a.size.width - b.size.width).abs() < 1.5
+            && (a.size.height - b.size.height).abs() < 1.5
+    };
+    for (point, expected) in cases {
+        for torn in [true, false] {
+            let mut f = owner_two_displays();
+            let window = if torn { f.tear_on_b() } else { f.drag_from_a() };
+            let (_, action, previewed) = f.offer_at(point).expect("a drop");
+            assert!(
+                near(previewed, expected),
+                "torn={torn} at {point:?}: {action:?} previews {previewed:?}, expected {expected:?}"
+            );
+            release_left_button(&mut f.reactor);
+            if torn {
+                let wsid = Some(WindowServerId::new(OwnerDisplays::TORN));
+                let info = make_window_info(previewed, wsid, "Torn", None);
+                f.reactor.handle_event(Event::WindowCreated(
+                    window,
+                    info,
+                    None,
+                    Some(MouseState::Up),
+                ));
+            }
+            let (space_b, screen_b) = (f.space_b, f.screen_b);
+            let landed = test_layout(&mut f.reactor, space_b, screen_b)
+                .into_iter()
+                .find_map(|(w, frame)| (w == window).then_some(frame))
+                .expect("the window is not on B");
+            assert!(
+                landed.same_as(previewed),
+                "torn={torn} at {point:?}: landed {landed:?}"
+            );
+        }
+    }
+}
+
+#[test]
+fn a_torn_tab_can_drop_onto_the_tile_it_was_torn_from() {
+    let bottom = WindowId::new(1, 1);
+    let mut drag = silent_drag_over(Some(LayoutMode::MasterStack), 3);
+    drag.reactor
+        .handle_test_layout_event(LayoutEvent::WindowFocused(drag.space, bottom));
+    let tile = drag.reactor.state.windows.window(bottom).unwrap().frame_monotonic;
+    let over = CGRect::new(CGPoint::new(tile.origin.x, tile.origin.y - 100.), tile.size);
+    drag.appears(20_001);
+    drag.moves_to(20_001, over);
+    drag.moves_to(20_001, CGRect {
+        origin: CGPoint::new(over.origin.x + 10., over.origin.y),
+        ..over
+    });
+
+    // Its south edge: the new window goes below it, which is also where it joins.
+    drag.pointer_at(CGPoint::new(tile.mid().x, tile.max().y - 5.));
+    let target = drag
+        .reactor
+        .drag_manager
+        .actor
+        .preview_target()
+        .expect("no target on the south edge");
+    assert_eq!(target.intent.window, bottom);
+    assert_eq!(
+        target.intent.action,
+        crate::layout_engine::WindowDropAction::Insert(crate::layout_engine::Direction::Down)
+    );
+    // Its centre: a target on the same tile.
+    drag.pointer_at(tile.mid());
+    let target = drag
+        .reactor
+        .drag_manager
+        .actor
+        .preview_target()
+        .expect("no target at the centre");
+    assert_eq!(target.intent.window, bottom);
+
+    drag.pointer_at(CGPoint::new(tile.mid().x, tile.max().y - 5.));
+    drag.release();
+    drag.ax_reports(20_001);
+    let landed = drag.tiles();
+    assert_eq!(landed.last(), Some(&SilentDrag::wid(20_001)), "{landed:?}");
+    assert!(drag.reactor.state.windows.claimed_windows().next().is_none());
+}
+
+/// Docking a window into another's tab strip: dragging its only tab, Chrome hides the window,
+/// its AX element goes stale and it is destroyed, all while the button is held. The model
+/// forgets it at once, but the other windows reflow only at the release, once.
+#[test]
+fn a_window_that_disappears_under_the_press_reflows_the_others_only_at_the_release() {
+    let mut drag = silent_drag_over(None, 2);
+    let (survivor, docked) = (WindowId::new(1, 1), WindowId::new(1, 2));
+    let wsid = drag.reactor.test_window_server_id(docked);
+
+    drag.reactor.handle_event(Event::WindowServerHidden(wsid));
+    drag.reactor.handle_event(Event::WindowDestroyed(docked));
+    assert!(
+        !drag.reactor.state.windows.contains_window(docked),
+        "the model forgets it now"
+    );
+    let held = frame_writes(&mut drag.apps);
+    assert!(
+        held.is_empty(),
+        "the others moved while the button was held: {held:?}"
+    );
+
+    drag.release();
+    assert_eq!(drag.tiles(), [survivor]);
+    let slot = test_layout(&mut drag.reactor, drag.space, SCREEN_1000)[0].1;
+    let writes: Vec<_> = frame_writes(&mut drag.apps)
+        .into_iter()
+        .filter_map(|(window, frame)| (window == survivor).then_some(frame))
+        .collect();
+    assert!(
+        !writes.is_empty() && writes.iter().all(|frame| frame.same_as(slot)),
+        "{writes:?}"
+    );
+}
+
+/// A window that leaves and comes back under the press (a drag cancelled back into place)
+/// moves nothing.
+#[test]
+fn a_window_hidden_and_shown_again_under_the_press_moves_nothing() {
+    let mut drag = silent_drag_over(None, 2);
+    let before = test_layout(&mut drag.reactor, drag.space, SCREEN_1000);
+    let wsid = drag.reactor.test_window_server_id(WindowId::new(1, 2));
+
+    drag.reactor.handle_event(Event::WindowServerHidden(wsid));
+    drag.reactor.handle_event(Event::WindowServerUnhidden(wsid));
+    drag.release();
+    for (window, frame) in frame_writes(&mut drag.apps) {
+        let (_, was) =
+            before.iter().find(|(w, _)| *w == window).expect("a window not in the layout");
+        assert!(frame.same_as(*was), "{window:?} moved to {frame:?}");
+    }
+}
+
+/// A layout command given while the button is held changes the model at once and reaches the
+/// screen at the release, as during a drag.
+#[test]
+fn a_layout_command_during_a_press_reaches_the_screen_at_the_release() {
+    let mut drag = silent_drag_over(None, 2);
+    let right = drag.tiles()[1];
+    crate::sys::event::TEST_MOUSE_STATE.with(|state| state.set(Some(MouseState::Up)));
+    drag.reactor
+        .handle_test_layout_event(LayoutEvent::WindowFocused(drag.space, right));
+    drag.apps.requests();
+    crate::sys::event::TEST_MOUSE_STATE.with(|state| state.set(Some(MouseState::Down)));
+
+    drag.reactor
+        .handle_test_layout_command(LayoutCommand::MoveNode(Direction::Left));
+    assert_eq!(drag.tiles()[0], right, "the model moves at once");
+    let held = frame_writes(&mut drag.apps);
+    assert!(
+        held.is_empty(),
+        "the screen moved while the button was held: {held:?}"
+    );
+
+    drag.release();
+    assert!(
+        !frame_writes(&mut drag.apps).is_empty(),
+        "the release puts the move on screen"
+    );
+}
+
+/// Targets show from the first pointer movement after the tear: the window that took focus is
+/// dragged from that sample on, with no frame report from AX or the WindowServer at all.
+#[test]
+fn a_torn_tab_shows_targets_from_the_first_pointer_sample() {
+    let mut drag = silent_drag_under_held_button();
+    drag.appears(20_001);
+    drag.takes_focus(20_001);
+    window_server::set_cursor_location_override(Some(WEST_EDGE));
+    drag.pointer_at(WEST_EDGE);
+    window_server::set_cursor_location_override(None);
+    assert!(drag.reactor.is_dragging_window(SilentDrag::wid(20_001)));
+    let target = drag
+        .reactor
+        .drag_manager
+        .actor
+        .preview_target()
+        .expect("no target on the first sample");
+    assert_eq!(target.intent.window, WindowId::new(1, 1));
+}
+
+/// A window that appears under the press but never takes focus (a helper window of the app)
+/// is never recorded or dragged.
+/// The press's first tear, reported by AX before the WindowServer: focusing the claimed window
+/// makes it the one following the cursor, and the first pointer sample drags it with a target,
+/// before any frame change.
+#[test]
+fn a_first_tear_reported_by_ax_first_is_dragged_from_the_first_pointer_sample() {
+    let mut tab = torn_tab_under_held_button().created();
+    assert!(!tab.reactor.is_in_drag());
+    let space = tab.space;
+    tab.reactor.handle_event(Event::WindowServerFocusChanged(tab.wid, space));
+    window_server::set_cursor_location_override(Some(WEST_EDGE));
+    tab.pointer_at(WEST_EDGE);
+    window_server::set_cursor_location_override(None);
+    assert!(tab.reactor.is_dragging_window(tab.wid));
+    let target = tab
+        .reactor
+        .drag_manager
+        .actor
+        .preview_target()
+        .expect("no target on the first sample");
+    assert_eq!(target.intent.window, WindowId::new(1, 1));
+}
+
+/// A torn tab may never take focus (one torn from the focused window): the arrival at the normal
+/// level whose WindowServer bounds hold the pointer follows the cursor, and the pointer's first
+/// sample drags it to a target.
+#[test]
+fn a_torn_tab_that_never_takes_focus_drags_from_the_first_pointer_sample() {
+    let mut drag = silent_drag_under_held_button();
+    drag.appears(20_001);
+    let frame = CGRect::new(
+        CGPoint::new(WEST_EDGE.x - 100., WEST_EDGE.y - 20.),
+        CGSize::new(500., 400.),
+    );
+    window_server::set_direct_window_for_test(WindowServerId::new(20_001), frame, 1, 0);
+    assert!(
+        drag.reactor
+            .drag_manager
+            .native_motion_active
+            .load(std::sync::atomic::Ordering::Acquire),
+        "the press wants the pointer's samples to find the window following the cursor"
+    );
+    drag.pointer_at(WEST_EDGE);
+    assert!(drag.reactor.is_dragging_window(SilentDrag::wid(20_001)));
+    assert!(
+        drag.reactor.drag_manager.actor.preview_target().is_some(),
+        "no target on the first sample"
+    );
+}
+
+/// The pointer finds the window following the cursor among everything the press holds: a tear
+/// AX reported first (a press claim, never an unrecorded arrival) that never takes focus drags
+/// from the first pointer sample too.
+#[test]
+fn a_tear_ax_reported_first_that_never_takes_focus_drags_from_the_pointer() {
+    let mut tab = torn_tab_under_held_button().created();
+    assert!(!tab.reactor.is_in_drag());
+    tab.pointer_at(CGPoint::new(450., 450.));
+    assert!(tab.reactor.is_dragging_window(tab.wid));
+}
+
+/// What follows the cursor is a window, not a helper: a window above the normal level (a
+/// tooltip, a menu, a drag image), one away from the pointer, or one of two that both hold it
+/// is not dragged without focus.
+#[test]
+fn a_helper_window_that_never_takes_focus_is_not_dragged() {
+    let around = CGRect::new(
+        CGPoint::new(WEST_EDGE.x - 100., WEST_EDGE.y - 20.),
+        CGSize::new(500., 400.),
+    );
+    let away = CGRect::new(
+        CGPoint::new(WEST_EDGE.x + 300., WEST_EDGE.y + 300.),
+        CGSize::new(50., 50.),
+    );
+    let cases: [&[(u32, CGRect, i32)]; 3] = [&[(20_002, around, 101)], &[(20_003, away, 0)], &[
+        (20_004, around, 0),
+        (20_005, around, 0),
+    ]];
+    for windows in cases {
+        let mut drag = silent_drag_under_held_button();
+        for &(idx, frame, level) in windows {
+            drag.appears(idx);
+            window_server::set_direct_window_for_test(WindowServerId::new(idx), frame, 1, level);
+        }
+        drag.pointer_at(WEST_EDGE);
+        assert!(!drag.reactor.is_in_drag(), "{windows:?}");
+        drag.release();
+        assert_eq!(drag.tiles(), [WindowId::new(1, 1)], "{windows:?}");
+    }
+}
+
+#[test]
+fn a_window_that_never_takes_focus_is_not_dragged() {
+    let mut drag = silent_drag_under_held_button();
+    drag.appears(20_009);
+    drag.pointer_at(WEST_EDGE);
+    assert!(!drag.reactor.is_in_drag());
+    assert!(drag.reactor.state.windows.record(SilentDrag::wid(20_009)).is_none());
+    drag.release();
+    assert_eq!(drag.tiles(), [WindowId::new(1, 1)]);
+}
+
+#[test]
+fn a_window_only_the_window_server_reports_is_held_and_becomes_a_rift_drag() {
+    use crate::model::window_store::ClaimHolder;
+    let mut drag = silent_drag_under_held_button();
+    drag.appears(20_001);
+    drag.takes_focus(20_001);
+    assert!(matches!(drag.holder(20_001), Some(ClaimHolder::Press)));
+    assert!(
+        !drag.reactor.state.windows.contains_window(SilentDrag::wid(20_001)),
+        "only the WindowServer has reported it, so its record has no AX facts"
+    );
+    assert!(
+        !drag.reactor.is_in_drag(),
+        "recording the window alone must not start a drag"
+    );
+    assert!(
+        drag.reactor
+            .drag_manager
+            .native_motion_active
+            .load(std::sync::atomic::Ordering::Acquire),
+        "the press wants the pointer's samples for the window following the cursor"
+    );
+
+    drag.moves(20_001, 240.);
+    assert!(drag.reactor.is_dragging_window(SilentDrag::wid(20_001)));
+    drag.pointer_at(WEST_EDGE);
+    let target = drag.reactor.drag_manager.actor.preview_target().expect("no drop target");
+    assert_eq!(target.intent.window, WindowId::new(1, 1));
+    drag.assert_untouched(20_001);
+}
+
+#[test]
+fn ax_reporting_the_window_during_the_press_keeps_it_held_and_it_drops_at_the_release() {
+    use crate::model::window_store::ClaimHolder;
+    let mut drag = silent_drag_under_held_button();
+    drag.appears(20_001);
+    drag.moves(20_001, 200.);
+    drag.moves(20_001, 240.);
+    drag.pointer_at(WEST_EDGE);
+    drag.ax_reports(20_001);
+    assert!(matches!(drag.holder(20_001), Some(ClaimHolder::Press)));
+    assert!(drag.reactor.state.windows.contains_window(SilentDrag::wid(20_001)));
+    assert!(drag.reactor.is_dragging_window(SilentDrag::wid(20_001)));
+    drag.assert_untouched(20_001);
+
+    drag.release();
+    assert_eq!(drag.tiles(), [SilentDrag::wid(20_001), WindowId::new(1, 1)]);
+    drag.assert_placed_once(20_001);
+}
+
+#[test]
+fn a_window_ax_reports_only_after_the_release_lands_on_its_drop_then() {
+    use crate::model::window_store::ClaimHolder;
+    let mut drag = silent_drag_under_held_button();
+    drag.appears(20_001);
+    drag.moves(20_001, 200.);
+    drag.moves(20_001, 240.);
+    drag.pointer_at(WEST_EDGE);
+
+    drag.release();
+    assert!(matches!(drag.holder(20_001), Some(ClaimHolder::Landing(_))));
+    drag.assert_untouched(20_001);
+
+    drag.ax_reports(20_001);
+    assert!(drag.holder(20_001).is_none());
+    assert_eq!(drag.tiles(), [SilentDrag::wid(20_001), WindowId::new(1, 1)]);
+    drag.assert_placed_once(20_001);
+}
+
+/// A window only the WindowServer has reported has no AX facts. The pointer still drives its
+/// drag, and a window-list refresh that does not list it (AX has not reported it yet) leaves it
+/// held.
+#[test]
+fn a_window_without_ax_facts_survives_moves_and_window_list_refreshes() {
+    use crate::model::window_store::ClaimHolder;
+    let mut drag = silent_drag_under_held_button();
+    let wid = SilentDrag::wid(20_001);
+    drag.appears(20_001);
+    for x in [200., 240., 280., 320.] {
+        drag.moves(20_001, x);
+    }
+    assert!(drag.reactor.is_dragging_window(wid));
+
+    drag.reactor.discover_test_windows(1, Vec::new(), vec![WindowId::new(1, 1)]);
+    assert!(matches!(drag.holder(20_001), Some(ClaimHolder::Press)));
+    assert!(drag.reactor.is_dragging_window(wid));
+    drag.pointer_at(WEST_EDGE);
+
+    drag.release();
+    drag.reactor.discover_test_windows(1, Vec::new(), vec![WindowId::new(1, 1)]);
+    assert!(matches!(drag.holder(20_001), Some(ClaimHolder::Landing(_))));
+    assert!(!drag.reactor.state.windows.contains_window(wid));
+    drag.assert_untouched(20_001);
+
+    drag.ax_reports(20_001);
+    assert_eq!(drag.tiles(), [wid, WindowId::new(1, 1)]);
+}
+
+/// Only the dragged window waits with a drop. Another the press held, never dragged, loses its
+/// claim at the release and joins normally when AX reports it.
+/// A window released over a drop before AX reported it waits to land. If its destroy is missed
+/// and AX never reports it, the next release retires the claim once the WindowServer no longer
+/// has the window; one the WindowServer still has keeps waiting.
+#[test]
+fn a_landing_whose_window_is_gone_is_retired_at_the_next_release() {
+    use crate::model::window_store::ClaimHolder;
+    for gone in [true, false] {
+        let mut drag = silent_drag_under_held_button();
+        drag.appears(20_001);
+        drag.moves(20_001, 200.);
+        drag.pointer_at(WEST_EDGE);
+        drag.release();
+        assert!(matches!(drag.holder(20_001), Some(ClaimHolder::Landing(_))));
+        if gone {
+            window_server::forget_direct_window_for_test(WindowServerId::new(20_001));
+        }
+
+        crate::sys::event::TEST_MOUSE_STATE.with(|state| state.set(Some(MouseState::Down)));
+        drag.appears(20_009);
+        drag.release();
+        if gone {
+            assert!(drag.holder(20_001).is_none(), "the claim outlived its window");
+            assert!(drag.reactor.state.windows.record(SilentDrag::wid(20_001)).is_none());
+        } else {
+            assert!(matches!(drag.holder(20_001), Some(ClaimHolder::Landing(_))));
+        }
+    }
+}
+
+#[test]
+fn a_held_window_that_was_not_dragged_joins_normally_when_ax_reports_it() {
+    use crate::model::window_store::ClaimHolder;
+    let mut drag = silent_drag_under_held_button();
+    drag.appears(20_002);
+    drag.moves(20_002, 600.);
+    drag.appears(20_001);
+    drag.moves(20_001, 200.);
+    drag.moves(20_001, 240.);
+    drag.pointer_at(WEST_EDGE);
+
+    drag.release();
+    assert!(matches!(drag.holder(20_001), Some(ClaimHolder::Landing(_))));
+    assert!(drag.holder(20_002).is_none());
+    drag.assert_untouched(20_002);
+
+    drag.ax_reports(20_002);
+    assert_eq!(drag.tiles(), [WindowId::new(1, 1), SilentDrag::wid(20_002)]);
+}
+
+#[test]
+fn a_window_destroyed_before_ax_reports_it_never_lands() {
+    for released_first in [false, true] {
+        let mut drag = silent_drag_under_held_button();
+        drag.appears(20_001);
+        drag.moves(20_001, 200.);
+        drag.moves(20_001, 240.);
+        drag.pointer_at(WEST_EDGE);
+        if released_first {
+            drag.release();
+        }
+        assert!(
+            drag.holder(20_001).is_some(),
+            "the window was not held before it vanished"
+        );
+        drag.destroyed(20_001);
+        assert!(drag.reactor.state.windows.record(SilentDrag::wid(20_001)).is_none());
+        assert!(!drag.reactor.is_in_drag());
+        drag.release();
+        assert!(drag.reactor.state.windows.claimed_windows().next().is_none());
+        assert_eq!(
+            drag.tiles(),
+            [WindowId::new(1, 1)],
+            "released_first: {released_first}"
+        );
+        drag.assert_untouched(20_001);
+    }
+}
+
+/// Chrome creates and destroys intermediate windows during one tab drag.
+#[test]
+fn windows_appearing_and_vanishing_under_one_press_leave_only_the_survivor() {
+    use crate::model::window_store::ClaimHolder;
+    let mut drag = silent_drag_under_held_button();
+    drag.appears(20_001);
+    drag.moves(20_001, 200.);
+    drag.moves(20_001, 240.);
+    drag.destroyed(20_001);
+    drag.appears(20_002);
+    drag.destroyed(20_002);
+    drag.appears(20_003);
+    drag.moves(20_003, 200.);
+    drag.moves(20_003, 240.);
+    drag.pointer_at(WEST_EDGE);
+    drag.appears(20_004);
+
+    drag.release();
+    for gone in [20_001, 20_002, 20_004] {
+        assert!(
+            drag.reactor.state.windows.record(SilentDrag::wid(gone)).is_none(),
+            "{gone}"
+        );
+    }
+    assert!(matches!(drag.holder(20_003), Some(ClaimHolder::Landing(_))));
+    assert!(
+        matches!(drag.reactor.pointer, Pointer::Up),
+        "the release ends the press"
+    );
+
+    drag.ax_reports(20_003);
+    assert_eq!(drag.tiles(), [SilentDrag::wid(20_003), WindowId::new(1, 1)]);
+    assert!(drag.reactor.state.windows.claimed_windows().next().is_none());
+}
+
+#[test]
+fn a_window_created_while_the_button_is_held_is_tiled_only_at_the_release() {
+    let mut tab = torn_tab_under_held_button().created();
+    let wid = tab.wid;
+    assert_eq!(
+        tab.frame_writes_for(wid),
+        [],
+        "the new window moved while the button was held"
+    );
+
+    release_left_button(&mut tab.reactor);
+    assert_ne!(
+        tab.frame_writes_for(wid),
+        [],
+        "the release did not tile the new window"
+    );
+}
+
+#[test]
+fn a_window_discovered_while_the_button_is_held_is_admitted_only_at_the_release() {
+    let mut tab = torn_tab_under_held_button().discovered();
+    assert_eq!(
+        tab.reactor.assigned_space_for_window_id(tab.wid),
+        None,
+        "a window-list refresh admitted the window while the button was held"
+    );
+
+    release_left_button(&mut tab.reactor);
+    assert_eq!(
+        tab.reactor.assigned_space_for_window_id(tab.wid),
+        Some(tab.space)
+    );
+}
+
+#[test]
+fn a_window_discovered_while_the_button_is_held_gets_no_frame_writes_until_the_release() {
+    let mut tab = torn_tab_under_held_button().discovered();
+    let wid = tab.wid;
+    // The app moves its new window under the cursor while the tab is dragged.
+    for step in 0..5 {
+        let origin = CGPoint::new(200. + 40. * f64::from(step), 200.);
+        let frame = CGRect::new(origin, CGSize::new(500., 500.));
+        let moved =
+            Event::WindowFrameChanged(wid, frame, None, Requested(false), Some(MouseState::Down));
+        tab.reactor.handle_event(moved);
+    }
+    assert_eq!(
+        tab.frame_writes_for(wid),
+        [],
+        "Rift moved the window while the button was held"
+    );
+
+    release_left_button(&mut tab.reactor);
+    assert_ne!(
+        tab.frame_writes_for(wid),
+        [],
+        "the release did not tile the window"
+    );
+}
+
+#[test]
+fn the_release_admits_each_held_window_once_and_ends_the_press() {
+    let mut tab = torn_tab_under_held_button().created();
+    let wid = tab.wid;
+    // The same window reported again under the press is still held, and only once.
+    tab.discover(wid);
+    assert_eq!(tab.reactor.assigned_space_for_window_id(wid), None);
+
+    release_left_button(&mut tab.reactor);
+    assert_eq!(tab.reactor.assigned_space_for_window_id(wid), Some(tab.space));
+    tab.apps.requests();
+
+    // The press is over: a second release has nothing left to admit, and a window
+    // that appears with the button up is tiled at once.
+    release_left_button(&mut tab.reactor);
+    assert_eq!(tab.frame_writes_for(wid), []);
+    let later = WindowId::new(1, 3);
+    let frame = CGRect::new(CGPoint::new(300., 300.), CGSize::new(400., 400.));
+    let info = make_window_info(frame, None, "Later", None);
+    tab.reactor
+        .handle_event(Event::WindowCreated(later, info, None, Some(MouseState::Up)));
+    assert_eq!(tab.reactor.assigned_space_for_window_id(later), Some(tab.space));
+}
+
+/// A release the event tap missed (the tap was disabled, say) still ends the press: the next
+/// event that finds the button up releases it, and the held window joins.
+#[test]
+fn a_release_the_tap_missed_ends_the_press_at_the_next_event() {
+    let mut tab = torn_tab_under_held_button().created();
+    assert!(matches!(tab.reactor.pointer, Pointer::Down(_)));
+    assert_eq!(tab.reactor.assigned_space_for_window_id(tab.wid), None);
+
+    crate::sys::event::TEST_MOUSE_STATE.with(|state| state.set(Some(MouseState::Up)));
+    tab.reactor
+        .handle_event(Event::WindowTitleChanged(WindowId::new(1, 1), "Any".into()));
+    assert!(matches!(tab.reactor.pointer, Pointer::Up));
+    assert_eq!(
+        tab.reactor.assigned_space_for_window_id(tab.wid),
+        Some(tab.space)
+    );
+}
+
+#[test]
+fn a_held_window_stays_held_across_an_ax_identity_change() {
+    let mut tab = torn_tab_under_held_button().created();
+    // AX reports the same native window under a new identity while the button is held.
+    let replacement = WindowId::new(1, 7);
+    tab.discover(replacement);
+    assert!(!tab.reactor.state.windows.contains_window(tab.wid));
+    assert_eq!(tab.reactor.assigned_space_for_window_id(replacement), None);
+    assert_eq!(tab.frame_writes_for(replacement), []);
+
+    release_left_button(&mut tab.reactor);
+    assert_eq!(
+        tab.reactor.assigned_space_for_window_id(replacement),
+        Some(tab.space)
+    );
+}
+
+#[test]
+fn mission_control_does_not_affect_a_press() {
+    // Dragging the new window to the top edge opens Mission Control with the button down.
+    let mut tab = torn_tab_under_held_button().created();
+    tab.reactor.handle_event(Event::MissionControlNativeEntered);
+    assert_eq!(tab.reactor.assigned_space_for_window_id(tab.wid), None);
+    tab.reactor.handle_event(Event::MissionControlNativeExited);
+    assert_eq!(tab.reactor.assigned_space_for_window_id(tab.wid), None);
+
+    release_left_button(&mut tab.reactor);
+    assert_eq!(
+        tab.reactor.assigned_space_for_window_id(tab.wid),
+        Some(tab.space)
+    );
 }
 
 #[test]
@@ -3026,7 +4300,7 @@ fn cancelling_tiled_modifier_move_reconciles_layout() {
         last_frame: frame,
         origin_space: Some(space),
         current_space: Some(space),
-        tiled: true,
+        origin: crate::actor::drag::DragOrigin::Tiled,
     };
 
     reactor.drag_manager.actor.begin_modifier(
@@ -3075,7 +4349,7 @@ fn frame_echo_reading_mouse_up_does_not_end_a_modifier_drag() {
             last_frame: frame,
             origin_space: Some(space),
             current_space: Some(space),
-            tiled: true,
+            origin: crate::actor::drag::DragOrigin::Tiled,
         },
         crate::actor::drag::MouseButton::Left,
         frame.mid(),
@@ -3834,7 +5108,7 @@ fn mission_control_enter_clears_active_drag_state() {
     reactor.ensure_active_drag(wid, &frame);
 
     assert!(reactor.drag_manager.actor.is_active());
-    reactor.drag_manager.sync_motion_gate();
+    reactor.drag_manager.sync_motion_gate(false);
     assert!(
         reactor
             .drag_manager
@@ -5767,7 +7041,7 @@ fn reloading_management_rules_rejects_and_readmits_an_existing_window() {
                 manage: Some(false),
                 ..Default::default()
             });
-        let owner = crate::model::window_store::ClaimOwner(1);
+        let owner = 1;
         if claimed {
             reactor
                 .claim_window(window, owner, rift_protocol::WindowClaimFlags::empty())

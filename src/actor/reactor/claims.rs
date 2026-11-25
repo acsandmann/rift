@@ -1,29 +1,33 @@
-//! External window claims: a Mach session temporarily excludes windows from
-//! Rift management. Ownership lives in [`WindowStore`](crate::model::WindowStore);
-//! this module only applies the layout, presentation and focus effects.
+//! Window claims: an external manager's Mach session, or the held left button,
+//! temporarily excludes windows from Rift management. Ownership lives in
+//! [`WindowStore`](crate::model::WindowStore); this module only applies the layout,
+//! presentation and focus effects.
 
 use rift_protocol::WindowClaimFlags;
+use tracing::debug;
 
 use super::{Changes, LayoutEvent, Reactor};
 use crate::actor::app::WindowId;
 use crate::layout_engine::systems::{LayoutSystem, WindowChange};
-use crate::model::window_store::ClaimOwner;
+use crate::model::window_store::{ClaimHolder, ClaimOwner};
+use crate::sys::window_server::DirectWindow;
 
 const OWNED_ELSEWHERE: &str = "Window owned by another external manager";
 
 impl Reactor {
+    /// A session (by its Mach client port) claims a window.
     pub(crate) fn claim_window(
         &mut self,
         wid: WindowId,
-        owner: ClaimOwner,
+        port: u32,
         flags: WindowClaimFlags,
     ) -> Result<(), &'static str> {
         if !flags.is_supported() {
             return Err("Unsupported window claim flags");
         }
-        let wid = self.state.windows.resolve_claim_target(owner, wid).ok_or("Window not found")?;
+        let wid = self.state.windows.resolve_claim_target(port, wid).ok_or("Window not found")?;
         match self.state.windows.claim(wid) {
-            Some(claim) if claim.owner != owner => return Err(OWNED_ELSEWHERE),
+            Some(claim) if claim.owner() != ClaimOwner::Ipc(port) => return Err(OWNED_ELSEWHERE),
             // Flags only affect focus policy, never layout.
             Some(_) => {
                 self.with_claim_focus_policy(|r| r.state.windows.set_claim_flags(wid, flags));
@@ -42,46 +46,103 @@ impl Reactor {
             // claim takes the assignment, but arrange only after: no write may target it.
             let mut changes = Changes::default();
             reactor.reconcile_layout_event(&mut changes, LayoutEvent::WindowSuspended(wid));
-            reactor.state.windows.insert_claim(wid, owner, flags);
+            let holder = ClaimHolder::Ipc { port, flags, original: wid };
+            reactor.state.windows.insert_claim(wid, holder);
             changes.refresh_menu = true;
             reactor.finish(changes, None, None);
         });
         Ok(())
     }
 
-    pub(crate) fn release_window(
-        &mut self,
-        wid: WindowId,
-        owner: ClaimOwner,
-    ) -> Result<(), &'static str> {
-        let wid = self.state.windows.resolve_claim_target(owner, wid).ok_or("Window not found")?;
+    pub(crate) fn release_window(&mut self, wid: WindowId, port: u32) -> Result<(), &'static str> {
+        let wid = self.state.windows.resolve_claim_target(port, wid).ok_or("Window not found")?;
         match self.state.windows.claim(wid) {
             None => Ok(()),
-            Some(claim) if claim.owner != owner => Err(OWNED_ELSEWHERE),
+            Some(claim) if claim.owner() != ClaimOwner::Ipc(port) => Err(OWNED_ELSEWHERE),
             Some(_) => {
-                self.release_claims_of([wid]);
+                self.finish_claim_release(|reactor, changes| {
+                    reactor.release_claims_of(changes, [wid]);
+                });
                 Ok(())
             }
         }
     }
 
-    /// The owner's session ended: return all of its windows, arranging each space once.
-    pub(crate) fn release_claims(&mut self, owner: ClaimOwner) {
-        let windows = self.state.windows.owner_claims(owner).to_vec();
-        if !windows.is_empty() {
-            self.release_claims_of(windows);
-        }
+    /// The session ended: return all of its windows, arranging each space once.
+    pub(crate) fn release_claims(&mut self, port: u32) {
+        self.finish_claim_release(|reactor, changes| {
+            let windows = reactor.state.windows.owner_claims(ClaimOwner::Ipc(port)).to_vec();
+            reactor.release_claims_of(changes, windows);
+        });
     }
 
-    fn release_claims_of(&mut self, windows: impl IntoIterator<Item = WindowId>) {
-        self.with_claim_focus_policy(|reactor| {
-            let mut changes = Changes::default();
-            for window in windows {
-                reactor.readmit(&mut changes, window);
+    /// The left button was released. Windows AX has reported return now. Nothing can admit the
+    /// others until AX reports them: the dragged one waits with its drop in a landing claim
+    /// (which `commit` then no longer lands now), and the rest just lose their claim.
+    pub(super) fn release_press(
+        &mut self,
+        changes: &mut Changes,
+        mut commit: Option<crate::actor::drag::DragCommit>,
+    ) -> Option<crate::actor::drag::DragCommit> {
+        // A landing from an earlier press whose window the WindowServer no longer has will never
+        // land (its destroy was missed): retire it, so no claim outlives its window.
+        for window in self.state.windows.owner_claims(ClaimOwner::Landing).to_vec() {
+            let gone = self
+                .state
+                .windows
+                .record(window)
+                .and_then(|record| record.window_server_id())
+                .is_none_or(|wsid| DirectWindow(wsid).bounds().is_none());
+            if gone {
+                debug!(?window, "press-arrival: landing retired, its window is gone");
+                self.retire_window(changes, window);
             }
-            changes.refresh_menu = true;
-            reactor.finish(changes, None, None);
+        }
+        let mut reported = Vec::new();
+        for window in self.state.windows.owner_claims(ClaimOwner::Press).to_vec() {
+            if self.state.windows.contains_window(window) {
+                reported.push(window);
+            } else if let Some(drop) = commit.take_if(|commit| commit.source.window == window) {
+                self.state.windows.hand_over_claim(window, ClaimHolder::Landing(drop));
+            } else {
+                self.state.windows.remove_claim(window);
+            }
+        }
+        self.release_claims_of(changes, reported);
+        commit
+    }
+
+    /// AX reported a window waiting to land: it joins the layout and lands on its drop. If
+    /// the claim kept a destination (an identity merge, a restored layout), the window returns
+    /// there first and the drop then moves it: the drop wins.
+    pub(super) fn land_arrival(
+        &mut self,
+        changes: &mut Changes,
+        wid: WindowId,
+        drop: crate::actor::drag::DragCommit,
+    ) {
+        self.release_claims_of(changes, [wid]);
+        self.land_drag(changes, drop);
+    }
+
+    fn release_claims_of(
+        &mut self,
+        changes: &mut Changes,
+        windows: impl IntoIterator<Item = WindowId>,
+    ) {
+        self.with_claim_focus_policy(|reactor| {
+            for window in windows {
+                changes.refresh_menu = true;
+                reactor.readmit(changes, window);
+            }
         });
+    }
+
+    /// A release outside event dispatch reconciles on its own.
+    fn finish_claim_release(&mut self, release: impl FnOnce(&mut Self, &mut Changes)) {
+        let mut changes = Changes::default();
+        release(self, &mut changes);
+        self.finish(changes, None, None);
     }
 
     /// Replays normal reconciliation for a released window.

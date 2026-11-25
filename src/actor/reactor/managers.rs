@@ -49,30 +49,16 @@ pub struct DragManager {
     pub(super) preview: Option<crate::ui::drag_preview::DragPreview>,
     pub(super) preview_enabled: bool,
     pub(super) haptics_enabled: bool,
-    // Layouts suppressed across native drag events resume when the drag ends.
-    pub(super) deferred_layouts: Vec<(Option<SpaceId>, Presentation, bool)>,
 }
 
 impl DragManager {
-    pub(super) fn defer_layout(
-        &mut self,
-        space: Option<SpaceId>,
-        policy: Presentation,
-        changed: bool,
-    ) {
-        if let Some((_, current, layout_changed)) =
-            self.deferred_layouts.iter_mut().find(|(id, ..)| *id == space)
-        {
-            *current = (*current).max(policy);
-            *layout_changed |= changed;
-        } else {
-            self.deferred_layouts.push((space, policy, changed));
-        }
-    }
-
-    pub fn sync_motion_gate(&self) {
+    /// Whether the pointer's samples are wanted: during a native move, or while the press
+    /// waits to drag a window following the cursor (which only the reactor knows). The reactor
+    /// syncs it after every event, so it is never read from a stale copy.
+    pub fn sync_motion_gate(&self, follower_awaits_drag: bool) {
         let active = self.actor.drop_enabled()
-            && self.actor.kind() == Some(crate::actor::drag::DragKind::NativeMove);
+            && (self.actor.kind() == Some(crate::actor::drag::DragKind::NativeMove)
+                || follower_awaits_drag);
         if self.native_motion_active.load(Ordering::Relaxed) != active {
             self.native_motion_active.store(active, Ordering::Release);
         }
@@ -81,13 +67,11 @@ impl DragManager {
     /// A window leaving Rift's control can no longer be dragged by it.
     pub fn forget_window(&mut self, wid: WindowId) {
         self.actor.window_removed(wid);
-        self.sync_motion_gate();
         self.sync_preview();
     }
 
     pub fn reset(&mut self) {
         self.actor.cancel();
-        self.sync_motion_gate();
         self.release_preview();
     }
 

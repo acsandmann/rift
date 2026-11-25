@@ -575,6 +575,72 @@ pub fn get_windows(ids: &[WindowServerId]) -> Vec<WindowServerInfo> {
     out
 }
 
+/// A window asked of the WindowServer directly, one fact per call. The window query
+/// (`get_window`, `window_level`) can miss a window an app is dragging (Chrome's torn-out tab)
+/// while these still answer.
+#[derive(Clone, Copy, Debug)]
+pub struct DirectWindow(pub WindowServerId);
+
+#[cfg(not(test))]
+impl DirectWindow {
+    /// 0 is the normal level, a document window's; tooltips, menus and other helpers sit above.
+    pub fn level(self) -> Option<i32> {
+        let mut level = 0;
+        (unsafe { SLSGetWindowLevel(*G_CONNECTION, self.0.as_u32(), &mut level) }
+            == CGError::Success)
+            .then_some(level)
+    }
+
+    pub fn bounds(self) -> Option<CGRect> {
+        let mut frame = CGRect::default();
+        (unsafe { CGSGetWindowBounds(*G_CONNECTION, self.0.as_u32(), &mut frame) } == 0)
+            .then_some(frame)
+    }
+
+    pub fn pid(self) -> Option<pid_t> {
+        let mut owner = 0;
+        if unsafe { SLSGetWindowOwner(*G_CONNECTION, self.0.as_u32(), &mut owner) } != 0
+            || owner == 0
+        {
+            return None;
+        }
+        let mut pid: c_int = 0;
+        (unsafe { SLSConnectionGetPID(owner, &mut pid) } == 0 && pid != 0).then_some(pid)
+    }
+}
+
+#[cfg(test)]
+thread_local! {
+    /// What the WindowServer answers about a window directly, as a test sets it.
+    static TEST_DIRECT_WINDOWS: RefCell<HashMap<WindowServerId, (CGRect, pid_t, i32)>> =
+        RefCell::new(HashMap::default());
+}
+
+/// Tests: the WindowServer answers `DirectWindow` queries for `id`.
+#[cfg(test)]
+pub fn set_direct_window_for_test(id: WindowServerId, frame: CGRect, pid: pid_t, level: i32) {
+    TEST_DIRECT_WINDOWS.with(|windows| windows.borrow_mut().insert(id, (frame, pid, level)));
+}
+
+/// Tests: the WindowServer no longer has `id`.
+#[cfg(test)]
+pub fn forget_direct_window_for_test(id: WindowServerId) {
+    TEST_DIRECT_WINDOWS.with(|windows| windows.borrow_mut().remove(&id));
+}
+
+#[cfg(test)]
+impl DirectWindow {
+    fn answer(self) -> Option<(CGRect, pid_t, i32)> {
+        TEST_DIRECT_WINDOWS.with(|windows| windows.borrow().get(&self.0).copied())
+    }
+
+    pub fn level(self) -> Option<i32> { self.answer().map(|(_, _, level)| level) }
+
+    pub fn bounds(self) -> Option<CGRect> { self.answer().map(|(frame, ..)| frame) }
+
+    pub fn pid(self) -> Option<pid_t> { self.answer().map(|(_, pid, _)| pid) }
+}
+
 pub fn get_window(id: WindowServerId) -> Option<WindowServerInfo> {
     get_window_with_transient(id).map(|(info, _)| info)
 }

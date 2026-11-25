@@ -4,11 +4,11 @@ use super::{Changes, Presentation, Reactor, RefocusState, utils};
 use crate::actor::app::{AppInfo, WindowId, WindowInfo, pid_t};
 use crate::layout_engine::LayoutEvent;
 use crate::model::virtual_workspace::WorkspaceContext;
-use crate::model::window_store::NativeFullscreenTransition;
+use crate::model::window_store::{ClaimHolder, NativeFullscreenTransition};
 use crate::model::{AppRuleEffects, AppRuleResult, WindowRuleContext};
 use crate::sys::geometry::SameAs;
 use crate::sys::screen::SpaceId;
-use crate::sys::window_server::{WindowServerId, WindowServerInfo};
+use crate::sys::window_server::{self, WindowServerId, WindowServerInfo};
 
 impl Reactor {
     pub(super) fn assign_observed_window(
@@ -211,24 +211,37 @@ impl Reactor {
             .sys_id
             .is_some_and(|id| self.transaction_manager.get_target_frame(id).is_some());
         let minimized = info.is_minimized;
-        let (new, restored, geometry_changed) =
-            if let Some(window) = self.state.windows.window_mut(wid) {
-                let restored = window.info.is_minimized && !minimized;
-                let old_frame = window.frame_monotonic;
-                if !had_target && (info.frame.size.width != 0.0 || info.frame.size.height != 0.0) {
-                    window.frame_monotonic = info.frame;
+        let (new, restored, geometry_changed) = if let Some(window) =
+            self.state.windows.window_mut(wid)
+        {
+            let restored = window.info.is_minimized && !minimized;
+            let old_frame = window.frame_monotonic;
+            if !had_target && (info.frame.size.width != 0.0 || info.frame.size.height != 0.0) {
+                window.frame_monotonic = info.frame;
+            }
+            let geometry_changed = !old_frame.same_as(window.frame_monotonic)
+                || window.info.is_resizable != info.is_resizable
+                || window.info.min_size != info.min_size
+                || window.info.max_size != info.max_size;
+            info.frame = window.info.frame;
+            window.info = info;
+            (false, restored, geometry_changed)
+        } else {
+            self.state.windows.insert_window(wid, info.into());
+            // A window that first appears while the left button is held belongs to
+            // the press until the release, so no admission path tiles it out from
+            // under the cursor. A new AX identity for a known window is not new here.
+            if !self.state.windows.is_claimed(wid) && self.observe_button(changes) {
+                self.state.windows.insert_claim(wid, ClaimHolder::Press);
+                // Recorded now: no longer one of the press's unrecorded arrivals.
+                if let super::press::Pointer::Down(press) = &mut self.pointer
+                    && let Some(wsid) = self.state.windows.window(wid).and_then(|w| w.info.sys_id)
+                {
+                    press.arrivals.remove(&wsid);
                 }
-                let geometry_changed = !old_frame.same_as(window.frame_monotonic)
-                    || window.info.is_resizable != info.is_resizable
-                    || window.info.min_size != info.min_size
-                    || window.info.max_size != info.max_size;
-                info.frame = window.info.frame;
-                window.info = info;
-                (false, restored, geometry_changed)
-            } else {
-                self.state.windows.insert_window(wid, info.into());
-                (true, false, false)
-            };
+            }
+            (true, false, false)
+        };
         if minimized || restored {
             self.state.windows.set_minimized_visibility(wid, minimized);
         }
@@ -245,14 +258,38 @@ impl Reactor {
         {
             changes.arrange(Some(space), Presentation::Animated);
         }
-        (
+        let observed = (
             new,
             !minimized
                 && (restored
                     || ax_returned
                     || previous.is_some()
                     || (!new && admitted && !was_admitted)),
-        )
+        );
+        // AX reports a window the button was released over before AX knew it.
+        if let Some(ClaimHolder::Landing(drop)) =
+            self.state.windows.claim(wid).map(|claim| claim.holder)
+        {
+            self.land_arrival(changes, wid, drop);
+        }
+        observed
+    }
+
+    /// A window that appeared under the held button follows the cursor before AX reported it.
+    /// Record its native identity (and what the window query knows of it), with no AX state,
+    /// and claim it for the press, so the pointer can drive its drag. AX fills the record in
+    /// when it reports the window.
+    pub(super) fn arrive_under_press(&mut self, changes: &mut Changes, wid: WindowId) {
+        let wsid = WindowServerId::new(wid.idx.get());
+        if let super::press::Pointer::Down(press) = &mut self.pointer {
+            press.arrivals.remove(&wsid);
+        }
+        self.state.windows.track_window_server_id(wsid, wid);
+        if let Some(info) = window_server::get_window(wsid) {
+            self.state.windows.track_window_server_info(info);
+        }
+        self.state.windows.insert_claim(wid, ClaimHolder::Press);
+        changes.refresh_notifications = true;
     }
 
     pub(super) fn observe_window_minimization(
