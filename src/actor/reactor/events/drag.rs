@@ -141,14 +141,22 @@ impl Reactor {
                 && self.state.windows.contains_window(target.intent.window)
             {
                 trace!(source=?window, target=?target.intent.window, action=?target.intent.action, "performing window drop");
-                if self.layout_manager.layout_engine.apply_window_drop(
-                    crate::layout_engine::WindowDropRequest {
-                        source: window,
-                        target: target.intent.window,
-                        space,
-                        action: target.intent.action,
-                    },
-                ) {
+                let request = crate::layout_engine::WindowDropRequest {
+                    source: window,
+                    target: target.intent.window,
+                    space,
+                    action: target.intent.action,
+                };
+                // A window that arrived with no slot lands exactly as its preview placed it.
+                let engine = &mut self.layout_manager.layout_engine;
+                let dropped = match source.origin {
+                    crate::actor::drag::DragOrigin::Arriving => {
+                        engine.land_arriving_window(request)
+                    }
+                    crate::actor::drag::DragOrigin::Tiled
+                    | crate::actor::drag::DragOrigin::Floating => engine.apply_window_drop(request),
+                };
+                if dropped {
                     changes.space(space).layout_changed = true;
                     changes.drop_haptic = self.drag_manager.haptics_enabled;
                 }

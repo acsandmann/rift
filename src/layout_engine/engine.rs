@@ -468,13 +468,57 @@ impl LayoutEngine {
         target: WindowId,
         action: crate::layout_engine::WindowDropAction,
     ) -> Option<(LayoutSystemKind, Option<Vec<usize>>)> {
-        let mut tree = self.workspaces[workspace].layout_system.preview_clone()?;
+        let tree = self.workspaces[workspace].layout_system.preview_clone()?;
+        Self::prospective_drop_from(tree, layout, source, target, action)
+    }
+
+    fn prospective_drop_from(
+        mut tree: LayoutSystemKind,
+        layout: LayoutId,
+        source: WindowId,
+        target: WindowId,
+        action: crate::layout_engine::WindowDropAction,
+    ) -> Option<(LayoutSystemKind, Option<Vec<usize>>)> {
         let before = tree.window_slot(layout, source);
         if before.is_none() {
             tree.update(WindowChange::Add(layout, source, None));
         }
         let changed = tree.edit(layout, LayoutEdit::Drop { source, target, action }).changed();
         changed.then_some((tree, before))
+    }
+
+    /// Land a window that arrived with no slot (one torn out under the press) and has just been
+    /// admitted: rebuild its drop from the layout without it, exactly as the preview did (it
+    /// joins as any window from elsewhere does, as one dragged in from another display does),
+    /// and install that layout.
+    pub(crate) fn land_arriving_window(
+        &mut self,
+        request: crate::layout_engine::WindowDropRequest,
+    ) -> bool {
+        if self.active_layout_mode_at(request.space) == LayoutMode::Floating {
+            return false;
+        }
+        let Some((workspace, layout)) = self.workspaces.active_layout_for_space(request.space)
+        else {
+            return false;
+        };
+        let Some(mut tree) = self.workspaces[workspace].layout_system.preview_clone() else {
+            return false;
+        };
+        tree.update(WindowChange::Remove(request.source));
+        let Some((tree, _)) = Self::prospective_drop_from(
+            tree,
+            layout,
+            request.source,
+            request.target,
+            request.action,
+        ) else {
+            return false;
+        };
+        self.forget_native_layout_for_window_id(request.source);
+        self.native_layouts.remove(&workspace);
+        self.workspaces[workspace].layout_system = tree;
+        true
     }
 
     pub(crate) fn source_move_neighbors(&self, space: SpaceId, source: WindowId) -> [bool; 4] {

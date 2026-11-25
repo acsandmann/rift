@@ -3288,92 +3288,189 @@ impl SilentDrag {
 /// The tab was torn from the bottom tile of a master-stack, which stays selected, so a new
 /// window joins right after it. Every zone of that tile is still a drop target, and the window
 /// lands where the zone says.
-/// A torn tab's overlay sits under the pointer: for each tile, its centre previews the whole tile
-/// and its edges the half on that side, as the tile is on screen, the tab's own source tile included. Where the window
-/// lands still comes from the layout it would join.
-#[test]
-fn a_torn_tabs_overlay_is_the_zone_under_the_pointer() {
-    let bottom = WindowId::new(1, 1);
-    let mut drag = silent_drag_over(Some(LayoutMode::MasterStack), 3);
-    drag.reactor
-        .handle_test_layout_event(LayoutEvent::WindowFocused(drag.space, bottom));
-    let tiles: Vec<(WindowId, CGRect)> = test_layout(&mut drag.reactor, drag.space, SCREEN_1000);
-    let source = drag.reactor.state.windows.window(bottom).unwrap().frame_monotonic;
-    drag.appears(20_001);
-    drag.moves_to(20_001, CGRect {
-        origin: CGPoint::new(source.origin.x, source.origin.y - 100.),
-        ..source
-    });
-
-    for (window, tile) in tiles {
-        let (min, max) = (tile.origin, CGPoint::new(tile.max().x, tile.max().y));
-        let points = [
-            tile.mid(),
-            CGPoint::new(min.x + 5., tile.mid().y),
-            CGPoint::new(max.x - 5., tile.mid().y),
-            CGPoint::new(tile.mid().x, min.y + 5.),
-            CGPoint::new(tile.mid().x, max.y - 5.),
-        ];
-        for (index, point) in points.into_iter().enumerate() {
-            drag.pointer_at(point);
-            let Some(target) = drag.reactor.drag_manager.actor.preview_target() else {
-                assert!(index > 0, "no target at the centre of {window:?}");
-                continue;
-            };
-            assert_eq!(target.intent.window, window, "{point:?}");
-            let area = target.preview_area;
-            let zones = [
-                crate::actor::drag::DropZone::Center,
-                crate::actor::drag::DropZone::West,
-                crate::actor::drag::DropZone::East,
-                crate::actor::drag::DropZone::North,
-                crate::actor::drag::DropZone::South,
-            ];
-            assert_eq!(target.intent.zone, zones[index], "{point:?}");
-            // What the drop takes of the tile as it is now: all of it, or the half on that side.
-            let share = crate::actor::drag::zone_share(tile, zones[index]);
-            assert!(area.same_as(share), "{area:?} is not {share:?} of {window:?}");
-            assert!(
-                crate::actor::drag::contains(area, point, 0.5),
-                "{area:?} is not under {point:?}"
-            );
-            if index == 0 {
-                assert!(area.same_as(tile), "the centre overlay is the whole tile");
-            }
-        }
+/// The owner's master-stack: new windows join at the end of the stack.
+fn owner_master_stack() -> crate::common::config::LayoutSettings {
+    use crate::common::config::{
+        BaseLayoutSettings, LayoutSettings, MasterStackNewWindowPlacement, MasterStackSettings,
+        WindowInsertionPoint,
+    };
+    LayoutSettings {
+        mode: LayoutMode::MasterStack,
+        master_stack: MasterStackSettings {
+            base: BaseLayoutSettings {
+                window_insertion_point: Some(WindowInsertionPoint::EndOfTree),
+            },
+            new_window_placement: MasterStackNewWindowPlacement::Stack,
+            ..Default::default()
+        },
+        ..Default::default()
     }
 }
 
-/// A tile larger than its slot (an app's minimum height, as Chrome's) runs past the display;
-/// the overlay of a zone there stays on the display.
-#[test]
-fn a_torn_tabs_overlay_stays_on_the_display() {
-    let bottom = WindowId::new(1, 1);
-    let mut drag = silent_drag_over(Some(LayoutMode::MasterStack), 3);
-    let tile = drag.reactor.state.windows.window(bottom).unwrap().frame_monotonic;
-    // On screen the window is taller than its slot and reaches past the bottom.
-    let overflowing = CGRect::new(tile.origin, CGSize::new(tile.size.width, 600.));
-    drag.reactor.state.windows.window_mut(bottom).unwrap().frame_monotonic = overflowing;
-    drag.appears(20_001);
-    drag.moves_to(20_001, CGRect::new(CGPoint::new(tile.origin.x, 200.), tile.size));
+fn silent_drag_with_layout(
+    layout: &crate::common::config::LayoutSettings,
+    count: usize,
+) -> SilentDrag {
+    let mut reactor = Reactor::new_for_test(LayoutEngine::new(&Default::default(), layout));
+    let mut apps = Apps::new();
+    let space = SpaceId::new(1);
+    apps.make_app_and_settle_on_screen(&mut reactor, SCREEN_1000, space, 1, make_windows(count));
+    apps.requests();
+    crate::sys::event::TEST_MOUSE_STATE.with(|state| state.set(Some(MouseState::Down)));
+    SilentDrag { apps, reactor, space }
+}
 
-    drag.pointer_at(CGPoint::new(tile.mid().x, 990.));
-    let target = drag
-        .reactor
-        .drag_manager
-        .actor
-        .preview_target()
-        .expect("no target on the south edge");
-    assert_eq!(target.intent.window, bottom);
-    assert!(overflowing.max().y > SCREEN_1000.max().y);
-    // The bottom half of the tile, cut at the display's edge.
-    let half = crate::actor::drag::zone_share(overflowing, crate::actor::drag::DropZone::South);
-    let visible = half.intersection(&SCREEN_1000);
+/// A torn tab drops exactly like a window dragged in from another display: neither has a slot
+/// in this layout, so both join it as any window from elsewhere does, and the same drop on the
+/// same tile previews the same frame (thirds of the stack, side by side with a member) and
+/// lands there.
+#[test]
+fn a_torn_tab_previews_and_lands_like_a_window_from_another_display() {
+    use crate::layout_engine::{Direction, WindowDropAction};
+    let layout = owner_master_stack();
+    let tiles = {
+        let mut drag = silent_drag_with_layout(&layout, 3);
+        test_layout(&mut drag.reactor, drag.space, SCREEN_1000)
+    };
+    let from_elsewhere = WindowId::new(9, 9);
+    let (mut checked, mut thirds) = (0, 0);
+    for (window, tile) in tiles {
+        let (min, max) = (tile.origin, tile.max());
+        for point in [
+            tile.mid(),
+            CGPoint::new(min.x + 15., tile.mid().y),
+            CGPoint::new(max.x - 15., tile.mid().y),
+            CGPoint::new(tile.mid().x, min.y + 15.),
+            CGPoint::new(tile.mid().x, max.y - 15.),
+        ] {
+            let mut drag = silent_drag_with_layout(&layout, 3);
+            let engine = &drag.reactor.layout_manager.layout_engine;
+            let line = drag.reactor.config.settings.ui.stack_line.clone();
+            let cross_display = |action| {
+                engine
+                    .drop_preview_frame(
+                        drag.space,
+                        from_elsewhere,
+                        window,
+                        action,
+                        SCREEN_1000,
+                        None,
+                        &line,
+                    )
+                    .map(|preview| preview.frame)
+            };
+            let expected: Vec<_> = [
+                WindowDropAction::Insert(Direction::Up),
+                WindowDropAction::Insert(Direction::Down),
+                WindowDropAction::Insert(Direction::Left),
+                WindowDropAction::Insert(Direction::Right),
+                WindowDropAction::Swap,
+            ]
+            .into_iter()
+            .map(|action| (action, cross_display(action)))
+            .collect();
+            drag.appears(20_001);
+            drag.moves_to(
+                20_001,
+                CGRect::new(CGPoint::new(700., 400.), CGSize::new(300., 300.)),
+            );
+            drag.pointer_at(point);
+            let Some(target) = drag.reactor.drag_manager.actor.preview_target() else {
+                continue;
+            };
+            assert_eq!(target.intent.window, window, "{point:?}");
+            let (_, from_another_display) = expected
+                .iter()
+                .find(|(action, _)| *action == target.intent.action)
+                .copied()
+                .expect("an action a window from another display has too");
+            assert!(
+                from_another_display.is_some_and(|frame| frame.same_as(target.preview_area)),
+                "{:?} on {window:?}: torn tab {:?}, from another display {from_another_display:?}",
+                target.intent.action,
+                target.preview_area
+            );
+            if tile.origin.x >= 600. - 0.5
+                && matches!(
+                    target.intent.action,
+                    WindowDropAction::Insert(Direction::Up | Direction::Down)
+                )
+            {
+                assert!(
+                    (target.preview_area.size.height - 1000. / 3.).abs() < 1.5,
+                    "not a third of the stack"
+                );
+                thirds += 1;
+            }
+            drag.release();
+            drag.ax_reports(20_001);
+            let landed = test_layout(&mut drag.reactor, drag.space, SCREEN_1000)
+                .into_iter()
+                .find_map(|(w, frame)| (w == SilentDrag::wid(20_001)).then_some(frame))
+                .expect("the torn tab is not in the layout");
+            checked += 1;
+            assert!(
+                landed.same_as(target.preview_area),
+                "landed {landed:?}, previewed {:?}",
+                target.preview_area
+            );
+        }
+    }
     assert!(
-        target.preview_area.same_as(visible),
-        "{:?} is not {visible:?}",
-        target.preview_area
+        checked >= 10 && thirds >= 4,
+        "checked {checked} drops, {thirds} stack thirds"
     );
+}
+
+/// Every zone of every tile, the tab's own source tile included: the torn tab lands exactly
+/// where its overlay showed.
+#[test]
+fn a_torn_tab_lands_where_its_overlay_shows() {
+    let tiles = {
+        let mut drag = silent_drag_over(Some(LayoutMode::MasterStack), 3);
+        test_layout(&mut drag.reactor, drag.space, SCREEN_1000)
+    };
+    let mut checked = 0;
+    for (window, tile) in tiles {
+        let (min, max) = (tile.origin, tile.max());
+        for point in [
+            tile.mid(),
+            CGPoint::new(min.x + 15., tile.mid().y),
+            CGPoint::new(max.x - 15., tile.mid().y),
+            CGPoint::new(tile.mid().x, min.y + 15.),
+            CGPoint::new(tile.mid().x, max.y - 15.),
+        ] {
+            let mut drag = silent_drag_over(Some(LayoutMode::MasterStack), 3);
+            drag.reactor.handle_test_layout_event(LayoutEvent::WindowFocused(
+                drag.space,
+                WindowId::new(1, 1),
+            ));
+            drag.appears(20_001);
+            drag.moves_to(
+                20_001,
+                CGRect::new(CGPoint::new(700., 400.), CGSize::new(300., 300.)),
+            );
+            drag.pointer_at(point);
+            let Some(target) = drag.reactor.drag_manager.actor.preview_target() else {
+                continue;
+            };
+            assert_eq!(target.intent.window, window, "{point:?}");
+            drag.release();
+            drag.ax_reports(20_001);
+            let landed = test_layout(&mut drag.reactor, drag.space, SCREEN_1000)
+                .into_iter()
+                .find_map(|(w, frame)| (w == SilentDrag::wid(20_001)).then_some(frame))
+                .expect("the torn tab is not in the layout");
+            checked += 1;
+            assert!(
+                landed.same_as(target.preview_area),
+                "{:?} on {window:?}: landed {landed:?}, previewed {:?}",
+                target.intent.action,
+                target.preview_area
+            );
+        }
+    }
+    assert!(checked >= 10, "checked {checked} drops");
 }
 
 #[test]
