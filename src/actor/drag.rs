@@ -468,35 +468,37 @@ fn candidate(
     if session.scene.slots.is_empty() {
         return zone;
     }
-    let open: Vec<&DragSlot> = session
-        .scene
-        .slots
-        .iter()
-        .filter(|slot| {
-            !session.unavailable.contains(&(
-                slot.intent.window,
-                slot.intent.zone,
-                slot.intent.action,
-            ))
-        })
-        .collect();
-    let holding: Vec<&DragSlot> =
-        open.iter().copied().filter(|slot| contains(slot.area, point, 0.0)).collect();
-    let area = |slot: &&DragSlot| slot.area.size.width * slot.area.size.height;
-    let named = zone.and_then(|zone| {
-        holding
-            .iter()
-            .copied()
-            .find(|slot| slot.intent.window == zone.window && slot.intent.action == zone.action)
-    });
+    // One pass: the first holding slot the zone names, the largest holding one (the last of
+    // equals), and the nearest open one (the first of equals).
+    let mut named = None;
+    let mut largest: Option<(f64, &DragSlot)> = None;
+    let mut nearest: Option<(f64, &DragSlot)> = None;
+    for slot in &session.scene.slots {
+        let intent = slot.intent;
+        if session.unavailable.contains(&(intent.window, intent.zone, intent.action)) {
+            continue;
+        }
+        if contains(slot.area, point, 0.0) {
+            if named.is_none()
+                && zone.is_some_and(|zone| {
+                    intent.window == zone.window && intent.action == zone.action
+                })
+            {
+                named = Some(slot);
+            }
+            let area = slot.area.size.width * slot.area.size.height;
+            if largest.is_none_or(|(best, _)| area >= best) {
+                largest = Some((area, slot));
+            }
+        }
+        let distance = distance_to_rect_squared(slot.area, point);
+        if nearest.is_none_or(|(best, _)| distance < best) {
+            nearest = Some((distance, slot));
+        }
+    }
     named
-        .or_else(|| holding.iter().copied().max_by(|a, b| area(a).total_cmp(&area(b))))
-        .or_else(|| {
-            open.iter().copied().min_by(|a, b| {
-                distance_to_rect_squared(a.area, point)
-                    .total_cmp(&distance_to_rect_squared(b.area, point))
-            })
-        })
+        .or(largest.map(|(_, slot)| slot))
+        .or(nearest.map(|(_, slot)| slot))
         .map(|slot| slot.intent)
 }
 
