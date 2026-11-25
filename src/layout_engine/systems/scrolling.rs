@@ -238,6 +238,11 @@ impl Viewport {
         }
     }
 
+    /// Being dragged or on a spring: the offset is a moment, not where it rests.
+    fn moving(&self) -> bool {
+        matches!(self, Self::Gesture(_) | Self::Resting(_, Motion::Animation(_)))
+    }
+
     fn uncentre(&mut self) {
         if let Self::Resting(rest, _) = self {
             *rest = Rest::At;
@@ -863,10 +868,7 @@ impl Serialize for LayoutState {
         stored.serialize_field("active_column", &self.arrangement.active_column)?;
         stored.serialize_field("next_column_id", &self.arrangement.next_column_id)?;
         let current = self.camera.viewport.offset();
-        let offset = if matches!(
-            self.camera.viewport,
-            Viewport::Gesture(_) | Viewport::Resting(_, Motion::Animation(_))
-        ) {
+        let offset = if self.camera.viewport.moving() {
             self.clamp_offset(current)
         } else {
             current
@@ -1802,10 +1804,7 @@ impl ScrollingLayoutSystem {
     /// Settle where cancellation occurred, with no artificial fling or focus change.
     pub fn cancel_viewport_gesture(&mut self, layout: LayoutId) {
         if let Some(state) = self.layouts.get_mut(layout)
-            && matches!(
-                state.camera.viewport,
-                Viewport::Gesture(_) | Viewport::Resting(_, Motion::Animation(_))
-            )
+            && state.camera.viewport.moving()
         {
             state.camera.viewport =
                 Viewport::at(state.clamp_offset(state.camera.viewport.offset()));
