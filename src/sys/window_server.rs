@@ -575,33 +575,38 @@ pub fn get_windows(ids: &[WindowServerId]) -> Vec<WindowServerInfo> {
     out
 }
 
-/// A window's bounds and owning process, asked of the WindowServer directly. The window query
-/// can miss a window an app is dragging (Chrome's torn-out tab) while these still answer.
-#[cfg(not(test))]
-pub fn window_bounds_and_pid(id: WindowServerId) -> Option<(CGRect, pid_t)> {
-    let mut frame = CGRect::default();
-    if unsafe { CGSGetWindowBounds(*G_CONNECTION, id.as_u32(), &mut frame) } != 0 {
-        return None;
-    }
-    let mut owner = 0;
-    if unsafe { SLSGetWindowOwner(*G_CONNECTION, id.as_u32(), &mut owner) } != 0 || owner == 0 {
-        return None;
-    }
-    let mut pid: c_int = 0;
-    if unsafe { SLSConnectionGetPID(owner, &mut pid) } != 0 || pid == 0 {
-        return None;
-    }
-    Some((frame, pid))
-}
+/// A window asked of the WindowServer directly, one fact per call. The window query
+/// (`get_window`, `window_level`) can miss a window an app is dragging (Chrome's torn-out tab)
+/// while these still answer.
+#[derive(Clone, Copy, Debug)]
+pub struct DirectWindow(pub WindowServerId);
 
-/// A window's level, asked of the WindowServer directly, which answers for a window the window
-/// query can miss (see `window_bounds_and_pid`). 0 is the normal level: a document window;
-/// tooltips, menus and other helpers sit above it.
 #[cfg(not(test))]
-pub fn direct_window_level(id: WindowServerId) -> Option<i32> {
-    let mut level = 0;
-    (unsafe { SLSGetWindowLevel(*G_CONNECTION, id.as_u32(), &mut level) } == CGError::Success)
-        .then_some(level)
+impl DirectWindow {
+    /// 0 is the normal level, a document window's; tooltips, menus and other helpers sit above.
+    pub fn level(self) -> Option<i32> {
+        let mut level = 0;
+        (unsafe { SLSGetWindowLevel(*G_CONNECTION, self.0.as_u32(), &mut level) }
+            == CGError::Success)
+            .then_some(level)
+    }
+
+    pub fn bounds(self) -> Option<CGRect> {
+        let mut frame = CGRect::default();
+        (unsafe { CGSGetWindowBounds(*G_CONNECTION, self.0.as_u32(), &mut frame) } == 0)
+            .then_some(frame)
+    }
+
+    pub fn pid(self) -> Option<pid_t> {
+        let mut owner = 0;
+        if unsafe { SLSGetWindowOwner(*G_CONNECTION, self.0.as_u32(), &mut owner) } != 0
+            || owner == 0
+        {
+            return None;
+        }
+        let mut pid: c_int = 0;
+        (unsafe { SLSConnectionGetPID(owner, &mut pid) } == 0 && pid != 0).then_some(pid)
+    }
 }
 
 #[cfg(test)]
@@ -611,21 +616,23 @@ thread_local! {
         RefCell::new(HashMap::default());
 }
 
-/// Tests: the WindowServer answers `window_bounds_and_pid` and `direct_window_level` for `id`.
+/// Tests: the WindowServer answers `DirectWindow` queries for `id`.
 #[cfg(test)]
 pub fn set_direct_window_for_test(id: WindowServerId, frame: CGRect, pid: pid_t, level: i32) {
     TEST_DIRECT_WINDOWS.with(|windows| windows.borrow_mut().insert(id, (frame, pid, level)));
 }
 
 #[cfg(test)]
-pub fn window_bounds_and_pid(id: WindowServerId) -> Option<(CGRect, pid_t)> {
-    TEST_DIRECT_WINDOWS
-        .with(|windows| windows.borrow().get(&id).map(|&(frame, pid, _)| (frame, pid)))
-}
+impl DirectWindow {
+    fn answer(self) -> Option<(CGRect, pid_t, i32)> {
+        TEST_DIRECT_WINDOWS.with(|windows| windows.borrow().get(&self.0).copied())
+    }
 
-#[cfg(test)]
-pub fn direct_window_level(id: WindowServerId) -> Option<i32> {
-    TEST_DIRECT_WINDOWS.with(|windows| windows.borrow().get(&id).map(|&(_, _, level)| level))
+    pub fn level(self) -> Option<i32> { self.answer().map(|(_, _, level)| level) }
+
+    pub fn bounds(self) -> Option<CGRect> { self.answer().map(|(frame, ..)| frame) }
+
+    pub fn pid(self) -> Option<pid_t> { self.answer().map(|(_, pid, _)| pid) }
 }
 
 pub fn get_window(id: WindowServerId) -> Option<WindowServerInfo> {

@@ -10,7 +10,7 @@ use crate::actor::drag::{DragOrigin, MouseButton};
 use crate::common::collections::HashSet;
 use crate::model::window_store::{ClaimHolder, ClaimOwner};
 use crate::sys::screen::SpaceId;
-use crate::sys::window_server::{self, WindowServerId};
+use crate::sys::window_server::{DirectWindow, WindowServerId};
 
 /// Whether a button is held. Nothing waits for the screen without a press.
 #[derive(Default)]
@@ -164,15 +164,25 @@ impl Reactor {
         let Pointer::Down(press) = &self.pointer else {
             return;
         };
-        let mut under = press.arrivals.iter().filter_map(|&wsid| {
-            let (frame, pid) = window_server::window_bounds_and_pid(wsid)?;
-            let level = window_server::direct_window_level(wsid);
-            let holds = level == Some(0) && crate::actor::drag::contains(frame, point, 12.0);
-            debug!(?wsid, ?frame, ?level, holds, "press-arrival: under the pointer?");
-            holds.then(|| WindowId::new(pid, wsid.as_u32()))
+        let mut under = press.arrivals.iter().copied().filter(|&wsid| {
+            let direct = DirectWindow(wsid);
+            let level = direct.level();
+            let bounds = (level == Some(0)).then(|| direct.bounds()).flatten();
+            let holds =
+                bounds.is_some_and(|frame| crate::actor::drag::contains(frame, point, 12.0));
+            debug!(
+                ?wsid,
+                ?level,
+                ?bounds,
+                holds,
+                "press-arrival: under the pointer?"
+            );
+            holds
         });
-        if let (Some(window), None) = (under.next(), under.next()) {
-            self.follow_arrival(changes, window, "holds the pointer");
+        if let (Some(wsid), None) = (under.next(), under.next())
+            && let Some(pid) = DirectWindow(wsid).pid()
+        {
+            self.follow_arrival(changes, WindowId::new(pid, wsid.as_u32()), "holds the pointer");
         }
     }
 
@@ -194,8 +204,7 @@ impl Reactor {
         press.following = Some(window);
         debug!(?window, why, "press-arrival: follows the cursor");
         if self.state.windows.record(window).is_none() {
-            let frame = window_server::window_bounds_and_pid(wsid)
-                .map_or(CGRect::default(), |(frame, _)| frame);
+            let frame = DirectWindow(wsid).bounds().unwrap_or_default();
             self.arrive_under_press(changes, window, frame);
         }
     }
@@ -229,8 +238,8 @@ impl Reactor {
         self.hand_over_arriving_drag(changes, window);
         let wsid = WindowServerId::new(window.idx.get());
         // Its live bounds when the WindowServer answers; otherwise where the pointer holds it.
-        let frame = window_server::window_bounds_and_pid(wsid)
-            .map(|(frame, _)| frame)
+        let frame = DirectWindow(wsid)
+            .bounds()
             .filter(|frame| crate::actor::drag::contains(*frame, point, 12.0))
             .unwrap_or_else(|| CGRect::new(point, CGSize::new(1., 1.)));
         let Some(origin) = self.native_drag_origin(window, frame) else {
