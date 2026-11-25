@@ -2907,6 +2907,7 @@ fn torn_tab_in((mut apps, mut reactor): (Apps, Reactor)) -> TornTab {
     let frame = CGRect::new(CGPoint::new(200., 200.), CGSize::new(500., 500.));
     let wsid = WindowServerId::new(10_002);
     reactor.track_test_window_server_info(wsid, 1, frame);
+    window_server::set_direct_window_for_test(wsid, frame, 1, 0);
     reactor.mark_test_window_visible_in_space(wsid, space);
     crate::sys::event::TEST_MOUSE_STATE.with(|state| state.set(Some(MouseState::Down)));
     let info = make_window_info(frame, Some(wsid), "Detached tab", None);
@@ -3193,6 +3194,11 @@ impl SilentDrag {
     /// The window takes focus: the WindowServer's key window is now the one following the
     /// cursor. The WindowServer reports no moves, and AX may stay silent.
     fn takes_focus(&mut self, idx: u32) {
+        let wsid = WindowServerId::new(idx);
+        if window_server::DirectWindow(wsid).bounds().is_none() {
+            let frame = CGRect::new(CGPoint::new(200., 200.), CGSize::new(500., 500.));
+            window_server::set_direct_window_for_test(wsid, frame, 1, 0);
+        }
         let space = self.space;
         self.reactor
             .handle_event(Event::WindowServerFocusChanged(Self::wid(idx), space));
@@ -3209,6 +3215,7 @@ impl SilentDrag {
         if !following {
             self.takes_focus(idx);
         }
+        window_server::set_direct_window_for_test(WindowServerId::new(idx), frame, 1, 0);
         window_server::set_cursor_location_override(Some(frame.mid()));
         self.pointer_at(frame.mid());
         window_server::set_cursor_location_override(None);
@@ -3367,6 +3374,8 @@ impl OwnerDisplays {
     fn tear_on_b(&mut self) -> WindowId {
         let torn = WindowId::new(1, Self::TORN);
         let space = self.space_b;
+        let frame = CGRect::new(CGPoint::new(1700., 400.), CGSize::new(300., 300.));
+        window_server::set_direct_window_for_test(WindowServerId::new(Self::TORN), frame, 1, 0);
         window_server_appeared(
             &mut self.reactor,
             WindowServerId::new(Self::TORN),

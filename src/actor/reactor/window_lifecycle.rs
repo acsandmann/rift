@@ -1,4 +1,3 @@
-use objc2_core_foundation::{CGRect, CGSize};
 use tracing::{debug, warn};
 
 use super::{Changes, Presentation, Reactor, RefocusState, utils};
@@ -9,7 +8,7 @@ use crate::model::window_store::{ClaimHolder, NativeFullscreenTransition};
 use crate::model::{AppRuleEffects, AppRuleResult, WindowRuleContext};
 use crate::sys::geometry::SameAs;
 use crate::sys::screen::SpaceId;
-use crate::sys::window_server::{WindowServerId, WindowServerInfo};
+use crate::sys::window_server::{self, WindowServerId, WindowServerInfo};
 
 impl Reactor {
     pub(super) fn assign_observed_window(
@@ -269,28 +268,19 @@ impl Reactor {
         observed
     }
 
-    /// A window that appeared under the held button took focus before AX reported it. Record
-    /// its native identity and frame, with no AX state, and claim it for the press, so the
-    /// pointer can drive its drag. AX fills the record in when it reports the window.
-    pub(super) fn arrive_under_press(
-        &mut self,
-        changes: &mut Changes,
-        wid: WindowId,
-        frame: CGRect,
-    ) {
+    /// A window that appeared under the held button follows the cursor before AX reported it.
+    /// Record its native identity (and what the window query knows of it), with no AX state,
+    /// and claim it for the press, so the pointer can drive its drag. AX fills the record in
+    /// when it reports the window.
+    pub(super) fn arrive_under_press(&mut self, changes: &mut Changes, wid: WindowId) {
         let wsid = WindowServerId::new(wid.idx.get());
         if let super::press::Pointer::Down(press) = &mut self.pointer {
             press.arrivals.remove(&wsid);
         }
         self.state.windows.track_window_server_id(wsid, wid);
-        self.state.windows.track_window_server_info(WindowServerInfo {
-            id: wsid,
-            pid: wid.pid,
-            layer: 0,
-            frame,
-            min_frame: CGSize::ZERO,
-            max_frame: CGSize::ZERO,
-        });
+        if let Some(info) = window_server::get_window(wsid) {
+            self.state.windows.track_window_server_info(info);
+        }
         self.state.windows.insert_claim(wid, ClaimHolder::Press);
         changes.refresh_notifications = true;
     }

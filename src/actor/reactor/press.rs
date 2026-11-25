@@ -1,7 +1,7 @@
 //! The mouse button as the reactor sees it. While a button is held, layout reaches the screen
 //! only at the release (#689).
 
-use objc2_core_foundation::{CGPoint, CGRect, CGSize};
+use objc2_core_foundation::CGPoint;
 use tracing::debug;
 
 use super::{Changes, Presentation, Reactor};
@@ -204,8 +204,7 @@ impl Reactor {
         press.following = Some(window);
         debug!(?window, why, "press-arrival: follows the cursor");
         if self.state.windows.record(window).is_none() {
-            let frame = DirectWindow(wsid).bounds().unwrap_or_default();
-            self.arrive_under_press(changes, window, frame);
+            self.arrive_under_press(changes, window);
         }
     }
 
@@ -236,13 +235,17 @@ impl Reactor {
             return;
         }
         self.hand_over_arriving_drag(changes, window);
-        let wsid = WindowServerId::new(window.idx.get());
-        // Its live bounds when the WindowServer answers; otherwise where the pointer holds it.
-        let frame = DirectWindow(wsid)
-            .bounds()
-            .filter(|frame| crate::actor::drag::contains(*frame, point, 12.0))
-            .unwrap_or_else(|| CGRect::new(point, CGSize::new(1., 1.)));
-        let Some(origin) = self.native_drag_origin(window, frame) else {
+        // It follows the cursor, so no cursor check: it only has to be a window still.
+        let Some(origin) = self.drag_may_start().then(|| self.drag_origin(window)).flatten() else {
+            return;
+        };
+        let Some(frame) = self
+            .state
+            .windows
+            .record(window)
+            .and_then(|record| record.window_server_id())
+            .and_then(|wsid| DirectWindow(wsid).bounds())
+        else {
             return;
         };
         let space = self.screen_for_point(point).and_then(|screen| screen.space);
