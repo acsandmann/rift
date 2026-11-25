@@ -4522,6 +4522,16 @@ impl Reactor {
                 break;
             }
         }
+        let target = self.drag_manager.actor.preview_target();
+        debug!(
+            source = ?source.window,
+            origin = ?source.origin,
+            target = ?target.map(|target| target.intent.window),
+            zone = ?target.map(|target| target.intent.zone),
+            action = ?target.map(|target| target.intent.action),
+            preview = ?target.map(|target| target.preview_area),
+            "drag target"
+        );
         self.drag_manager.sync_preview();
     }
 
