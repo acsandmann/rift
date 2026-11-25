@@ -1845,7 +1845,7 @@ impl Reactor {
                     && let Some(window) = self.state.windows.window(wid)
                     && let Some(wsid) = window.info.sys_id
                     && let Some(write) = self.tx_store.get(&wsid)
-                    && last_seen == Some(write.txid)
+                    && last_seen == Some(write.txid())
                     && write.target().is_some_and(|target| !new_frame.same_as(target))
                     && self.hidden_assigned_space_for_window_id(wid).is_some()
                 {

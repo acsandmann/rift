@@ -20,24 +20,23 @@ impl TransactionId {
     pub fn next(self) -> Self { Self(self.0.wrapping_add(1)) }
 }
 
-#[derive(Clone, Copy, Debug, Default)]
+#[derive(Clone, Copy, Debug)]
 enum FrameWrite {
-    #[default]
     Idle,
     Pending(CGRect),
-    Settled {
-        target: CGRect,
-        observed: CGRect,
-    },
+    Settled { target: CGRect, observed: CGRect },
 }
 
-#[derive(Clone, Copy, Debug, Default)]
+#[derive(Clone, Copy, Debug)]
 pub struct TxRecord {
-    pub txid: TransactionId,
+    txid: TransactionId,
     write: FrameWrite,
 }
 
 impl TxRecord {
+    /// The id of the latest write to the window.
+    pub fn txid(self) -> TransactionId { self.txid }
+
     pub fn target(self) -> Option<CGRect> {
         match self.write {
             FrameWrite::Pending(frame) => Some(frame),
@@ -46,7 +45,7 @@ impl TxRecord {
     }
 
     /// Whether this write already takes a window that is at `actual` to `desired`.
-    pub(crate) fn covers(self, desired: CGRect, actual: ActualFrame) -> bool {
+    fn covers(self, desired: CGRect, actual: ActualFrame) -> bool {
         let actual = actual.rect();
         match self.write {
             FrameWrite::Idle => actual.same_as(desired),
@@ -59,7 +58,7 @@ impl TxRecord {
 
     /// Whether the app answered a write to `desired` with another frame, and
     /// the window is still at what it answered.
-    pub(crate) fn refused(self, desired: CGRect, actual: ActualFrame) -> bool {
+    fn refused(self, desired: CGRect, actual: ActualFrame) -> bool {
         matches!(self.write, FrameWrite::Settled { target, observed }
             if !target.same_as(observed) && self.covers(desired, actual))
     }
@@ -126,6 +125,24 @@ impl WindowTxStore {
                 .and_then(|id| self.target(&id))
                 .unwrap_or(window.actual().rect()),
         )
+    }
+
+    /// Whether the window's write, if any, already takes it to `desired`.
+    pub(crate) fn covers(&self, window: &WindowState, desired: CGRect) -> bool {
+        match window.info.sys_id.and_then(|id| self.get(&id)) {
+            Some(record) => record.covers(desired, window.actual()),
+            None => window.actual().rect().same_as(desired),
+        }
+    }
+
+    /// Whether the app answered the window's write to `desired` with another
+    /// frame, and the window is still at what it answered.
+    pub(crate) fn refused(&self, window: &WindowState, desired: CGRect) -> bool {
+        window
+            .info
+            .sys_id
+            .and_then(|id| self.get(&id))
+            .is_some_and(|record| record.refused(desired, window.actual()))
     }
 
     pub fn remove(&self, id: &WindowServerId) { self.0.records.remove(id); }

@@ -695,14 +695,11 @@ impl Reactor {
                 }
                 let window = self.state.windows.window(wid)?;
                 let start = self.tx_store.planned(window).rect();
-                if semantic
-                    && let Some(wsid) = window.info.sys_id
-                    && let Some(write) = self.tx_store.get(&wsid)
-                {
+                if semantic {
                     let target = presentation.target_frame(base_frame, fixed, scale);
                     let target = bound.map_or(target, |bounds| bounds.apply(target));
                     if control.as_ref().is_none_or(|control| !control.frames.contains_key(&wid))
-                        && write.refused(target, window.actual())
+                        && self.tx_store.refused(window, target)
                     {
                         covered.insert(wid);
                         return None;
@@ -1121,8 +1118,7 @@ impl AnimationManager {
             let actual = window.actual();
             let window_server_id = window.info.sys_id;
             let transactions = &reactor.tx_store;
-            let write = window_server_id.and_then(|id| transactions.get(&id)).unwrap_or_default();
-            if write.covers(target_frame, actual) {
+            if transactions.covers(window, target_frame) {
                 continue;
             }
             // Queued writes apply in order, so animate on from where the window
@@ -1216,9 +1212,7 @@ impl AnimationManager {
             };
             let target_frame = target_frame.round();
             let actual = window.actual();
-            let write =
-                window.info.sys_id.and_then(|id| reactor.tx_store.get(&id)).unwrap_or_default();
-            if !force_frames && write.covers(target_frame, actual) {
+            if !force_frames && reactor.tx_store.covers(window, target_frame) {
                 trace!(?wid, ?target_frame, "Skipping redundant instant layout request");
                 continue;
             }
@@ -1226,7 +1220,7 @@ impl AnimationManager {
             trace!(?wid, ?actual, ?target_frame, "Instant workspace positioning");
 
             let size_unchanged = !force_frames
-                && write.target().is_none()
+                && window.info.sys_id.and_then(|id| reactor.tx_store.target(&id)).is_none()
                 && actual.rect().size.same_as(target_frame.size);
             let (frames, positions) = per_app
                 .entry((wid.pid, constrained))

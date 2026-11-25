@@ -1171,7 +1171,7 @@ impl State {
     fn frame_write_is_current(&self, server: Option<WindowServerId>, txid: TransactionId) -> bool {
         server
             .and_then(|id| self.tx_store.as_ref()?.get(&id))
-            .is_none_or(|record| record.txid == txid)
+            .is_none_or(|record| record.txid() == txid)
     }
 
     fn some_txid(txid: TransactionId) -> Option<TransactionId> {

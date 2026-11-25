@@ -36,7 +36,7 @@ pub fn frame_change_needs_layout(
 
     if requested {
         if let (Some(seen), Some(record)) = (last_seen, record)
-            && seen != record.txid
+            && seen != record.txid()
         {
             return false;
         }
@@ -67,7 +67,7 @@ pub fn frame_change_needs_layout(
         if *mouse_state != Some(MouseState::Down) && last_seen.is_some() {
             // Native notifications can describe an intermediate AX frame. Only
             // the app's readback completes a write.
-            if last_seen == Some(record.txid) {
+            if last_seen == Some(record.txid()) {
                 window.record_actual(new_frame);
             }
             return false;
