@@ -333,37 +333,26 @@ impl Dispatcher {
                     return;
                 };
                 let wsid = WindowServerId::new(window_id);
-                let found = WindowIterator::new(&[wsid]).and_then(|query| {
-                    query.advance().map(|window| (window.bounds(), window.pid()))
-                });
-                // The window query can miss a window an app is dragging (Chrome's torn-out tab
-                // before AX reports it); its bounds and owner still answer directly.
-                let (bounds, pid) = match found {
-                    Some(found) => found,
-                    None => match window_server::window_bounds_and_pid(wsid) {
-                        Some(found) => {
-                            debug!(?wsid, bounds = ?found.0, "move of a window the query cannot see");
-                            found
-                        }
-                        None => {
-                            debug!(?wsid, "move dropped: the window has no bounds or owner");
-                            return;
-                        }
-                    },
+                if let Some(query) = WindowIterator::new(&[wsid]) {
+                    if query.advance().is_none() {
+                        return;
+                    }
+                    let bounds = query.bounds();
+                    let pid = query.pid();
+                    if let Some(idx) = NonZeroU32::new(window_id) {
+                        let last_seen = tx_store
+                            .as_ref()
+                            .and_then(|store| store.get(&wsid))
+                            .map(|record| record.txid);
+                        events_tx.send(Event::WindowFrameChanged(
+                            WindowId { idx, pid },
+                            bounds,
+                            last_seen,
+                            Requested(false),
+                            mouse_state,
+                        ));
+                    }
                 };
-                if let Some(idx) = NonZeroU32::new(window_id) {
-                    let last_seen = tx_store
-                        .as_ref()
-                        .and_then(|store| store.get(&wsid))
-                        .map(|record| record.txid);
-                    events_tx.send(Event::WindowFrameChanged(
-                        WindowId { idx, pid },
-                        bounds,
-                        last_seen,
-                        Requested(false),
-                        mouse_state,
-                    ));
-                }
             }
             _ => {}
         }
