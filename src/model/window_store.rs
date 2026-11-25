@@ -88,8 +88,8 @@ pub enum ClaimHolder {
     Press,
     /// A window dragged under the press and released over a drop before AX reported it: it
     /// lands on that drop when AX reports it, or is retired when the WindowServer reports it
-    /// destroyed. If both reports are missed, the stateless record and this claim stay: the
-    /// window holds no slot and is never drawn, and nothing else retires it.
+    /// destroyed or, that report missed, at the next release once the WindowServer no longer
+    /// has the window.
     Landing(crate::model::drag::DragCommit),
 }
 

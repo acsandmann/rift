@@ -3948,6 +3948,35 @@ fn a_window_without_ax_facts_survives_moves_and_window_list_refreshes() {
 
 /// Only the dragged window waits with a drop. Another the press held, never dragged, loses its
 /// claim at the release and joins normally when AX reports it.
+/// A window released over a drop before AX reported it waits to land. If its destroy is missed
+/// and AX never reports it, the next release retires the claim once the WindowServer no longer
+/// has the window; one the WindowServer still has keeps waiting.
+#[test]
+fn a_landing_whose_window_is_gone_is_retired_at_the_next_release() {
+    use crate::model::window_store::ClaimHolder;
+    for gone in [true, false] {
+        let mut drag = silent_drag_under_held_button();
+        drag.appears(20_001);
+        drag.moves(20_001, 200.);
+        drag.pointer_at(WEST_EDGE);
+        drag.release();
+        assert!(matches!(drag.holder(20_001), Some(ClaimHolder::Landing(_))));
+        if gone {
+            window_server::forget_direct_window_for_test(WindowServerId::new(20_001));
+        }
+
+        crate::sys::event::TEST_MOUSE_STATE.with(|state| state.set(Some(MouseState::Down)));
+        drag.appears(20_009);
+        drag.release();
+        if gone {
+            assert!(drag.holder(20_001).is_none(), "the claim outlived its window");
+            assert!(drag.reactor.state.windows.record(SilentDrag::wid(20_001)).is_none());
+        } else {
+            assert!(matches!(drag.holder(20_001), Some(ClaimHolder::Landing(_))));
+        }
+    }
+}
+
 #[test]
 fn a_held_window_that_was_not_dragged_joins_normally_when_ax_reports_it() {
     use crate::model::window_store::ClaimHolder;

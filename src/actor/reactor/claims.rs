@@ -4,11 +4,13 @@
 //! presentation and focus effects.
 
 use rift_protocol::WindowClaimFlags;
+use tracing::debug;
 
 use super::{Changes, LayoutEvent, Reactor};
 use crate::actor::app::WindowId;
 use crate::layout_engine::systems::{LayoutSystem, WindowChange};
 use crate::model::window_store::{ClaimHolder, ClaimOwner};
+use crate::sys::window_server::DirectWindow;
 
 const OWNED_ELSEWHERE: &str = "Window owned by another external manager";
 
@@ -82,6 +84,20 @@ impl Reactor {
         changes: &mut Changes,
         mut commit: Option<crate::actor::drag::DragCommit>,
     ) -> Option<crate::actor::drag::DragCommit> {
+        // A landing from an earlier press whose window the WindowServer no longer has will never
+        // land (its destroy was missed): retire it, so no claim outlives its window.
+        for window in self.state.windows.owner_claims(ClaimOwner::Landing).to_vec() {
+            let gone = self
+                .state
+                .windows
+                .record(window)
+                .and_then(|record| record.window_server_id())
+                .is_none_or(|wsid| DirectWindow(wsid).bounds().is_none());
+            if gone {
+                debug!(?window, "press-arrival: landing retired, its window is gone");
+                self.retire_window(changes, window);
+            }
+        }
         let mut reported = Vec::new();
         for window in self.state.windows.owner_claims(ClaimOwner::Press).to_vec() {
             if self.state.windows.contains_window(window) {

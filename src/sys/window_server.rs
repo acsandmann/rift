@@ -622,6 +622,12 @@ pub fn set_direct_window_for_test(id: WindowServerId, frame: CGRect, pid: pid_t,
     TEST_DIRECT_WINDOWS.with(|windows| windows.borrow_mut().insert(id, (frame, pid, level)));
 }
 
+/// Tests: the WindowServer no longer has `id`.
+#[cfg(test)]
+pub fn forget_direct_window_for_test(id: WindowServerId) {
+    TEST_DIRECT_WINDOWS.with(|windows| windows.borrow_mut().remove(&id));
+}
+
 #[cfg(test)]
 impl DirectWindow {
     fn answer(self) -> Option<(CGRect, pid_t, i32)> {
