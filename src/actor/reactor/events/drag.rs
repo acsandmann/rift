@@ -1,4 +1,4 @@
-use tracing::trace;
+use tracing::{debug, trace};
 
 use super::super::{Changes, Presentation, Reactor};
 use crate::actor::reactor::managers::LayoutManager;
@@ -56,6 +56,12 @@ impl Reactor {
     ) -> Option<crate::actor::drag::DragCommit> {
         let commit = self.drag_manager.actor.finish(button)?;
         self.drag_manager.release_preview();
+        debug!(
+            source = ?commit.source.window,
+            origin = ?commit.source.origin,
+            target = ?commit.target.map(|target| (target.intent.window, target.intent.action)),
+            "drag ended"
+        );
         Some(commit)
     }
 
@@ -64,6 +70,12 @@ impl Reactor {
         changes: &mut Changes,
         commit: crate::actor::drag::DragCommit,
     ) {
+        debug!(
+            source = ?commit.source.window,
+            target = ?commit.target.map(|target| (target.intent.window, target.intent.action)),
+            blocked = self.refreshes_blocked(),
+            "drag landing"
+        );
         if self.refreshes_blocked() {
             return;
         }

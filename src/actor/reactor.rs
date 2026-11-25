@@ -1089,6 +1089,7 @@ impl Reactor {
         };
         let kind = crate::actor::drag::DragKind::native(origin_frame, last_frame);
         let scene = self.move_drag_scene(&source, kind).unwrap_or_default();
+        debug!(?window, origin = ?source.origin, ?kind, "drag started");
         self.drag_manager.actor.begin_native(source, scene);
     }
 
@@ -2120,6 +2121,7 @@ impl Reactor {
                 let scene = self
                     .move_drag_scene(&source, crate::actor::drag::DragKind::ModifierMove)
                     .unwrap_or_default();
+                debug!(?window, origin = ?source.origin, ?button, "modifier drag started");
                 self.drag_manager.actor.begin_modifier(source, button, point, action, scene);
                 self.drag_manager.sync_preview();
                 return Ok(());
