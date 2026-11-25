@@ -102,17 +102,18 @@ impl Reactor {
     /// windows it held return (one dragged before AX reported it waits with its drop), the drag
     /// lands, and the layout it held back reaches the screen, all in this one reconciliation.
     /// The drag ends before the windows return because reconciliation leaves a drag's source
-    /// alone.
-    pub(super) fn release(&mut self, changes: &mut Changes, button: MouseButton) {
+    /// alone. Returns whether the release finishes things: under Mission Control, or during a
+    /// drag another button owns, it touches no drag (and the caller no focus).
+    pub(super) fn release(&mut self, changes: &mut Changes, button: MouseButton) -> bool {
+        let finishes = !self.is_mission_control_active()
+            && (!self.is_in_drag() || self.drag_manager.actor.owns_button(button));
         let press = match std::mem::take(&mut self.pointer) {
             Pointer::Down(press) if press.button == button => press,
             other => {
                 self.pointer = other;
-                return;
+                return finishes;
             }
         };
-        let finishes = !self.is_mission_control_active()
-            && (!self.is_in_drag() || self.drag_manager.actor.owns_button(button));
         let mut commit = finishes.then(|| self.end_drag(button)).flatten();
         if button == MouseButton::Left {
             commit = self.release_press(changes, commit);
@@ -127,6 +128,7 @@ impl Reactor {
             debug!(windows = ?press.arrivals, "press-arrival: released");
             changes.refresh_notifications = true;
         }
+        finishes
     }
 
     /// One press can see many windows arrive and be dragged in turn: an app that moves a

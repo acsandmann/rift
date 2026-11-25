@@ -196,6 +196,17 @@ impl DragActor {
         }
     }
 
+    /// Where `intent` lands, when it is one of the scene's slots (a window bringing a new tile).
+    pub fn slot_area(&self, intent: DropIntent) -> Option<CGRect> {
+        let session = self.session.as_ref()?;
+        session.scene.slots.iter().find_map(|slot| {
+            (slot.intent.window == intent.window
+                && slot.intent.zone == intent.zone
+                && slot.intent.action == intent.action)
+                .then_some(slot.area)
+        })
+    }
+
     pub fn set_preview(&mut self, intent: DropIntent, preview_area: Option<CGRect>) -> bool {
         let Some(session) = &mut self.session else {
             return false;

@@ -2789,12 +2789,8 @@ impl Reactor {
         changes: &mut Changes,
         button: crate::actor::drag::MouseButton,
     ) {
-        // Under Mission Control, or during a drag another button owns, the release touches no
-        // drag and no focus. The press still ends.
-        let finishes = !self.is_mission_control_active()
-            && (!self.is_in_drag() || self.drag_manager.actor.owns_button(button));
-        self.release(changes, button);
-        if finishes
+        // The press ends; the release may touch no drag and so no focus (see `release`).
+        if self.release(changes, button)
             && let Some(window) = self.window_id_under_cursor()
             && let Some(space) = self
                 .assigned_space_for_window_id(window)
@@ -4515,6 +4511,11 @@ impl Reactor {
                 && !matches!(intent.action, crate::layout_engine::WindowDropAction::Move(_))
             {
                 self.drag_manager.actor.set_preview(intent, Some(source.origin_frame));
+                break;
+            }
+            // A window bringing a new tile picked a drop whose landing its scene already holds.
+            if let Some(area) = self.drag_manager.actor.slot_area(intent) {
+                self.drag_manager.actor.set_preview(intent, Some(area));
                 break;
             }
             let preview = loop {
