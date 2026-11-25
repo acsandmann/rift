@@ -269,9 +269,9 @@ impl Reactor {
         observed
     }
 
-    /// The WindowServer moved a window under the held button before AX reported it. Record its
-    /// native identity and frame, with no AX state, and claim it for the press, so its frame
-    /// changes can drive a drag. AX fills the record in when it reports the window.
+    /// A window that appeared under the held button took focus before AX reported it. Record
+    /// its native identity and frame, with no AX state, and claim it for the press, so the
+    /// pointer can drive its drag. AX fills the record in when it reports the window.
     pub(super) fn arrive_under_press(
         &mut self,
         changes: &mut Changes,
@@ -293,30 +293,6 @@ impl Reactor {
         });
         self.state.windows.insert_claim(wid, ClaimHolder::Press);
         changes.refresh_notifications = true;
-    }
-
-    /// A move of a window the press holds that AX has not reported: the WindowServer's frame is
-    /// the only one it has, and the move updates or starts its drag.
-    pub(super) fn move_unreported(&mut self, changes: &mut Changes, wid: WindowId, frame: CGRect) {
-        let wsid = WindowServerId::new(wid.idx.get());
-        let Some(mut info) = self.state.windows.get_window_server_info(wsid) else {
-            return;
-        };
-        let previous = std::mem::replace(&mut info.frame, frame);
-        self.state.windows.track_window_server_info(info);
-        if self.drag_manager.actor.update_native(wid, frame) {
-            self.drag_manager.sync_preview();
-        } else if !previous.same_as(frame)
-            && let Some(origin) = {
-                self.observe_button(changes);
-                self.hand_over_arriving_drag(changes, wid);
-                self.native_drag_origin(wid, frame)
-            }
-        {
-            let space = self.geometry_space_for_window(&previous, Some(wsid));
-            let current = self.geometry_space_for_window(&frame, Some(wsid));
-            self.begin_native_drag(wid, previous, frame, space, current, origin);
-        }
     }
 
     pub(super) fn observe_window_minimization(

@@ -1,6 +1,7 @@
 //! The mouse button as the reactor sees it. While a button is held, layout reaches the screen
 //! only at the release (#689).
 
+use objc2_core_foundation::{CGPoint, CGRect, CGSize};
 use tracing::debug;
 
 use super::{Changes, Presentation, Reactor};
@@ -9,7 +10,7 @@ use crate::actor::drag::{DragOrigin, MouseButton};
 use crate::common::collections::HashSet;
 use crate::model::window_store::{ClaimHolder, ClaimOwner};
 use crate::sys::screen::SpaceId;
-use crate::sys::window_server::WindowServerId;
+use crate::sys::window_server::{self, WindowServerId};
 
 /// Whether a button is held. Nothing waits for the screen without a press.
 #[derive(Default)]
@@ -22,10 +23,13 @@ pub(super) enum Pointer {
 /// A held button, and what waits for its release.
 pub(super) struct Press {
     pub(super) button: MouseButton,
-    /// Native windows that appeared under the left button and have no record yet, subscribed
-    /// for WindowServer moves: AX can stay silent while an app runs its own drag. The first
-    /// move records and claims each one (`arrive_under_press`).
+    /// Native windows that appeared under the left button. AX can stay silent about them
+    /// while an app runs its own drag, and the WindowServer reports no moves, so the one that
+    /// takes focus is recorded from that (`follow_focused_arrival`).
     pub(super) arrivals: HashSet<WindowServerId>,
+    /// The arrival that took focus: the window following the cursor (a torn-out tab). The
+    /// next pointer sample starts its drag.
+    pub(super) following: Option<WindowId>,
     /// Layouts made while the button is held, not yet on screen.
     pub(super) held_layout: HeldLayout,
 }
@@ -35,6 +39,7 @@ impl Press {
         Press {
             button,
             arrivals: HashSet::default(),
+            following: None,
             held_layout: HeldLayout::default(),
         }
     }
@@ -142,6 +147,57 @@ impl Reactor {
             debug!(from = ?source.window, to = ?window, "drag handed over");
             self.cancel_drag(changes);
         }
+    }
+
+    /// A window that appeared under the press took focus: it is the one following the cursor.
+    /// Record it (AX may not have reported it) and claim it, so the pointer can drag it.
+    pub(super) fn follow_focused_arrival(&mut self, changes: &mut Changes, window: WindowId) {
+        let wsid = WindowServerId::new(window.idx.get());
+        let Pointer::Down(press) = &mut self.pointer else {
+            return;
+        };
+        if !press.arrivals.contains(&wsid) || press.following == Some(window) {
+            return;
+        }
+        press.following = Some(window);
+        debug!(?window, "press-arrival: follows the cursor");
+        if self.state.windows.tracked_window_id(wsid).is_none() {
+            let frame = window_server::window_bounds_and_pid(wsid)
+                .map_or(CGRect::default(), |(frame, _)| frame);
+            self.arrive_under_press(changes, window, frame);
+        }
+    }
+
+    /// Whether the pointer's samples are wanted for the window following the cursor.
+    pub(super) fn follower_awaits_drag(&self) -> bool {
+        matches!(&self.pointer, Pointer::Down(press)
+            if press.following.is_some_and(|window| !self.is_dragging_window(window)))
+    }
+
+    /// The pointer moved under the press: the window following the cursor gets the drag, from
+    /// this first sample, whatever the app and the WindowServer have reported of it.
+    pub(super) fn drag_follower(&mut self, changes: &mut Changes, point: CGPoint) {
+        let Pointer::Down(press) = &self.pointer else {
+            return;
+        };
+        let Some(window) = press.following else {
+            return;
+        };
+        if self.is_dragging_window(window) {
+            return;
+        }
+        self.hand_over_arriving_drag(changes, window);
+        let wsid = WindowServerId::new(window.idx.get());
+        // Its live bounds when the WindowServer answers; otherwise where the pointer holds it.
+        let frame = window_server::window_bounds_and_pid(wsid)
+            .map(|(frame, _)| frame)
+            .filter(|frame| crate::actor::drag::contains(*frame, point, 12.0))
+            .unwrap_or_else(|| CGRect::new(point, CGSize::new(1., 1.)));
+        let Some(origin) = self.native_drag_origin(window, frame) else {
+            return;
+        };
+        let space = self.screen_for_point(point).and_then(|screen| screen.space);
+        self.begin_native_drag(window, frame, frame, space, space, origin);
     }
 
     /// Press claims and drags exist only under a press.

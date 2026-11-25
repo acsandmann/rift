@@ -48,13 +48,17 @@ pub struct DragManager {
     pub native_motion_active: Arc<AtomicBool>,
     pub(super) preview: Option<crate::ui::drag_preview::DragPreview>,
     pub(super) preview_enabled: bool,
+    /// The press has a window following the cursor that is not dragged yet: the pointer's
+    /// samples are wanted to start its drag.
+    pub(super) follower_awaits_drag: bool,
     pub(super) haptics_enabled: bool,
 }
 
 impl DragManager {
     pub fn sync_motion_gate(&self) {
         let active = self.actor.drop_enabled()
-            && self.actor.kind() == Some(crate::actor::drag::DragKind::NativeMove);
+            && (self.actor.kind() == Some(crate::actor::drag::DragKind::NativeMove)
+                || self.follower_awaits_drag);
         if self.native_motion_active.load(Ordering::Relaxed) != active {
             self.native_motion_active.store(active, Ordering::Release);
         }

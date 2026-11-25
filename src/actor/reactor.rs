@@ -512,6 +512,7 @@ impl Reactor {
                 preview: None,
                 preview_enabled: config.settings.drag_drop.enabled
                     && config.settings.drag_drop.preview,
+                follower_awaits_drag: false,
                 haptics_enabled: config.settings.drag_drop.haptics_enabled,
             },
             workspace_switch_manager: managers::WorkspaceSwitchManager {
@@ -1162,7 +1163,7 @@ impl Reactor {
             Event::DragMotionPending(publisher) => {
                 let motion = publisher.take_latest();
                 let mut reactor = reactor.borrow_mut();
-                if reactor.drag_manager.actor.is_active()
+                if (reactor.drag_manager.actor.is_active() || reactor.follower_awaits_drag())
                     && let Some(motion) = motion
                 {
                     reactor.handle_loop_event(Event::DragMotion(motion));
@@ -1434,6 +1435,7 @@ impl Reactor {
         {
             let _ = tx.send(());
         }
+        self.drag_manager.follower_awaits_drag = self.follower_awaits_drag();
         self.drag_manager.sync_motion_gate();
     }
 
@@ -1628,6 +1630,7 @@ impl Reactor {
                 return Ok(());
             }
             Event::WindowServerFocusChanged(window, reported_space) => {
+                self.follow_focused_arrival(changes, window);
                 if self.window_needs_inventory(window) {
                     // Recover stale admission before the cached-layout-focus
                     // fast path as well, without rescanning excluded windows.
@@ -1779,6 +1782,11 @@ impl Reactor {
             }
             Event::WindowServerDestroyed(wsid, sid, kind) => {
                 if let Pointer::Down(press) = &mut self.pointer
+                    && press.following.is_some_and(|window| window.idx.get() == wsid.as_u32())
+                {
+                    press.following = None;
+                }
+                if let Pointer::Down(press) = &mut self.pointer
                     && press.arrivals.remove(&wsid)
                 {
                     debug!(?wsid, "press-arrival: destroyed");
@@ -1892,20 +1900,6 @@ impl Reactor {
                 return Ok(());
             }
             Event::WindowFrameChanged(wid, new_frame, last_seen, requested, mouse_state) => {
-                let wsid = WindowServerId::new(wid.idx.get());
-                if matches!(&self.pointer, Pointer::Down(press) if press.arrivals.contains(&wsid))
-                    && self.state.windows.tracked_window_id(wsid).is_none()
-                    && self.observe_button(changes)
-                {
-                    // The first move records the window; a later one can start its drag.
-                    self.arrive_under_press(changes, wid, new_frame);
-                    return Ok(());
-                }
-                // A held window AX has not reported has only its WindowServer frame.
-                if self.state.windows.is_claimed(wid) && !self.state.windows.contains_window(wid) {
-                    self.move_unreported(changes, wid, new_frame);
-                    return Ok(());
-                }
                 if self.is_mission_control_active() {
                     return Ok(());
                 }
@@ -2065,6 +2059,7 @@ impl Reactor {
                 return Ok(());
             }
             Event::DragMotion(motion) => {
+                self.drag_follower(changes, motion.point);
                 // The display under the pointer is where a move drops, for native drags too:
                 // macOS puts a dragged window on the pointer's display while most of its frame
                 // can still be on the old one. Entering a display swaps in its scene.
@@ -3089,10 +3084,6 @@ impl Reactor {
                 .windows
                 .iter_tracked_window_server_ids()
                 .chain(self.transient_focus.windows.keys().copied())
-                .chain(match &self.pointer {
-                    Pointer::Down(press) => press.arrivals.iter().copied().collect(),
-                    Pointer::Up => Vec::new(),
-                })
                 .map(|wsid| wsid.as_u32())
                 .collect();
             ids.sort_unstable();

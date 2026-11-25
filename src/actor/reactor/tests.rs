@@ -3190,21 +3190,27 @@ impl SilentDrag {
         );
     }
 
-    /// A WindowServer move notification, with the cursor on the window as Chrome drags it.
+    /// The window takes focus: the WindowServer's key window is now the one following the
+    /// cursor. The WindowServer reports no moves, and AX may stay silent.
+    fn takes_focus(&mut self, idx: u32) {
+        let space = self.space;
+        self.reactor
+            .handle_event(Event::WindowServerFocusChanged(Self::wid(idx), space));
+    }
+
+    /// The pointer drags the window: it takes focus if it had not, then the pointer moves on it.
     fn moves(&mut self, idx: u32, x: f64) {
         self.moves_to(idx, CGRect::new(CGPoint::new(x, 200.), CGSize::new(500., 500.)));
     }
 
     fn moves_to(&mut self, idx: u32, frame: CGRect) {
+        let following = matches!(&self.reactor.pointer, Pointer::Down(press)
+            if press.following == Some(Self::wid(idx)));
+        if !following {
+            self.takes_focus(idx);
+        }
         window_server::set_cursor_location_override(Some(frame.mid()));
-        let event = Event::WindowFrameChanged(
-            Self::wid(idx),
-            frame,
-            None,
-            Requested(false),
-            Some(MouseState::Down),
-        );
-        self.reactor.handle_event(event);
+        self.pointer_at(frame.mid());
         window_server::set_cursor_location_override(None);
     }
 
@@ -3225,10 +3231,9 @@ impl SilentDrag {
             .state
             .windows
             .get_window_server_info(WindowServerId::new(idx))
-            .map_or(
-                CGRect::new(CGPoint::new(200., 200.), CGSize::new(500., 500.)),
-                |info| info.frame,
-            );
+            .map(|info| info.frame)
+            .filter(|frame| frame.size.width > 0. && frame.size.height > 0.)
+            .unwrap_or(CGRect::new(CGPoint::new(200., 200.), CGSize::new(500., 500.)));
         let info = make_window_info(frame, Some(WindowServerId::new(idx)), "Detached tab", None);
         let mouse = crate::sys::event::get_mouse_state();
         self.reactor
@@ -3409,12 +3414,45 @@ fn a_layout_command_during_a_press_reaches_the_screen_at_the_release() {
     );
 }
 
+/// Targets show from the first pointer movement after the tear: the window that took focus is
+/// dragged from that sample on, with no frame report from AX or the WindowServer at all.
+#[test]
+fn a_torn_tab_shows_targets_from_the_first_pointer_sample() {
+    let mut drag = silent_drag_under_held_button();
+    drag.appears(20_001);
+    drag.takes_focus(20_001);
+    window_server::set_cursor_location_override(Some(WEST_EDGE));
+    drag.pointer_at(WEST_EDGE);
+    window_server::set_cursor_location_override(None);
+    assert!(drag.reactor.is_dragging_window(SilentDrag::wid(20_001)));
+    let target = drag
+        .reactor
+        .drag_manager
+        .actor
+        .preview_target()
+        .expect("no target on the first sample");
+    assert_eq!(target.intent.window, WindowId::new(1, 1));
+}
+
+/// A window that appears under the press but never takes focus (a helper window of the app)
+/// is never recorded or dragged.
+#[test]
+fn a_window_that_never_takes_focus_is_not_dragged() {
+    let mut drag = silent_drag_under_held_button();
+    drag.appears(20_009);
+    drag.pointer_at(WEST_EDGE);
+    assert!(!drag.reactor.is_in_drag());
+    assert!(drag.reactor.state.windows.record(SilentDrag::wid(20_009)).is_none());
+    drag.release();
+    assert_eq!(drag.tiles(), [WindowId::new(1, 1)]);
+}
+
 #[test]
 fn a_window_only_the_window_server_reports_is_held_and_becomes_a_rift_drag() {
     use crate::model::window_store::ClaimHolder;
     let mut drag = silent_drag_under_held_button();
     drag.appears(20_001);
-    drag.moves(20_001, 200.);
+    drag.takes_focus(20_001);
     assert!(matches!(drag.holder(20_001), Some(ClaimHolder::Press)));
     assert!(
         !drag.reactor.state.windows.contains_window(SilentDrag::wid(20_001)),
@@ -3423,6 +3461,13 @@ fn a_window_only_the_window_server_reports_is_held_and_becomes_a_rift_drag() {
     assert!(
         !drag.reactor.is_in_drag(),
         "recording the window alone must not start a drag"
+    );
+    assert!(
+        drag.reactor
+            .drag_manager
+            .native_motion_active
+            .load(std::sync::atomic::Ordering::Acquire),
+        "the press wants the pointer's samples for the window following the cursor"
     );
 
     drag.moves(20_001, 240.);
@@ -3471,8 +3516,9 @@ fn a_window_ax_reports_only_after_the_release_lands_on_its_drop_then() {
     drag.assert_placed_once(20_001);
 }
 
-/// A window only the WindowServer has reported has no AX facts. Its moves still drive its drag,
-/// and a window-list refresh that does not list it (AX has not reported it yet) leaves it held.
+/// A window only the WindowServer has reported has no AX facts. The pointer still drives its
+/// drag, and a window-list refresh that does not list it (AX has not reported it yet) leaves it
+/// held.
 #[test]
 fn a_window_without_ax_facts_survives_moves_and_window_list_refreshes() {
     use crate::model::window_store::ClaimHolder;
@@ -3483,8 +3529,6 @@ fn a_window_without_ax_facts_survives_moves_and_window_list_refreshes() {
         drag.moves(20_001, x);
     }
     assert!(drag.reactor.is_dragging_window(wid));
-    let frame = drag.reactor.state.windows.get_window_server_info(WindowServerId::new(20_001));
-    assert_eq!(frame.map(|info| info.frame.origin.x), Some(320.));
 
     drag.reactor.discover_test_windows(1, Vec::new(), vec![WindowId::new(1, 1)]);
     assert!(matches!(drag.holder(20_001), Some(ClaimHolder::Press)));
