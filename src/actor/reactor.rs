@@ -2946,7 +2946,10 @@ impl Reactor {
         }
         // A press with no drag ends when the button reads up: a release the tap missed (or
         // after a drag that was cancelled) heals here, in the press's one transition.
-        if matches!(self.pointer, Pointer::Down(_)) {
+        // While a press is down, a release the tap missed (or one after a cancelled drag) heals
+        // here. With the pointer up, layout about to reach the screen asks whether a button is
+        // held: a window that disappears under it starts the press that holds its reflow back.
+        if matches!(self.pointer, Pointer::Down(_)) || changes.has_layouts() {
             self.observe_button(&mut changes);
         }
         let dragging = self.is_in_drag();
@@ -2963,31 +2966,26 @@ impl Reactor {
             self.pointer = Pointer::Down(Press::new(button));
         }
         if let Pointer::Down(mut press) = std::mem::take(&mut self.pointer) {
-            if dragging {
-                // The drag holds the screen back until the release.
-                changes.defer_drag_layouts(|space, policy, changed| {
-                    press.held_layout.hold(space, policy, changed)
+            // The press holds the screen back until the release. Windows that appear stay out of
+            // the layout (their claims); windows that disappear leave the model now, and only
+            // the reflow waits. During a drag, its live work (during_drag) still goes out.
+            changes.hold_layouts(dragging, |space, policy, changed| {
+                press.held_layout.hold(space, policy, changed)
+            });
+            if !blocked && changes.has_layouts() {
+                // A permitted commit covers earlier work for this space at the same
+                // or a weaker presentation policy. Keep global requests deferred.
+                press.held_layout.retain(|&(scope, policy, changed)| {
+                    let Some(space) = scope else { return true };
+                    if changes.for_space(space).presentation < Some(policy)
+                        || !self.active_spaces.contains(&space)
+                        || self.space_state.screen_by_space(space).is_none()
+                    {
+                        return true;
+                    }
+                    changes.space(space).layout_changed |= changed;
+                    false
                 });
-                if !blocked && changes.has_layouts() {
-                    // A permitted commit covers earlier work for this space at the same
-                    // or a weaker presentation policy. Keep global requests deferred.
-                    press.held_layout.retain(|&(scope, policy, changed)| {
-                        let Some(space) = scope else { return true };
-                        if changes.for_space(space).presentation < Some(policy)
-                            || !self.active_spaces.contains(&space)
-                            || self.space_state.screen_by_space(space).is_none()
-                        {
-                            return true;
-                        }
-                        changes.space(space).layout_changed |= changed;
-                        false
-                    });
-                }
-            } else if !blocked {
-                // No drag holds the screen back: what one held goes out now.
-                for (space, policy, changed) in std::mem::take(&mut press.held_layout) {
-                    changes.arrange(space, policy).layout_changed |= changed;
-                }
             }
             self.pointer = Pointer::Down(press);
         }

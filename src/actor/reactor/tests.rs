@@ -3268,6 +3268,86 @@ fn a_torn_tab_can_drop_onto_the_tile_it_was_torn_from() {
     assert!(drag.reactor.state.windows.claimed_windows().next().is_none());
 }
 
+/// Docking a window into another's tab strip: dragging its only tab, Chrome hides the window,
+/// its AX element goes stale and it is destroyed, all while the button is held. The model
+/// forgets it at once, but the other windows reflow only at the release, once.
+#[test]
+fn a_window_that_disappears_under_the_press_reflows_the_others_only_at_the_release() {
+    let mut drag = silent_drag_over(None, 2);
+    let (survivor, docked) = (WindowId::new(1, 1), WindowId::new(1, 2));
+    let wsid = drag.reactor.test_window_server_id(docked);
+
+    drag.reactor.handle_event(Event::WindowServerHidden(wsid));
+    drag.reactor.handle_event(Event::WindowDestroyed(docked));
+    assert!(
+        !drag.reactor.state.windows.contains_window(docked),
+        "the model forgets it now"
+    );
+    let held = frame_writes(&mut drag.apps);
+    assert!(
+        held.is_empty(),
+        "the others moved while the button was held: {held:?}"
+    );
+
+    drag.release();
+    assert_eq!(drag.tiles(), [survivor]);
+    let slot = test_layout(&mut drag.reactor, drag.space, SCREEN_1000)[0].1;
+    let writes: Vec<_> = frame_writes(&mut drag.apps)
+        .into_iter()
+        .filter_map(|(window, frame)| (window == survivor).then_some(frame))
+        .collect();
+    assert!(
+        !writes.is_empty() && writes.iter().all(|frame| frame.same_as(slot)),
+        "{writes:?}"
+    );
+}
+
+/// A window that leaves and comes back under the press (a drag cancelled back into place)
+/// moves nothing.
+#[test]
+fn a_window_hidden_and_shown_again_under_the_press_moves_nothing() {
+    let mut drag = silent_drag_over(None, 2);
+    let before = test_layout(&mut drag.reactor, drag.space, SCREEN_1000);
+    let wsid = drag.reactor.test_window_server_id(WindowId::new(1, 2));
+
+    drag.reactor.handle_event(Event::WindowServerHidden(wsid));
+    drag.reactor.handle_event(Event::WindowServerUnhidden(wsid));
+    drag.release();
+    for (window, frame) in frame_writes(&mut drag.apps) {
+        let (_, was) =
+            before.iter().find(|(w, _)| *w == window).expect("a window not in the layout");
+        assert!(frame.same_as(*was), "{window:?} moved to {frame:?}");
+    }
+}
+
+/// A layout command given while the button is held changes the model at once and reaches the
+/// screen at the release, as during a drag.
+#[test]
+fn a_layout_command_during_a_press_reaches_the_screen_at_the_release() {
+    let mut drag = silent_drag_over(None, 2);
+    let right = drag.tiles()[1];
+    crate::sys::event::TEST_MOUSE_STATE.with(|state| state.set(Some(MouseState::Up)));
+    drag.reactor
+        .handle_test_layout_event(LayoutEvent::WindowFocused(drag.space, right));
+    drag.apps.requests();
+    crate::sys::event::TEST_MOUSE_STATE.with(|state| state.set(Some(MouseState::Down)));
+
+    drag.reactor
+        .handle_test_layout_command(LayoutCommand::MoveNode(Direction::Left));
+    assert_eq!(drag.tiles()[0], right, "the model moves at once");
+    let held = frame_writes(&mut drag.apps);
+    assert!(
+        held.is_empty(),
+        "the screen moved while the button was held: {held:?}"
+    );
+
+    drag.release();
+    assert!(
+        !frame_writes(&mut drag.apps).is_empty(),
+        "the release puts the move on screen"
+    );
+}
+
 #[test]
 fn a_window_only_the_window_server_reports_is_held_and_becomes_a_rift_drag() {
     use crate::model::window_store::ClaimHolder;
