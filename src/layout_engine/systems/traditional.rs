@@ -718,6 +718,7 @@ mod tests {
     use objc2_core_foundation::{CGPoint, CGRect, CGSize};
 
     use super::*;
+    use crate::common::config::StackDefaultOrientation;
     use crate::layout_engine::{Direction, LayoutKind, Orientation};
 
     fn w(idx: u32) -> WindowId { WindowId::new(1, idx) }
@@ -725,8 +726,6 @@ mod tests {
     /// A layout whose root lies along `axis`, holding `order`'s windows, with window 1 and the
     /// window after it joined and stacked.
     fn stacked_pair(axis: Orientation, order: &[WindowId]) -> (TraditionalLayoutSystem, LayoutId) {
-        use crate::common::config::StackDefaultOrientation;
-
         let mut system = TraditionalLayoutSystem::default();
         let layout = system.create_layout();
         let root = system.tiles.root(layout);
@@ -1038,8 +1037,6 @@ mod tests {
 
     #[test]
     fn a_new_window_nests_beside_the_selection_in_a_crowded_split_but_not_in_a_stack() {
-        use crate::common::config::StackDefaultOrientation;
-
         let mut system = TraditionalLayoutSystem::default();
         let layout = system.create_layout();
         for window in [w(1), w(2), w(3), w(4)] {
@@ -1071,8 +1068,6 @@ mod tests {
 
     #[test]
     fn toggling_orientation_rotates_a_split_but_leaves_a_stack_alone() {
-        use crate::common::config::StackDefaultOrientation;
-
         let mut system = TraditionalLayoutSystem::default();
         let layout = system.create_layout();
         for window in [w(1), w(2)] {
@@ -1095,8 +1090,6 @@ mod tests {
 
     #[test]
     fn a_stacks_members_are_its_own_windows_not_those_nested_in_a_tab() {
-        use crate::common::config::StackDefaultOrientation;
-
         // Window 3 sits in a split that is itself a tab of the stack.
         let mut system = TraditionalLayoutSystem::default();
         let layout = system.create_layout();
