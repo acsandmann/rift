@@ -82,11 +82,14 @@ pub enum ClaimHolder {
         /// The id the session claimed; release accepts it across AX identity changes.
         original: WindowId,
     },
-    /// The held left button. Until AX reports the window, its record has no AX state: only
-    /// the WindowServer has seen it (an app in its own drag loop can withhold AX).
+    /// The held left button. Whether AX has reported the window is the record's own fact (it
+    /// has AX state or not; only the WindowServer may have seen it, since an app in its own
+    /// drag loop can withhold AX), so the release asks the record, not the claim.
     Press,
     /// A window dragged under the press and released over a drop before AX reported it: it
-    /// lands on that drop when AX reports it.
+    /// lands on that drop when AX reports it, or is retired when the WindowServer reports it
+    /// destroyed. If both reports are missed, the stateless record and this claim stay: the
+    /// window holds no slot and is never drawn, and nothing else retires it.
     Landing(crate::model::drag::DragCommit),
 }
 
