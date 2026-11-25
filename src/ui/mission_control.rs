@@ -3199,15 +3199,13 @@ impl OverviewSession {
                 }
             }
             let ready = self.displays.iter().all(|d| {
-                d.windows.is_empty()
-                    || d.captures.as_ref().is_none_or(|_| {
-                        d.windows.iter().any(|w| {
-                            intersects(
-                                d.camera.frame(w.world),
-                                CGRect::new(CGPoint::ZERO, d.bounds.size),
-                            ) && w.preview.has_frame()
-                        })
-                    })
+                let view = CGRect::new(CGPoint::ZERO, d.bounds.size);
+                let mut shown =
+                    d.windows.iter().filter(|w| intersects(d.camera.frame(w.world), view));
+                // No window on screen: nothing to wait for.
+                d.captures.is_none()
+                    || shown.clone().next().is_none()
+                    || shown.any(|w| w.preview.has_frame())
             });
             // Wallpaper capture must never delay the opening transition.
             if ready || now.duration_since(start) > Duration::from_secs(2) {
