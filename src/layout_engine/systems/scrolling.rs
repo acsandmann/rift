@@ -1234,32 +1234,28 @@ impl LayoutState {
         }
     }
 
-    /// A bookmarked column that is dormant has no geometry: its bookmark waits
-    /// for readmission, and the settle that follows keeps the view in bounds.
-    fn apply_restored_view(&mut self) {
-        let (Some(bookmark), Some(geometry)) = (&self.camera.restored_view, &self.geometry) else {
-            return;
-        };
-        if let Some(column) = geometry.column(bookmark.column) {
-            let offset = self.camera.viewport.offset();
-            self.camera.viewport.rebase(column.world_x + bookmark.relative_offset - offset);
-            self.camera.restored_view = None;
-        } else if !self.arrangement.columns.iter().any(|column| column.id == bookmark.column) {
-            self.camera.restored_view = None;
-        }
-    }
-
     /// Every geometry change, whether an edit, a screen or gap change or new
     /// constraints, goes through here, so none can skip settling the viewport.
-    /// `anchor` is a column that keeps its place on screen, with its old world x.
-    fn set_geometry(&mut self, geometry: Geometry, anchor: Option<(ColumnId, f64)>) {
-        if let Some((id, old_x)) = anchor
-            && let Some(new) = geometry.column(id)
+    ///
+    /// One bookmarked column keeps its place on screen: the restored view when
+    /// its column is in the new geometry, otherwise `hold`. A restored view whose
+    /// column is dormant has no geometry: it waits for readmission, and the
+    /// settle keeps the view in bounds meanwhile.
+    fn set_geometry(&mut self, geometry: Geometry, hold: Option<ViewBookmark>) {
+        let restored = self.camera.restored_view.take();
+        let (restored, dormant) = match restored {
+            Some(b) if geometry.column(b.column).is_some() => (Some(b), None),
+            Some(b) if self.arrangement.columns.iter().any(|c| c.id == b.column) => (None, Some(b)),
+            _ => (None, None),
+        };
+        if let Some(bookmark) = restored.or(hold)
+            && let Some(column) = geometry.column(bookmark.column)
         {
-            self.camera.viewport.rebase(new.world_x - old_x);
+            let offset = self.camera.viewport.offset();
+            self.camera.viewport.rebase(column.world_x + bookmark.relative_offset - offset);
         }
+        self.camera.restored_view = dormant;
         self.geometry = Some(geometry);
-        self.apply_restored_view();
         self.settle_viewport();
     }
 
@@ -1370,6 +1366,7 @@ impl LayoutState {
         let id = self.arrangement.columns.get(self.arrangement.active_column).map(|c| c.id);
         let old_x = id.and_then(|id| self.geometry.as_ref()?.column(id)).map(|c| c.world_x);
         let result = edit(self);
+        let offset = self.camera.viewport.offset();
         if let Some(old) = self.geometry.take() {
             let geometry = Geometry::build(
                 self,
@@ -1384,11 +1381,14 @@ impl LayoutState {
                 .and_then(|wid| self.arrangement.locate(wid))
                 .map(|(col, _)| self.arrangement.columns[col].id)
                 .or_else(|| id.filter(|id| self.arrangement.columns.iter().any(|c| c.id == *id)));
-            let anchor = match hold {
-                Hold::Selection => anchor.zip(old_x),
+            let hold = match hold {
+                Hold::Selection => anchor.zip(old_x).map(|(column, x)| ViewBookmark {
+                    column,
+                    relative_offset: offset - x,
+                }),
                 Hold::Strip => None,
             };
-            self.set_geometry(geometry, anchor);
+            self.set_geometry(geometry, hold);
         }
         if self.arrangement.columns.is_empty() {
             self.camera.viewport = Viewport::at(0.0);
