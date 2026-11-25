@@ -1,5 +1,6 @@
 use std::collections::BTreeMap;
 use std::path::PathBuf;
+use std::time::Duration;
 
 use regex::RegexBuilder;
 pub use rift_protocol::{AnimationEasing, ConfigCommand, LayoutMode, WorkspaceSelector};
@@ -498,25 +499,23 @@ pub struct Settings {
     #[setting(ignore)]
     pub animation_duration: f64,
     #[serde(default = "default_animation_fps")]
-    /// Maximum number of frames per second during a window animation.
-    // #[setting(
-    //     label = "Frame rate",
-    //     group = "general",
-    //     enabled_by = "animate",
-    //     aliases = "animation fps performance"
-    // )]
-    #[setting(ignore)]
+    /// Maximum window animation frame rate. Zero follows the display.
+    #[setting(
+        label = "Frame rate limit (0 = automatic)",
+        group = "general",
+        enabled_by = "animate",
+        aliases = "animation fps performance"
+    )]
     pub animation_fps: f64,
     #[serde(default)]
     /// The timing curve used for window animations.
-    // #[setting(
-    //     label = "Animation easing",
-    //     group = "general",
-    //     choices,
-    //     enabled_by = "animate",
-    //     aliases = "transition curve"
-    // )]
-    #[setting(ignore)]
+    #[setting(
+        label = "Animation easing",
+        group = "general",
+        choices,
+        enabled_by = "animate",
+        aliases = "transition curve"
+    )]
     pub animation_easing: AnimationEasing,
     #[serde(default = "yes")]
     /// Start Rift with automatic tiling turned off.
@@ -1615,9 +1614,12 @@ impl Settings {
             ));
         }
 
-        if self.animation_fps <= 0.0 {
+        if self.animation_fps != 0.0
+            && (!self.animation_fps.is_finite()
+                || Duration::try_from_secs_f64(self.animation_fps.recip()).is_err())
+        {
             issues.push(format!(
-                "animation_fps must be positive, got {}",
+                "animation_fps must be zero or a finite rate with a representable interval, got {}",
                 self.animation_fps
             ));
         }
@@ -1875,7 +1877,7 @@ fn default_master_stack_new_window_placement() -> MasterStackNewWindowPlacement 
 
 fn default_animation_duration() -> f64 { 0.3 }
 
-fn default_animation_fps() -> f64 { 100.0 }
+fn default_animation_fps() -> f64 { 0.0 }
 
 fn default_layout_folder() -> PathBuf { PathBuf::from("~/.config/rift/layouts") }
 

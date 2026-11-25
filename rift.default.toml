@@ -5,11 +5,12 @@
 # Animations
 # - animate: master switch for all window animations
 # - animation_duration: seconds per animation (>= 0.0, typical 0.15–0.35)
-# - animation_fps: frames per second (0.0 = display refresh rate). 60–120 recommended.
-#   ease_in_circ, ease_out_circ, ease_in_out_circ
+# - animation_fps: maximum frames per second. 0.0 follows each display’s refresh opportunities.
+# - animation_easing: ease_in_out (Rift’s original circular curve), linear, or a curve such as ease_out_cubic.
 animate = false
 animation_duration = 0.3
-animation_fps = 100.0
+animation_fps = 0.0
+animation_easing = "ease_in_out"
 
 # Space activation behavior
 # - If true, spaces start inactive (rift does not manage windows there)

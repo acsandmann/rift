@@ -12,6 +12,7 @@ use crate::actor::app::{AppThreadHandle, FrameMode, FrameSource, Request, Window
 use crate::actor::gesture::{Context, Control};
 use crate::actor::reactor::Reactor;
 use crate::common::collections::{HashMap, HashSet};
+use crate::common::config::AnimationEasing;
 use crate::layout_engine::systems::scrolling::{
     CameraSpring, PresentedViewport, ViewportPresentation,
 };
@@ -170,6 +171,7 @@ struct ActiveAnimation {
 
 #[derive(Debug)]
 pub struct Animation {
+    easing: AnimationEasing,
     interval: Duration,
     duration: Duration,
     display: u32,
@@ -217,6 +219,7 @@ pub struct CameraAnimation {
     scale: f64,
     store: WindowTxStore,
     interval: Duration,
+    next_sample: Option<Instant>,
     bound: Option<ScrollingDisplayBounds>,
 }
 
@@ -752,7 +755,8 @@ impl Reactor {
             animate,
             scale,
             store: self.transaction_manager.store.clone(),
-            interval: Duration::from_secs_f64(1.0 / self.config.settings.animation_fps),
+            interval: animation_interval(self.config.settings.animation_fps),
+            next_sample: None,
             bound,
         };
         let previous_was_absent = previous.is_none();
@@ -899,18 +903,25 @@ impl AnimationManager {
                 let sample =
                     native.map(|(_, target)| target).or_else(|| (now >= *deadline).then_some(now));
                 if let Some(sample) = sample {
-                    let delay =
-                        manager.tick_at(sample).unwrap_or(Duration::from_secs_f64(1.0 / 60.0));
+                    let refresh = native
+                        .and_then(|(tick, _)| {
+                            Duration::try_from_secs_f64(tick.target_timestamp - tick.timestamp).ok()
+                        })
+                        .filter(|period| {
+                            !period.is_zero() && *period <= Duration::from_millis(250)
+                        });
+                    let delay = if native.is_some() {
+                        manager.tick_near(sample, Some(refresh.unwrap_or(FALLBACK_INTERVAL)))
+                    } else {
+                        manager.tick_at(sample)
+                    }
+                    .unwrap_or(FALLBACK_INTERVAL);
                     // Resume fallback after three missing native refreshes.
-                    *deadline = if let Some((tick, _)) = native {
+                    *deadline = if native.is_some() {
                         sample
-                            + Duration::try_from_secs_f64(
-                                3.0 * (tick.target_timestamp - tick.timestamp),
-                            )
-                            .ok()
-                            .filter(|d| !d.is_zero())
-                            .unwrap_or(delay)
-                            .min(Duration::from_millis(250))
+                            + refresh
+                                .map_or(delay, |period| period * 3)
+                                .min(Duration::from_millis(250))
                     } else {
                         now + delay
                     };
@@ -1026,11 +1037,13 @@ impl AnimationManager {
         }
     }
 
-    pub fn tick_at(&mut self, now: Instant) -> Option<Duration> {
+    pub fn tick_at(&mut self, now: Instant) -> Option<Duration> { self.tick_near(now, None) }
+
+    fn tick_near(&mut self, now: Instant, refresh: Option<Duration>) -> Option<Duration> {
         let delay = self
             .motions
             .iter_mut()
-            .filter_map(|motion| motion.sample(now, &mut self.frames))
+            .filter_map(|motion| motion.sample(now, refresh, &mut self.frames))
             .min();
         self.frames.flush();
         for motion in &mut self.motions {
@@ -1097,6 +1110,7 @@ impl AnimationManager {
             reactor.config.settings.animation_fps,
             reactor.config.settings.animation_duration,
         );
+        anim.easing = reactor.config.settings.animation_easing;
         let Some(screen) = reactor.space_state.screen_by_space(space) else {
             return false;
         };
@@ -1369,26 +1383,37 @@ impl Motion {
         }
     }
 
-    fn sample(&mut self, now: Instant, frames: &mut FrameBatch) -> Option<Duration> {
+    fn sample(
+        &mut self,
+        now: Instant,
+        refresh: Option<Duration>,
+        frames: &mut FrameBatch,
+    ) -> Option<Duration> {
         match self {
             Self::Viewport(c) => {
+                let next = c.next_sample.unwrap_or(now);
+                if let Some(wait) = sample_delay(now, next, c.interval, refresh) {
+                    return Some(wait);
+                }
+                let next = advance_sample(now, next, c.interval);
+                c.next_sample = Some(next);
                 c.sample_into(now, frames);
-                c.active.then_some(c.interval)
+                c.active.then(|| next.saturating_duration_since(now))
             }
             Self::Transition(a) => {
                 if a.animation.is_empty() || a.is_complete() {
                     return None;
                 }
-                if now + Duration::from_micros(1) < a.next_sample
-                    && now.saturating_duration_since(a.started) < a.animation.duration
+                let end = a.started + a.animation.duration;
+                if now < end
+                    && let Some(wait) =
+                        sample_delay(now, a.next_sample, a.animation.interval, refresh)
                 {
-                    return Some(a.next_sample - now);
+                    return Some(wait.min(end - now));
                 }
-                let missed = now.saturating_duration_since(a.next_sample).as_nanos()
-                    / a.animation.interval.as_nanos();
-                a.next_sample += a.animation.interval.mul_f64((missed + 1) as f64);
+                a.next_sample = advance_sample(now, a.next_sample, a.animation.interval);
                 a.send_frame(now, frames);
-                (!a.is_complete()).then_some(a.animation.interval)
+                (!a.is_complete()).then(|| a.next_sample.min(end).saturating_duration_since(now))
             }
         }
     }
@@ -1417,6 +1442,46 @@ impl Motion {
     }
 }
 
+const FALLBACK_INTERVAL: Duration = Duration::from_nanos(16_666_667);
+
+fn animation_interval(fps: f64) -> Duration {
+    if fps == 0.0 {
+        Duration::ZERO
+    } else {
+        Duration::from_secs_f64(1.0 / fps).max(Duration::from_nanos(1))
+    }
+}
+
+fn fallback_interval(interval: Duration) -> Duration {
+    if interval.is_zero() {
+        FALLBACK_INTERVAL
+    } else {
+        interval
+    }
+}
+
+fn sample_delay(
+    now: Instant,
+    next: Instant,
+    interval: Duration,
+    refresh: Option<Duration>,
+) -> Option<Duration> {
+    if interval.is_zero() && refresh.is_some() {
+        return None;
+    }
+    let tolerance = refresh.map_or(Duration::from_micros(1), |period| period / 2);
+    let wait = next.saturating_duration_since(now);
+    (wait > tolerance.min(fallback_interval(interval) / 2)).then_some(wait)
+}
+
+fn advance_sample(now: Instant, next: Instant, interval: Duration) -> Instant {
+    if interval.is_zero() {
+        return now + FALLBACK_INTERVAL;
+    }
+    let missed = now.saturating_duration_since(next).as_nanos() / interval.as_nanos();
+    next + interval.mul_f64((missed + 1) as f64)
+}
+
 impl ActiveAnimation {
     fn start(mut animation: Animation) -> Option<Self> {
         if animation.is_empty() {
@@ -1425,7 +1490,7 @@ impl ActiveAnimation {
         animation.windows.sort_unstable_by_key(|w| w.wid.pid);
         animation.begin();
         let started = Instant::now();
-        let next_sample = started + animation.interval;
+        let next_sample = started + fallback_interval(animation.interval);
         Some(Self {
             animation,
             started,
@@ -1455,7 +1520,7 @@ impl ActiveAnimation {
         }
         next.windows.sort_unstable_by_key(|w| w.wid.pid);
         let started = Instant::now();
-        let next_sample = started + next.interval;
+        let next_sample = started + fallback_interval(next.interval);
         Self {
             animation: next,
             started,
@@ -1483,8 +1548,9 @@ impl ActiveAnimation {
 
 impl Animation {
     fn new(fps: f64, duration: f64) -> Self {
-        let interval = Duration::from_secs_f64(1.0 / fps);
+        let interval = animation_interval(fps);
         Self {
+            easing: AnimationEasing::default(),
             interval,
             duration: Duration::from_secs_f64(duration),
             display: 0,
@@ -1554,7 +1620,7 @@ impl Animation {
             &mut self.windows,
             Sample::Transition {
                 progress: t,
-                eased: ease(t),
+                eased: ease(self.easing, t),
                 set_size: (previous < 0.5 && t >= 0.5) || t == 1.0,
             },
             frames,
@@ -1569,7 +1635,9 @@ impl Animation {
 }
 
 #[cfg(test)]
-fn get_frame(a: CGRect, b: CGRect, t: f64) -> CGRect { interpolate_frame(a, b, ease(t)) }
+fn get_frame(a: CGRect, b: CGRect, t: f64) -> CGRect {
+    interpolate_frame(a, b, ease(AnimationEasing::default(), t))
+}
 
 fn interpolate_frame(a: CGRect, b: CGRect, s: f64) -> CGRect {
     CGRect {
@@ -1613,11 +1681,30 @@ fn contain_transition_frame(from: CGRect, to: CGRect, mut frame: CGRect) -> CGRe
     frame
 }
 
-fn ease(t: f64) -> f64 {
-    if t < 0.5 {
-        (1.0 - f64::sqrt(1.0 - f64::powi(2.0 * t, 2))) / 2.0
-    } else {
-        (f64::sqrt(1.0 - f64::powi(-2.0 * t + 2.0, 2)) + 1.0) / 2.0
+fn ease(easing: AnimationEasing, t: f64) -> f64 {
+    use AnimationEasing::*;
+
+    if matches!(easing, Linear) || t == 0.0 || t == 1.0 {
+        return t;
+    }
+
+    let ease_in = |x: f64| match easing {
+        EaseInSine | EaseOutSine | EaseInOutSine => 1.0 - (x * std::f64::consts::FRAC_PI_2).cos(),
+        EaseInQuad | EaseOutQuad | EaseInOutQuad => x * x,
+        EaseInCubic | EaseOutCubic | EaseInOutCubic => x.powi(3),
+        EaseInQuart | EaseOutQuart | EaseInOutQuart => x.powi(4),
+        EaseInQuint | EaseOutQuint | EaseInOutQuint => x.powi(5),
+        EaseInExpo | EaseOutExpo | EaseInOutExpo => (10.0 * (x - 1.0)).exp2(),
+        EaseInOut | EaseInCirc | EaseOutCirc | EaseInOutCirc => 1.0 - (1.0 - x * x).sqrt(),
+        Linear => x,
+    };
+    match easing {
+        EaseInSine | EaseInQuad | EaseInCubic | EaseInQuart | EaseInQuint | EaseInExpo
+        | EaseInCirc => ease_in(t),
+        EaseOutSine | EaseOutQuad | EaseOutCubic | EaseOutQuart | EaseOutQuint | EaseOutExpo
+        | EaseOutCirc => 1.0 - ease_in(1.0 - t),
+        _ if t < 0.5 => ease_in(2.0 * t) * 0.5,
+        _ => 1.0 - ease_in(2.0 * (1.0 - t)) * 0.5,
     }
 }
 
@@ -1635,7 +1722,7 @@ mod tests {
 
     fn empty_animation() -> Animation {
         let settings = crate::common::config::Config::default().settings;
-        Animation::new(settings.animation_fps, settings.animation_duration)
+        Animation::new(100.0, settings.animation_duration)
     }
 
     fn animation(handle: &AppThreadHandle, wid: WindowId, from: CGRect, to: CGRect) -> Animation {
@@ -1769,6 +1856,41 @@ mod tests {
     }
 
     #[test]
+    fn configured_linear_easing_reaches_quarter_distance_at_quarter_time() {
+        use super::super::testing::*;
+
+        let (mut apps, mut reactor) = test_context();
+        let space = SpaceId::new(1);
+        let screen = rect(0., 0., 1000., 800.);
+        apps.make_app_and_settle_on_screen(&mut reactor, screen, space, 1, make_windows(1));
+        let wid = WindowId::new(1, 1);
+        let from = reactor.state.windows.window(wid).unwrap().frame_monotonic;
+        let mut to = from;
+        to.origin.x += 100.0;
+        reactor.config.settings.animate = true;
+        reactor.config.settings.animation_fps = 100.0;
+        reactor.config.settings.animation_duration = 0.4;
+        reactor.config.settings.animation_easing = AnimationEasing::Linear;
+
+        let (sender, receiver) = AnimationSender::channel();
+        reactor.animation_tx = Some(sender);
+        assert!(AnimationManager::apply_layout(
+            &mut reactor,
+            space,
+            &[(wid, to)],
+            Presentation::Animated,
+            None,
+            None,
+        ));
+        let mut manager = AnimationManager::new();
+        manager.handle_message(receiver.commands.try_recv().unwrap());
+        let start = transition_state(&manager).unwrap().started;
+        manager.tick_at(start + Duration::from_millis(100));
+        let frame = transition_state(&manager).unwrap().animation.windows[0].frame;
+        assert_eq!(frame.origin.x, from.origin.x + 25.0);
+    }
+
+    #[test]
     fn native_and_fallback_sampling_use_elapsed_time_and_finish_exactly() {
         let start = Instant::now();
         let mut results = Vec::new();
@@ -1810,7 +1932,7 @@ mod tests {
     #[test]
     fn native_ticks_gate_generic_fps_skip_missed_intervals_and_keep_displays_independent() {
         let start = Instant::now();
-        for (fps, expected) in [(60.0, 60), (30.0, 30)] {
+        for (fps, expected) in [(0.0, 120), (60.0, 60), (30.0, 30)] {
             let (handle, mut rx) = AppThreadHandle::channel();
             let mut a = Animation::new(fps, 1.0);
             let wid = WindowId::new(1, 1);
@@ -1825,11 +1947,18 @@ mod tests {
             manager.handle_message(Message::Replace(a));
             let active = active_mut(&mut manager).unwrap();
             active.started = start;
-            active.next_sample = start + active.animation.interval;
+            active.next_sample = start + fallback_interval(active.animation.interval);
             collect_requests(&mut rx);
             let mut count = 0;
             for tick in 1..=120 {
-                manager.tick_at(start + Duration::from_secs_f64(tick as f64 / 120.0));
+                // Slightly early targets should still fill their presentation slot.
+                let target = start + Duration::from_secs_f64(tick as f64 / 120.0);
+                let target = if tick < 120 {
+                    target - Duration::from_micros(100)
+                } else {
+                    target
+                };
+                manager.tick_near(target, Some(Duration::from_secs_f64(1.0 / 120.0)));
                 count += collect_requests(&mut rx)
                     .iter()
                     .filter(|r| matches!(r, Observed::Frame { .. }))
@@ -1956,6 +2085,7 @@ mod tests {
                 scale: 1.0,
                 store: WindowTxStore::new(),
                 interval: Duration::from_secs_f64(1.0 / 60.0),
+                next_sample: None,
                 bound: None,
             }
         };
@@ -2223,6 +2353,7 @@ mod tests {
             scale: 2.0,
             store: store.clone(),
             interval: Duration::from_secs_f64(1.0 / 60.0),
+            next_sample: None,
             bound: None,
         };
         manager.handle_message(Message::Camera(Box::new(camera)));
