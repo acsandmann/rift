@@ -417,6 +417,9 @@ pub struct Reactor {
     window_inventory_manager: managers::WindowInventoryManager,
     refocus_manager: managers::RefocusManager,
     suppress_auto_workspace_switch_until_input: bool,
+    /// Probe (#689): native windows that appeared under the held left button, subscribed for
+    /// WindowServer move notifications so their moves can be logged before AX reports them.
+    press_arrival_probe: HashSet<WindowServerId>,
     pending_space_change_manager: managers::PendingSpaceChangeManager,
     transient_focus: transient_focus::TransientFocusGuard,
     mouse_raise_token: tokio_util::sync::CancellationToken,
@@ -549,6 +552,7 @@ impl Reactor {
                 refocus_state: RefocusState::None,
             },
             suppress_auto_workspace_switch_until_input: false,
+            press_arrival_probe: HashSet::default(),
             pending_space_change_manager: managers::PendingSpaceChangeManager {
                 pending_space_change: None,
             },
@@ -1770,6 +1774,10 @@ impl Reactor {
                 return Ok(());
             }
             Event::WindowServerDestroyed(wsid, sid, kind) => {
+                if self.press_arrival_probe.remove(&wsid) {
+                    debug!(?wsid, "press-arrival: destroyed");
+                    changes.refresh_notifications = true;
+                }
                 let resolved = matches!(kind, SpaceEventKind::User)
                     .then(|| self.resolve_native_space(wsid, None))
                     .flatten();
@@ -1803,6 +1811,20 @@ impl Reactor {
             Event::WindowServerAppeared(wsid, sid, kind) => {
                 let resolved = self.resolve_native_space(wsid, Some(sid));
                 let tracked_window = self.state.windows.tracked_window_id(wsid);
+                if crate::sys::event::left_button_down()
+                    && tracked_window.is_none()
+                    && self.press_arrival_probe.insert(wsid)
+                {
+                    let window = window_server::get_window(wsid);
+                    debug!(
+                        ?wsid,
+                        ?sid,
+                        ?kind,
+                        ?window,
+                        "press-arrival: appeared under the press"
+                    );
+                    changes.refresh_notifications = true;
+                }
                 let queried = window_server::get_window_with_transient(wsid)
                     .filter(|(info, _)| tracked_window.is_none_or(|wid| wid.pid == info.pid));
                 if let Some((info, native)) = queried {
@@ -1859,6 +1881,16 @@ impl Reactor {
                 return Ok(());
             }
             Event::WindowFrameChanged(wid, new_frame, last_seen, requested, mouse_state) => {
+                if self.press_arrival_probe.contains(&WindowServerId::new(wid.idx.get())) {
+                    debug!(
+                        ?wid,
+                        frame = ?new_frame,
+                        ?mouse_state,
+                        button_down = crate::sys::event::left_button_down(),
+                        ax_known = self.state.windows.contains_window(wid),
+                        "press-arrival: moved"
+                    );
+                }
                 if self.is_mission_control_active() {
                     return Ok(());
                 }
@@ -2740,6 +2772,11 @@ impl Reactor {
         let commit = finishes.then(|| self.end_drag(button)).flatten();
         if button == crate::actor::drag::MouseButton::Left {
             self.release_owner_claims(changes, ClaimOwner::Press);
+            if !self.press_arrival_probe.is_empty() {
+                let windows: Vec<_> = self.press_arrival_probe.drain().collect();
+                debug!(?windows, "press-arrival: released");
+                changes.refresh_notifications = true;
+            }
         }
         if let Some(commit) = commit {
             self.land_drag(changes, commit);
@@ -3022,6 +3059,7 @@ impl Reactor {
                 .windows
                 .iter_tracked_window_server_ids()
                 .chain(self.transient_focus.windows.keys().copied())
+                .chain(self.press_arrival_probe.iter().copied())
                 .map(|wsid| wsid.as_u32())
                 .collect();
             ids.sort_unstable();
