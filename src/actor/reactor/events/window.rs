@@ -113,12 +113,13 @@ impl Reactor {
         if let Some(window) = self.state.windows.window_mut(wid) {
             window.frame_monotonic = new_frame;
         }
-        // The external owner has geometry authority; keep only native facts current. A new
-        // window the press holds may be the drag's source, and moves it.
+        // A native drag's source moves it, a press-held window included.
+        let dragging = self.drag_manager.actor.update_native(wid, new_frame);
+        if dragging {
+            self.drag_manager.sync_preview();
+        }
+        // The external owner has geometry authority; keep only native facts current.
         if self.state.windows.is_claimed(wid) {
-            if self.drag_manager.actor.update_native(wid, new_frame) {
-                self.drag_manager.sync_preview();
-            }
             if old_space != new_space
                 && let Some(server) = server_id
             {
@@ -154,8 +155,7 @@ impl Reactor {
                 .store_floating_position(workspace, wid, new_frame);
         }
 
-        if self.drag_manager.actor.update_native(wid, new_frame) {
-            self.drag_manager.sync_preview();
+        if dragging {
             if !old_frame.size.same_as(new_frame.size) && active_resize_space.is_some() {
                 self.reconcile_layout_event(changes, LayoutEvent::WindowResized {
                     wid,
