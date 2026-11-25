@@ -1958,6 +1958,7 @@ impl Reactor {
                 if effective_mouse_state == Some(MouseState::Down) {
                     // Keep the pointer in step before deciding whether a drag starts.
                     self.observe_button(changes);
+                    self.hand_over_arriving_drag(changes, wid);
                 }
                 let active =
                     |space: Option<SpaceId>| space.is_some_and(|s| self.is_space_active(s));

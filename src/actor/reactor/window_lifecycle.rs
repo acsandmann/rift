@@ -309,6 +309,7 @@ impl Reactor {
         } else if !previous.same_as(frame)
             && let Some(origin) = {
                 self.observe_button(changes);
+                self.hand_over_arriving_drag(changes, wid);
                 self.native_drag_origin(wid, frame)
             }
         {

@@ -4,9 +4,10 @@
 use tracing::debug;
 
 use super::{Changes, Presentation, Reactor};
-use crate::actor::drag::MouseButton;
+use crate::actor::app::WindowId;
+use crate::actor::drag::{DragOrigin, MouseButton};
 use crate::common::collections::HashSet;
-use crate::model::window_store::ClaimOwner;
+use crate::model::window_store::{ClaimHolder, ClaimOwner};
 use crate::sys::screen::SpaceId;
 use crate::sys::window_server::WindowServerId;
 
@@ -119,6 +120,27 @@ impl Reactor {
         if !press.arrivals.is_empty() {
             debug!(windows = ?press.arrivals, "press-arrival: released");
             changes.refresh_notifications = true;
+        }
+    }
+
+    /// One press can see many windows arrive and be dragged in turn: an app that moves a
+    /// dragged tab into a new window (Chrome, when a tab docks and is torn out again in one
+    /// press) leaves the previous window behind, still alive for a moment. Only one window
+    /// follows the cursor, so a press-held window that moves takes the drag over from an
+    /// arriving drag of another window. A drag of a window Rift manages is never taken over.
+    pub(super) fn hand_over_arriving_drag(&mut self, changes: &mut Changes, window: WindowId) {
+        let held = self
+            .state
+            .windows
+            .claim(window)
+            .is_some_and(|claim| matches!(claim.holder, ClaimHolder::Press));
+        if held
+            && let Some(source) = self.drag_manager.actor.source()
+            && source.window != window
+            && source.origin == DragOrigin::Arriving
+        {
+            debug!(from = ?source.window, to = ?window, "drag handed over");
+            self.cancel_drag(changes);
         }
     }
 

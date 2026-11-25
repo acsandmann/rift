@@ -3052,6 +3052,67 @@ fn a_torn_tab_shows_its_drop_target_and_lands_on_it_in_one_placement() {
     );
 }
 
+/// Tear a tab out, dock it into another window and tear it out again, all in one press:
+/// Chrome moves the tab into a new window each time, and the previous one lingers a moment
+/// (hidden, its AX element stale) before it is closed. The new window, which now follows the
+/// cursor, takes the drag over and gets its drop targets.
+#[test]
+fn tearing_a_tab_out_again_in_the_same_press_keeps_its_drop_targets() {
+    let mut tab = torn_tab_under_held_button().created();
+    tab.first_move();
+    let first = tab.wid;
+    assert!(tab.reactor.is_dragging_window(first));
+
+    // Docked: the first window is hidden and its AX element goes stale, but it is not gone yet.
+    let first_wsid = tab.reactor.test_window_server_id(first);
+    tab.reactor.handle_event(Event::WindowServerHidden(first_wsid));
+    tab.reactor.handle_event(Event::WindowInvalidated(
+        first,
+        WindowInvalidationSource::StaleAxElement,
+    ));
+
+    // Torn out again: a new window under the same press, following the cursor.
+    let again = WindowId::new(1, 3);
+    let wsid = WindowServerId::new(10_003);
+    let frame = CGRect::new(CGPoint::new(300., 250.), CGSize::new(500., 500.));
+    tab.reactor.track_test_window_server_info(wsid, 1, frame);
+    tab.reactor.mark_test_window_visible_in_space(wsid, tab.space);
+    let info = make_window_info(frame, Some(wsid), "Torn out again", None);
+    tab.reactor
+        .handle_event(Event::WindowCreated(again, info, None, Some(MouseState::Down)));
+    let mut moved = frame;
+    moved.origin.x += 25.;
+    window_server::set_cursor_location_override(Some(moved.mid()));
+    tab.reactor.handle_event(Event::WindowFrameChanged(
+        again,
+        moved,
+        None,
+        Requested(false),
+        Some(MouseState::Down),
+    ));
+    window_server::set_cursor_location_override(None);
+    assert!(
+        tab.reactor.is_dragging_window(again),
+        "the new window did not take the drag over"
+    );
+
+    tab.pointer_at(WEST_EDGE);
+    let target = tab
+        .reactor
+        .drag_manager
+        .actor
+        .preview_target()
+        .expect("no drop target the second time");
+    assert_eq!(target.intent.window, WindowId::new(1, 1));
+
+    // The first window closes; the drag of the new one goes on.
+    tab.reactor.handle_event(Event::WindowDestroyed(first));
+    assert!(tab.reactor.is_dragging_window(again));
+
+    release_left_button(&mut tab.reactor);
+    assert_eq!(tab.tiles(), [again, WindowId::new(1, 1)]);
+}
+
 #[test]
 fn a_torn_tab_released_over_no_target_joins_by_normal_insertion() {
     let mut tab = torn_tab_under_held_button().created();
