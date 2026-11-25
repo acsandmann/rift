@@ -3158,10 +3158,16 @@ impl SilentDrag {
     }
 
     fn ax_reports(&mut self, idx: u32) {
-        let frame = self.reactor.state.windows.window(Self::wid(idx)).map_or(
-            CGRect::new(CGPoint::new(200., 200.), CGSize::new(500., 500.)),
-            |window| window.frame_monotonic,
-        );
+        // Where the WindowServer last saw it.
+        let frame = self
+            .reactor
+            .state
+            .windows
+            .get_window_server_info(WindowServerId::new(idx))
+            .map_or(
+                CGRect::new(CGPoint::new(200., 200.), CGSize::new(500., 500.)),
+                |info| info.frame,
+            );
         let info = make_window_info(frame, Some(WindowServerId::new(idx)), "Detached tab", None);
         let mouse = crate::sys::event::get_mouse_state();
         self.reactor
@@ -3264,14 +3270,15 @@ fn a_torn_tab_can_drop_onto_the_tile_it_was_torn_from() {
 
 #[test]
 fn a_window_only_the_window_server_reports_is_held_and_becomes_a_rift_drag() {
-    use crate::model::window_store::{ClaimHolder, Seen};
+    use crate::model::window_store::ClaimHolder;
     let mut drag = silent_drag_under_held_button();
     drag.appears(20_001);
     drag.moves(20_001, 200.);
-    assert!(matches!(
-        drag.holder(20_001),
-        Some(ClaimHolder::Press(Seen::WindowServer))
-    ));
+    assert!(matches!(drag.holder(20_001), Some(ClaimHolder::Press)));
+    assert!(
+        !drag.reactor.state.windows.contains_window(SilentDrag::wid(20_001)),
+        "only the WindowServer has reported it, so its record has no AX facts"
+    );
     assert!(
         !drag.reactor.is_in_drag(),
         "recording the window alone must not start a drag"
@@ -3287,17 +3294,15 @@ fn a_window_only_the_window_server_reports_is_held_and_becomes_a_rift_drag() {
 
 #[test]
 fn ax_reporting_the_window_during_the_press_keeps_it_held_and_it_drops_at_the_release() {
-    use crate::model::window_store::{ClaimHolder, Seen};
+    use crate::model::window_store::ClaimHolder;
     let mut drag = silent_drag_under_held_button();
     drag.appears(20_001);
     drag.moves(20_001, 200.);
     drag.moves(20_001, 240.);
     drag.pointer_at(WEST_EDGE);
     drag.ax_reports(20_001);
-    assert!(matches!(
-        drag.holder(20_001),
-        Some(ClaimHolder::Press(Seen::Accessibility))
-    ));
+    assert!(matches!(drag.holder(20_001), Some(ClaimHolder::Press)));
+    assert!(drag.reactor.state.windows.contains_window(SilentDrag::wid(20_001)));
     assert!(drag.reactor.is_dragging_window(SilentDrag::wid(20_001)));
     drag.assert_untouched(20_001);
 
@@ -3326,6 +3331,36 @@ fn a_window_ax_reports_only_after_the_release_lands_on_its_drop_then() {
     assert!(drag.holder(20_001).is_none());
     assert_eq!(drag.tiles(), [SilentDrag::wid(20_001), WindowId::new(1, 1)]);
     drag.assert_placed_once(20_001);
+}
+
+/// A window only the WindowServer has reported has no AX facts. Its moves still drive its drag,
+/// and a window-list refresh that does not list it (AX has not reported it yet) leaves it held.
+#[test]
+fn a_window_without_ax_facts_survives_moves_and_window_list_refreshes() {
+    use crate::model::window_store::ClaimHolder;
+    let mut drag = silent_drag_under_held_button();
+    let wid = SilentDrag::wid(20_001);
+    drag.appears(20_001);
+    for x in [200., 240., 280., 320.] {
+        drag.moves(20_001, x);
+    }
+    assert!(drag.reactor.is_dragging_window(wid));
+    let frame = drag.reactor.state.windows.get_window_server_info(WindowServerId::new(20_001));
+    assert_eq!(frame.map(|info| info.frame.origin.x), Some(320.));
+
+    drag.reactor.discover_test_windows(1, Vec::new(), vec![WindowId::new(1, 1)]);
+    assert!(matches!(drag.holder(20_001), Some(ClaimHolder::Press)));
+    assert!(drag.reactor.is_dragging_window(wid));
+    drag.pointer_at(WEST_EDGE);
+
+    drag.release();
+    drag.reactor.discover_test_windows(1, Vec::new(), vec![WindowId::new(1, 1)]);
+    assert!(matches!(drag.holder(20_001), Some(ClaimHolder::Landing(_))));
+    assert!(!drag.reactor.state.windows.contains_window(wid));
+    drag.assert_untouched(20_001);
+
+    drag.ax_reports(20_001);
+    assert_eq!(drag.tiles(), [wid, WindowId::new(1, 1)]);
 }
 
 #[test]

@@ -8,7 +8,7 @@ use rift_protocol::WindowClaimFlags;
 use super::{Changes, LayoutEvent, Reactor};
 use crate::actor::app::WindowId;
 use crate::layout_engine::systems::{LayoutSystem, WindowChange};
-use crate::model::window_store::{ClaimHolder, ClaimOwner, Seen};
+use crate::model::window_store::{ClaimHolder, ClaimOwner};
 
 const OWNED_ELSEWHERE: &str = "Window owned by another external manager";
 
@@ -89,17 +89,11 @@ impl Reactor {
     ) -> Option<crate::actor::drag::DragCommit> {
         let mut reported = Vec::new();
         for window in self.state.windows.owner_claims(ClaimOwner::Press).to_vec() {
-            let Some(ClaimHolder::Press(seen)) =
-                self.state.windows.claim(window).map(|claim| claim.holder)
-            else {
-                continue;
-            };
-            match seen {
-                Seen::Accessibility => reported.push(window),
-                Seen::WindowServer => {
-                    let drop = commit.take_if(|commit| commit.source.window == window);
-                    self.state.windows.hand_over_claim(window, ClaimHolder::Landing(drop));
-                }
+            if self.state.windows.contains_window(window) {
+                reported.push(window);
+            } else {
+                let drop = commit.take_if(|commit| commit.source.window == window);
+                self.state.windows.hand_over_claim(window, ClaimHolder::Landing(drop));
             }
         }
         self.release_claims_of(changes, reported);

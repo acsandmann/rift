@@ -21,7 +21,7 @@ const SCREEN: CGRect = CGRect {
 fn session(claim: WindowClaim) -> (u32, WindowClaimFlags) {
     match claim.holder {
         ClaimHolder::Ipc { port, flags, .. } => (port, flags),
-        ClaimHolder::Press(_) | ClaimHolder::Landing(_) => {
+        ClaimHolder::Press | ClaimHolder::Landing(_) => {
             panic!("expected a session's claim, found the press's")
         }
     }

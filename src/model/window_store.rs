@@ -82,28 +82,19 @@ pub enum ClaimHolder {
         /// The id the session claimed; release accepts it across AX identity changes.
         original: WindowId,
     },
-    /// The held left button, and what has reported the window so far.
-    Press(Seen),
+    /// The held left button. Until AX reports the window, its record has no AX state: only
+    /// the WindowServer has seen it (an app in its own drag loop can withhold AX).
+    Press,
     /// A window the press held that AX had not reported at the release: it lands when AX
     /// reports it, on the drop it was released over if it was being dragged.
     Landing(Option<crate::model::drag::DragCommit>),
-}
-
-/// What has reported a window the press holds.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Seen {
-    /// Only the WindowServer: its record holds no AX facts yet (an app in its own drag loop
-    /// can withhold AX notifications until the drag ends).
-    WindowServer,
-    /// AX has reported it.
-    Accessibility,
 }
 
 impl ClaimHolder {
     pub fn owner(&self) -> ClaimOwner {
         match *self {
             ClaimHolder::Ipc { port, .. } => ClaimOwner::Ipc(port),
-            ClaimHolder::Press(_) => ClaimOwner::Press,
+            ClaimHolder::Press => ClaimOwner::Press,
             ClaimHolder::Landing(_) => ClaimOwner::Landing,
         }
     }
@@ -317,7 +308,7 @@ impl WindowStore {
                 ClaimHolder::Ipc { flags, .. } => {
                     flags.contains(WindowClaimFlags::SUPPRESS_FOCUS_FOLLOWS_MOUSE)
                 }
-                ClaimHolder::Press(_) | ClaimHolder::Landing(_) => false,
+                ClaimHolder::Press | ClaimHolder::Landing(_) => false,
             })
     }
 
@@ -338,7 +329,7 @@ impl WindowStore {
 
     /// Claim a tracked window, holding its assignment until release.
     pub fn insert_claim(&mut self, wid: WindowId, holder: ClaimHolder) {
-        debug_assert!(self.contains_window(wid) && !self.is_claimed(wid));
+        debug_assert!(self.windows.contains_key(&wid) && !self.is_claimed(wid));
         let workspace = self.take_assignment(wid);
         self.windows.get_mut(&wid).unwrap().claim = Some(WindowClaim { holder, workspace });
         self.claims.entry(holder.owner()).or_default().push(wid);

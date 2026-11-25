@@ -1,11 +1,11 @@
-use objc2_core_foundation::CGRect;
+use objc2_core_foundation::{CGRect, CGSize};
 use tracing::{debug, warn};
 
 use super::{Changes, Presentation, Reactor, RefocusState, utils};
 use crate::actor::app::{AppInfo, WindowId, WindowInfo, pid_t};
 use crate::layout_engine::LayoutEvent;
 use crate::model::virtual_workspace::WorkspaceContext;
-use crate::model::window_store::{ClaimHolder, NativeFullscreenTransition, Seen};
+use crate::model::window_store::{ClaimHolder, NativeFullscreenTransition};
 use crate::model::{AppRuleEffects, AppRuleResult, WindowRuleContext};
 use crate::sys::geometry::SameAs;
 use crate::sys::screen::SpaceId;
@@ -231,8 +231,8 @@ impl Reactor {
                 // A window that first appears while the left button is held belongs to
                 // the press until the release, so no admission path tiles it out from
                 // under the cursor. A new AX identity for a known window is not new here.
-                if crate::sys::event::left_button_down() {
-                    self.state.windows.insert_claim(wid, ClaimHolder::Press(Seen::Accessibility));
+                if crate::sys::event::left_button_down() && !self.state.windows.is_claimed(wid) {
+                    self.state.windows.insert_claim(wid, ClaimHolder::Press);
                 }
                 (true, false, false)
             };
@@ -260,21 +260,18 @@ impl Reactor {
                     || previous.is_some()
                     || (!new && admitted && !was_admitted)),
         );
-        // AX reports a window the WindowServer reported first, under the press or after it.
-        match self.state.windows.claim(wid).map(|claim| claim.holder) {
-            Some(ClaimHolder::Press(Seen::WindowServer)) => {
-                let holder = ClaimHolder::Press(Seen::Accessibility);
-                self.state.windows.hand_over_claim(wid, holder);
-            }
-            Some(ClaimHolder::Landing(drop)) => self.land_arrival(changes, wid, drop),
-            Some(ClaimHolder::Press(Seen::Accessibility) | ClaimHolder::Ipc { .. }) | None => {}
+        // AX reports a window the button was released over before AX knew it.
+        if let Some(ClaimHolder::Landing(drop)) =
+            self.state.windows.claim(wid).map(|claim| claim.holder)
+        {
+            self.land_arrival(changes, wid, drop);
         }
         observed
     }
 
-    /// The WindowServer moved a window under the held button before AX reported it. Record it
-    /// from what the WindowServer says and claim it for the press, so no path admits it and
-    /// its frame changes can drive a drag. AX fills in its facts when it reports the window.
+    /// The WindowServer moved a window under the held button before AX reported it. Record its
+    /// native identity and frame, with no AX state, and claim it for the press, so its frame
+    /// changes can drive a drag. AX fills the record in when it reports the window.
     pub(super) fn arrive_under_press(
         &mut self,
         changes: &mut Changes,
@@ -283,26 +280,37 @@ impl Reactor {
     ) {
         let wsid = WindowServerId::new(wid.idx.get());
         self.press_arrivals.remove(&wsid);
-        let info = WindowInfo {
-            has_native_tabs: false,
-            is_standard: true,
-            is_root: true,
-            is_minimized: false,
-            is_resizable: true,
-            title: String::new(),
+        self.state.windows.track_window_server_id(wsid, wid);
+        self.state.windows.track_window_server_info(WindowServerInfo {
+            id: wsid,
+            pid: wid.pid,
+            layer: 0,
             frame,
-            min_size: None,
-            max_size: None,
-            sys_id: Some(wsid),
-            bundle_id: None,
-            path: None,
-            ax_role: None,
-            ax_subrole: None,
-        };
-        self.state.windows.insert_window(wid, info.into());
-        self.state.windows.reconcile_ax_identity(wid, Some(wsid));
-        self.state.windows.insert_claim(wid, ClaimHolder::Press(Seen::WindowServer));
+            min_frame: CGSize::ZERO,
+            max_frame: CGSize::ZERO,
+        });
+        self.state.windows.insert_claim(wid, ClaimHolder::Press);
         changes.refresh_notifications = true;
+    }
+
+    /// A move of a window the press holds that AX has not reported: the WindowServer's frame is
+    /// the only one it has, and the move updates or starts its drag.
+    pub(super) fn move_unreported(&mut self, wid: WindowId, frame: CGRect) {
+        let wsid = WindowServerId::new(wid.idx.get());
+        let Some(mut info) = self.state.windows.get_window_server_info(wsid) else {
+            return;
+        };
+        let previous = std::mem::replace(&mut info.frame, frame);
+        self.state.windows.track_window_server_info(info);
+        if self.drag_manager.actor.update_native(wid, frame) {
+            self.drag_manager.sync_preview();
+        } else if !previous.same_as(frame)
+            && let Some(origin) = self.native_drag_origin(wid, frame)
+        {
+            let space = self.geometry_space_for_window(&previous, Some(wsid));
+            let current = self.geometry_space_for_window(&frame, Some(wsid));
+            self.begin_native_drag(wid, previous, frame, space, current, origin);
+        }
     }
 
     pub(super) fn observe_window_minimization(

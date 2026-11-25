@@ -68,7 +68,7 @@ use crate::model::broadcast::{
 };
 use crate::model::space_activation::{SpaceActivationConfig, SpaceActivationPolicy};
 use crate::model::tx_store::WindowTxStore;
-use crate::model::window_store::{ClaimHolder, NativeFullscreenTransition, Seen};
+use crate::model::window_store::{ClaimHolder, NativeFullscreenTransition};
 use crate::sys::event::MouseState;
 use crate::sys::executor::Executor;
 use crate::sys::geometry::{CGRectDef, CGRectExt, SameAs};
@@ -1029,7 +1029,7 @@ impl Reactor {
             })
         } else if windows
             .claim(window)
-            .is_some_and(|claim| matches!(claim.holder, ClaimHolder::Press(_)))
+            .is_some_and(|claim| matches!(claim.holder, ClaimHolder::Press))
         {
             Some(DragOrigin::Arriving)
         } else {
@@ -1785,11 +1785,9 @@ impl Reactor {
                 // Only the WindowServer knew this window, so nothing else retires it, and it
                 // must never land.
                 if let Some(wid) = self.state.windows.tracked_window_id(wsid)
+                    && !self.state.windows.contains_window(wid)
                     && self.state.windows.claim(wid).is_some_and(|claim| {
-                        matches!(
-                            claim.holder,
-                            ClaimHolder::Press(Seen::WindowServer) | ClaimHolder::Landing(_)
-                        )
+                        matches!(claim.holder, ClaimHolder::Press | ClaimHolder::Landing(_))
                     })
                 {
                     debug!(?wid, "press-arrival: destroyed before AX reported it");
@@ -1891,15 +1889,19 @@ impl Reactor {
                 return Ok(());
             }
             Event::WindowFrameChanged(wid, new_frame, last_seen, requested, mouse_state) => {
-                if self.press_arrivals.contains(&WindowServerId::new(wid.idx.get())) {
-                    let button_down = crate::sys::event::left_button_down();
-                    let known = self.state.windows.contains_window(wid);
-                    debug!(?wid, frame = ?new_frame, ?mouse_state, button_down, known, "press-arrival: moved");
-                    if button_down && !known {
-                        // The first move records the window; a later one can start its drag.
-                        self.arrive_under_press(changes, wid, new_frame);
-                        return Ok(());
-                    }
+                let wsid = WindowServerId::new(wid.idx.get());
+                if self.press_arrivals.contains(&wsid)
+                    && self.state.windows.tracked_window_id(wsid).is_none()
+                    && crate::sys::event::left_button_down()
+                {
+                    // The first move records the window; a later one can start its drag.
+                    self.arrive_under_press(changes, wid, new_frame);
+                    return Ok(());
+                }
+                // A held window AX has not reported has only its WindowServer frame.
+                if self.state.windows.is_claimed(wid) && !self.state.windows.contains_window(wid) {
+                    self.move_unreported(wid, new_frame);
+                    return Ok(());
                 }
                 if self.is_mission_control_active() {
                     return Ok(());
