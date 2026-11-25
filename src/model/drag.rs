@@ -39,6 +39,17 @@ pub struct DragScene {
     /// Whether each source-tile edge points toward a logical tiled neighbor.
     pub source_neighbors: [bool; 4],
     pub targets: Vec<DragSceneTarget>,
+    /// Set only for a window that brings a new tile (torn out under the press, or dragged in from
+    /// another display): each drop it can make here, with the frame it lands in. The pointer then
+    /// picks the drop whose landing holds it, so the overlay is under the pointer.
+    pub slots: Vec<DragSlot>,
+}
+
+/// A drop a window bringing a new tile can make, and the frame it lands in.
+#[derive(Debug, Clone, Copy)]
+pub struct DragSlot {
+    pub intent: DropIntent,
+    pub area: CGRect,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

@@ -27,6 +27,7 @@ pub fn build_drag_scene(
                 })
             })
             .collect(),
+        slots: Vec::new(),
     }
 }
 

@@ -12,7 +12,7 @@ use crate::actor::app::WindowId;
 use crate::common::config::{DragDropSettings, MouseAction, MouseDropAction};
 use crate::layout_engine::{Direction, WindowDropAction};
 pub use crate::model::drag::{
-    DragCancel, DragCommit, DragKind, DragOrigin, DragScene, DragSceneTarget, DragSource,
+    DragCancel, DragCommit, DragKind, DragOrigin, DragScene, DragSceneTarget, DragSlot, DragSource,
     DropIntent, DropTarget, DropZone,
 };
 use crate::sys::screen::SpaceId;
@@ -191,16 +191,7 @@ impl DragActor {
         session.invalidate_drop();
         if self.settings.enabled && session.source.origin.targets_tiles() && session.kind.is_move()
         {
-            let next = hit_test_available(
-                &session.scene,
-                session.pointer,
-                self.settings.drop_zone_fraction,
-                self.settings.drop_action,
-                previous,
-                &session.unavailable,
-                Some(session.source),
-                None,
-            );
+            let next = candidate(session, &self.settings, session.pointer, previous);
             session.target = next.map_or(TargetState::None, TargetState::Candidate);
         }
     }
@@ -226,16 +217,7 @@ impl DragActor {
             return false;
         }
         session.unavailable.push((intent.window, intent.zone, intent.action));
-        let next = hit_test_available(
-            &session.scene,
-            session.pointer,
-            self.settings.drop_zone_fraction,
-            self.settings.drop_action,
-            None,
-            &session.unavailable,
-            Some(session.source),
-            None,
-        );
+        let next = candidate(session, &self.settings, session.pointer, None);
         session.target = next.map_or(TargetState::None, TargetState::Candidate);
         !matches!(session.target, TargetState::None)
     }
@@ -324,16 +306,7 @@ impl DragActor {
         {
             None
         } else {
-            hit_test_available(
-                &session.scene,
-                motion.point,
-                self.settings.drop_zone_fraction,
-                self.settings.drop_action,
-                session.target.intent(),
-                &session.unavailable,
-                Some(session.source),
-                None,
-            )
+            candidate(session, &self.settings, motion.point, session.target.intent())
         };
         let changed = next != session.target.intent();
         if changed {
@@ -459,6 +432,60 @@ pub fn resolve_action(zone: DropZone, center: MouseDropAction) -> WindowDropActi
         DropZone::North => WindowDropAction::Insert(Direction::Up),
         DropZone::South => WindowDropAction::Insert(Direction::Down),
     }
+}
+
+/// The drop under `point`. A window already in the layout uses the hovered tile's zones. A window
+/// that brings a new tile picks the drop whose landing frame holds the pointer, preferring the one
+/// the hovered tile's zone names, then the smallest; between frames, the nearest.
+fn candidate(
+    session: &Session,
+    settings: &DragDropSettings,
+    point: CGPoint,
+    previous: Option<DropIntent>,
+) -> Option<DropIntent> {
+    let zone = hit_test_available(
+        &session.scene,
+        point,
+        settings.drop_zone_fraction,
+        settings.drop_action,
+        previous,
+        &session.unavailable,
+        Some(session.source),
+        None,
+    );
+    if session.scene.slots.is_empty() {
+        return zone;
+    }
+    let open: Vec<&DragSlot> = session
+        .scene
+        .slots
+        .iter()
+        .filter(|slot| {
+            !session.unavailable.contains(&(
+                slot.intent.window,
+                slot.intent.zone,
+                slot.intent.action,
+            ))
+        })
+        .collect();
+    let holding: Vec<&DragSlot> =
+        open.iter().copied().filter(|slot| contains(slot.area, point, 0.0)).collect();
+    let area = |slot: &&DragSlot| slot.area.size.width * slot.area.size.height;
+    let named = zone.and_then(|zone| {
+        holding
+            .iter()
+            .copied()
+            .find(|slot| slot.intent.window == zone.window && slot.intent.action == zone.action)
+    });
+    named
+        .or_else(|| holding.iter().copied().min_by(|a, b| area(a).total_cmp(&area(b))))
+        .or_else(|| {
+            open.iter().copied().min_by(|a, b| {
+                distance_to_rect_squared(a.area, point)
+                    .total_cmp(&distance_to_rect_squared(b.area, point))
+            })
+        })
+        .map(|slot| slot.intent)
 }
 
 /// Hit-test a cached immutable scene without allocating or sorting.
@@ -676,6 +703,7 @@ mod tests {
             action_override: None,
             source_neighbors: [false; 4],
             targets: vec![target(2, frame)],
+            slots: Vec::new(),
         }
     }
     fn scene_with(targets: Vec<DragSceneTarget>) -> DragScene {
@@ -683,6 +711,7 @@ mod tests {
             action_override: None,
             source_neighbors: [false; 4],
             targets,
+            slots: Vec::new(),
         }
     }
     fn motion(actor: &mut DragActor, x: f64, y: f64) -> bool {

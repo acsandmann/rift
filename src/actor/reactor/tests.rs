@@ -3307,170 +3307,224 @@ fn owner_master_stack() -> crate::common::config::LayoutSettings {
     }
 }
 
-fn silent_drag_with_layout(
-    layout: &crate::common::config::LayoutSettings,
-    count: usize,
-) -> SilentDrag {
-    let mut reactor = Reactor::new_for_test(LayoutEngine::new(&Default::default(), layout));
+/// Two displays: A holds a tiled window of app 2 to drag across, B the owner's master-stack of
+/// app 1 with a master and two stack tiles.
+struct OwnerDisplays {
+    _apps: Apps,
+    reactor: Reactor,
+    space_a: SpaceId,
+    space_b: SpaceId,
+    screen_b: CGRect,
+}
+
+fn owner_two_displays() -> OwnerDisplays {
+    let mut reactor =
+        Reactor::new_for_test(LayoutEngine::new(&Default::default(), &owner_master_stack()));
     let mut apps = Apps::new();
-    let space = SpaceId::new(1);
-    apps.make_app_and_settle_on_screen(&mut reactor, SCREEN_1000, space, 1, make_windows(count));
+    let screen_a = CGRect::new(CGPoint::ZERO, CGSize::new(1000., 1000.));
+    let screen_b = CGRect::new(CGPoint::new(1000., 0.), CGSize::new(1000., 1000.));
+    let (space_a, space_b) = (SpaceId::new(1), SpaceId::new(2));
+    reactor.handle_event(space_state_event(vec![screen_a, screen_b], vec![
+        Some(space_a),
+        Some(space_b),
+    ]));
+    let on_b = (1..=3)
+        .map(|idx| {
+            let frame = CGRect::new(
+                CGPoint::new(1000. + 100. * f64::from(idx), 100.),
+                CGSize::new(50., 50.),
+            );
+            make_window_info(frame, Some(WindowServerId::new(idx)), &format!("B{idx}"), None)
+        })
+        .collect();
+    apps.make_app_and_settle(&mut reactor, 1, on_b);
+    let on_a = make_window_info(
+        CGRect::new(CGPoint::new(100., 100.), CGSize::new(300., 300.)),
+        Some(WindowServerId::new(11)),
+        "A",
+        None,
+    );
+    apps.make_app_and_settle(&mut reactor, 2, vec![on_a]);
+    apps.simulate_until_quiet(&mut reactor);
     apps.requests();
     crate::sys::event::TEST_MOUSE_STATE.with(|state| state.set(Some(MouseState::Down)));
-    SilentDrag { apps, reactor, space }
+    OwnerDisplays {
+        _apps: apps,
+        reactor,
+        space_a,
+        space_b,
+        screen_b,
+    }
 }
 
-/// A torn tab drops exactly like a window dragged in from another display: neither has a slot
-/// in this layout, so both join it as any window from elsewhere does, and the same drop on the
-/// same tile previews the same frame (thirds of the stack, side by side with a member) and
-/// lands there.
-#[test]
-fn a_torn_tab_previews_and_lands_like_a_window_from_another_display() {
-    use crate::layout_engine::{Direction, WindowDropAction};
-    let layout = owner_master_stack();
-    let tiles = {
-        let mut drag = silent_drag_with_layout(&layout, 3);
-        test_layout(&mut drag.reactor, drag.space, SCREEN_1000)
-    };
-    let from_elsewhere = WindowId::new(9, 9);
-    let (mut checked, mut thirds) = (0, 0);
-    for (window, tile) in tiles {
-        let (min, max) = (tile.origin, tile.max());
-        for point in [
-            tile.mid(),
-            CGPoint::new(min.x + 15., tile.mid().y),
-            CGPoint::new(max.x - 15., tile.mid().y),
-            CGPoint::new(tile.mid().x, min.y + 15.),
-            CGPoint::new(tile.mid().x, max.y - 15.),
-        ] {
-            let mut drag = silent_drag_with_layout(&layout, 3);
-            let engine = &drag.reactor.layout_manager.layout_engine;
-            let line = drag.reactor.config.settings.ui.stack_line.clone();
-            let cross_display = |action| {
-                engine
-                    .drop_preview_frame(
-                        drag.space,
-                        from_elsewhere,
-                        window,
-                        action,
-                        SCREEN_1000,
-                        None,
-                        &line,
+/// The drop a drag offers at a point, and its overlay.
+type Offer = Option<(WindowId, crate::layout_engine::WindowDropAction, CGRect)>;
+
+impl OwnerDisplays {
+    const TORN: u32 = 30_001;
+
+    /// A window torn out on B, following the cursor.
+    fn tear_on_b(&mut self) -> WindowId {
+        let torn = WindowId::new(1, Self::TORN);
+        let space = self.space_b;
+        window_server_appeared(
+            &mut self.reactor,
+            WindowServerId::new(Self::TORN),
+            space,
+            SpaceEventKind::User,
+        );
+        self.reactor.handle_event(Event::WindowServerFocusChanged(torn, space));
+        torn
+    }
+
+    /// The tiled window from display A, dragged onto B.
+    fn drag_from_a(&mut self) -> WindowId {
+        let dragged = WindowId::new(2, 1);
+        assert_eq!(
+            self.reactor.assigned_space_for_window_id(dragged),
+            Some(self.space_a)
+        );
+        let frame = self.reactor.state.windows.window(dragged).unwrap().frame_monotonic;
+        let moved = CGRect {
+            origin: CGPoint::new(frame.origin.x + 30., frame.origin.y),
+            ..frame
+        };
+        window_server::set_cursor_location_override(Some(moved.mid()));
+        self.reactor.handle_event(Event::WindowFrameChanged(
+            dragged,
+            moved,
+            None,
+            Requested(false),
+            Some(MouseState::Down),
+        ));
+        window_server::set_cursor_location_override(None);
+        self.offer_at(CGPoint::new(1500., 500.));
+        let wsid = self.reactor.test_window_server_id(dragged);
+        let space = self.space_b;
+        window_server_appeared(&mut self.reactor, wsid, space, SpaceEventKind::User);
+        dragged
+    }
+
+    fn offer_at(&mut self, point: CGPoint) -> Offer {
+        self.reactor
+            .handle_event(Event::DragMotion(crate::actor::drag::DragMotion { point }));
+        self.reactor
+            .drag_manager
+            .actor
+            .preview_target()
+            .map(|target| (target.intent.window, target.intent.action, target.preview_area))
+    }
+
+    /// Pointer positions every 20 pt over display B.
+    fn sweep(&self) -> Vec<CGPoint> {
+        let origin = self.screen_b.origin;
+        (0..50)
+            .flat_map(|row| {
+                (0..50).map(move |col| {
+                    CGPoint::new(
+                        origin.x + 10. + 20. * f64::from(col),
+                        origin.y + 10. + 20. * f64::from(row),
                     )
-                    .map(|preview| preview.frame)
-            };
-            let expected: Vec<_> = [
-                WindowDropAction::Insert(Direction::Up),
-                WindowDropAction::Insert(Direction::Down),
-                WindowDropAction::Insert(Direction::Left),
-                WindowDropAction::Insert(Direction::Right),
-                WindowDropAction::Swap,
-            ]
-            .into_iter()
-            .map(|action| (action, cross_display(action)))
-            .collect();
-            drag.appears(20_001);
-            drag.moves_to(
-                20_001,
-                CGRect::new(CGPoint::new(700., 400.), CGSize::new(300., 300.)),
-            );
-            drag.pointer_at(point);
-            let Some(target) = drag.reactor.drag_manager.actor.preview_target() else {
-                continue;
-            };
-            assert_eq!(target.intent.window, window, "{point:?}");
-            let (_, from_another_display) = expected
-                .iter()
-                .find(|(action, _)| *action == target.intent.action)
-                .copied()
-                .expect("an action a window from another display has too");
-            assert!(
-                from_another_display.is_some_and(|frame| frame.same_as(target.preview_area)),
-                "{:?} on {window:?}: torn tab {:?}, from another display {from_another_display:?}",
-                target.intent.action,
-                target.preview_area
-            );
-            if tile.origin.x >= 600. - 0.5
-                && matches!(
-                    target.intent.action,
-                    WindowDropAction::Insert(Direction::Up | Direction::Down)
-                )
-            {
-                assert!(
-                    (target.preview_area.size.height - 1000. / 3.).abs() < 1.5,
-                    "not a third of the stack"
-                );
-                thirds += 1;
-            }
-            drag.release();
-            drag.ax_reports(20_001);
-            let landed = test_layout(&mut drag.reactor, drag.space, SCREEN_1000)
-                .into_iter()
-                .find_map(|(w, frame)| (w == SilentDrag::wid(20_001)).then_some(frame))
-                .expect("the torn tab is not in the layout");
-            checked += 1;
-            assert!(
-                landed.same_as(target.preview_area),
-                "landed {landed:?}, previewed {:?}",
-                target.preview_area
-            );
-        }
+                })
+            })
+            .collect()
     }
-    assert!(
-        checked >= 10 && thirds >= 4,
-        "checked {checked} drops, {thirds} stack thirds"
-    );
 }
 
-/// Every zone of every tile, the tab's own source tile included: the torn tab lands exactly
-/// where its overlay showed.
+fn rounded(offer: Offer) -> Option<(WindowId, crate::layout_engine::WindowDropAction, [i64; 4])> {
+    offer.map(|(window, action, r)| {
+        let n = |v: f64| v.round() as i64;
+        (window, action, [
+            n(r.origin.x),
+            n(r.origin.y),
+            n(r.size.width),
+            n(r.size.height),
+        ])
+    })
+}
+
+/// A window that brings a new tile, torn out or dragged in from another display, offers the drop
+/// whose landing holds the pointer: wherever there is an overlay it is under the pointer, and a
+/// torn tab and a window from another display offer the same drop at every point.
 #[test]
-fn a_torn_tab_lands_where_its_overlay_shows() {
-    let tiles = {
-        let mut drag = silent_drag_over(Some(LayoutMode::MasterStack), 3);
-        test_layout(&mut drag.reactor, drag.space, SCREEN_1000)
-    };
-    let mut checked = 0;
-    for (window, tile) in tiles {
-        let (min, max) = (tile.origin, tile.max());
-        for point in [
-            tile.mid(),
-            CGPoint::new(min.x + 15., tile.mid().y),
-            CGPoint::new(max.x - 15., tile.mid().y),
-            CGPoint::new(tile.mid().x, min.y + 15.),
-            CGPoint::new(tile.mid().x, max.y - 15.),
-        ] {
-            let mut drag = silent_drag_over(Some(LayoutMode::MasterStack), 3);
-            drag.reactor.handle_test_layout_event(LayoutEvent::WindowFocused(
-                drag.space,
-                WindowId::new(1, 1),
-            ));
-            drag.appears(20_001);
-            drag.moves_to(
-                20_001,
-                CGRect::new(CGPoint::new(700., 400.), CGSize::new(300., 300.)),
-            );
-            drag.pointer_at(point);
-            let Some(target) = drag.reactor.drag_manager.actor.preview_target() else {
-                continue;
-            };
-            assert_eq!(target.intent.window, window, "{point:?}");
-            drag.release();
-            drag.ax_reports(20_001);
-            let landed = test_layout(&mut drag.reactor, drag.space, SCREEN_1000)
-                .into_iter()
-                .find_map(|(w, frame)| (w == SilentDrag::wid(20_001)).then_some(frame))
-                .expect("the torn tab is not in the layout");
-            checked += 1;
+fn a_window_bringing_a_new_tile_previews_the_slot_under_the_pointer() {
+    let mut torn = owner_two_displays();
+    torn.tear_on_b();
+    let mut cross = owner_two_displays();
+    cross.drag_from_a();
+    let mut offered = 0;
+    for point in torn.sweep() {
+        let torn_offer = torn.offer_at(point);
+        let cross_offer = cross.offer_at(point);
+        assert_eq!(rounded(torn_offer), rounded(cross_offer), "{point:?}");
+        if let Some((_, _, area)) = torn_offer {
             assert!(
-                landed.same_as(target.preview_area),
-                "{:?} on {window:?}: landed {landed:?}, previewed {:?}",
-                target.intent.action,
-                target.preview_area
+                point.x >= area.origin.x - 0.5
+                    && point.x <= area.max().x + 0.5
+                    && point.y >= area.origin.y - 0.5
+                    && point.y <= area.max().y + 0.5,
+                "{area:?} is not under {point:?}"
             );
+            offered += 1;
         }
     }
-    assert!(checked >= 10, "checked {checked} drops");
+    assert!(offered >= 2000, "only {offered} of 2500 points offered a drop");
+}
+
+/// Each drop a torn tab or a window from another display offers lands exactly where it previewed.
+#[test]
+fn a_window_bringing_a_new_tile_lands_where_its_overlay_shows() {
+    let mut drops: Vec<CGPoint> = Vec::new();
+    let mut seen = Vec::new();
+    {
+        let mut probe = owner_two_displays();
+        probe.tear_on_b();
+        for point in probe.sweep() {
+            let offer = rounded(probe.offer_at(point));
+            if offer.is_some() && !seen.contains(&offer) {
+                seen.push(offer);
+                drops.push(point);
+            }
+        }
+    }
+    assert!(drops.len() >= 6, "only {} distinct drops", drops.len());
+    for point in drops {
+        let mut torn = owner_two_displays();
+        let tab = torn.tear_on_b();
+        let (_, action, previewed) = torn.offer_at(point).unwrap();
+        release_left_button(&mut torn.reactor);
+        let info = make_window_info(
+            previewed,
+            Some(WindowServerId::new(OwnerDisplays::TORN)),
+            "Torn",
+            None,
+        );
+        torn.reactor
+            .handle_event(Event::WindowCreated(tab, info, None, Some(MouseState::Up)));
+        let screen_b = torn.screen_b;
+        let space_b = torn.space_b;
+        let landed = test_layout(&mut torn.reactor, space_b, screen_b)
+            .into_iter()
+            .find_map(|(w, frame)| (w == tab).then_some(frame))
+            .expect("the torn tab is not in the layout");
+        assert!(
+            landed.same_as(previewed),
+            "torn {action:?} at {point:?}: landed {landed:?}, previewed {previewed:?}"
+        );
+
+        let mut cross = owner_two_displays();
+        let dragged = cross.drag_from_a();
+        let (_, action, previewed) = cross.offer_at(point).unwrap();
+        release_left_button(&mut cross.reactor);
+        let landed = test_layout(&mut cross.reactor, space_b, screen_b)
+            .into_iter()
+            .find_map(|(w, frame)| (w == dragged).then_some(frame))
+            .expect("the dragged window is not on B");
+        assert!(
+            landed.same_as(previewed),
+            "cross {action:?} at {point:?}: landed {landed:?}, previewed {previewed:?}"
+        );
+    }
 }
 
 #[test]

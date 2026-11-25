@@ -4560,7 +4560,74 @@ impl Reactor {
         let space = source
             .current_space
             .filter(|_| source.origin.targets_tiles() && kind.is_move())?;
-        Some(self.drag_scene(source.window, space))
+        let mut scene = self.drag_scene(source.window, space);
+        if self.brings_new_tile(source, space) {
+            scene.slots = self.new_tile_slots(source.window, space, &scene);
+        }
+        Some(scene)
+    }
+
+    /// Whether a drag on `space` brings a new tile to its layout: a window torn out under the
+    /// press, or one from another display's workspace.
+    fn brings_new_tile(&self, source: &crate::actor::drag::DragSource, space: SpaceId) -> bool {
+        source.origin == crate::actor::drag::DragOrigin::Arriving
+            || self.layout_manager.layout_engine.workspaces().active_workspace(space)
+                != self.state.windows.workspace_for_window(source.window)
+    }
+
+    /// Every drop a window bringing a new tile can make on `space`: each insert beside each tile,
+    /// and the centre action (the layout's override, or drag_drop's), with the frame it lands in
+    /// from the prospective layout. Drops that land the same way are one.
+    fn new_tile_slots(
+        &self,
+        source: WindowId,
+        space: SpaceId,
+        scene: &crate::actor::drag::DragScene,
+    ) -> Vec<crate::actor::drag::DragSlot> {
+        use crate::actor::drag::{DragSlot, DropIntent, DropZone};
+        use crate::layout_engine::{Direction, WindowDropAction};
+        let Some(screen) = self.space_state.screen_by_space(space) else {
+            return Vec::new();
+        };
+        let center: WindowDropAction = self.config.settings.drag_drop.drop_action.into();
+        let drops = [
+            (DropZone::North, WindowDropAction::Insert(Direction::Up)),
+            (DropZone::South, WindowDropAction::Insert(Direction::Down)),
+            (DropZone::West, WindowDropAction::Insert(Direction::Left)),
+            (DropZone::East, WindowDropAction::Insert(Direction::Right)),
+            (DropZone::Center, center),
+        ];
+        let mut slots: Vec<DragSlot> = Vec::new();
+        for target in &scene.targets {
+            for (zone, action) in drops {
+                let action = scene.action_override.unwrap_or(action);
+                let Some(preview) = self.layout_manager.layout_engine.drop_preview_frame(
+                    space,
+                    source,
+                    target.window,
+                    action,
+                    screen.frame,
+                    screen.display_uuid_opt(),
+                    &self.config.settings.ui.stack_line,
+                ) else {
+                    continue;
+                };
+                if slots.iter().any(|slot| slot.area.same_as(preview.frame)) {
+                    continue;
+                }
+                slots.push(DragSlot {
+                    intent: DropIntent {
+                        window: target.window,
+                        space,
+                        frame: target.frame,
+                        zone,
+                        action,
+                    },
+                    area: preview.frame,
+                });
+            }
+        }
+        slots
     }
 
     fn refresh_active_drag_scene(&mut self) {
