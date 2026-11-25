@@ -637,19 +637,9 @@ pub(super) fn project_root(
     regions: Option<(NodeId, NodeId)>,
     active: &ConstraintCache,
 ) -> NodeId {
-    // Lay out only the region that has shown windows; with both (or neither), the root.
-    match regions.map(|(master, stack)| {
-        (
-            master,
-            stack,
-            active.contains_key(&master),
-            active.contains_key(&stack),
-        )
-    }) {
-        Some((master, _, true, false)) => master,
-        Some((_, stack, false, true)) => stack,
-        _ => root,
-    }
+    regions
+        .filter(|(_, stack)| !active.contains_key(stack))
+        .map_or(root, |(master, _)| master)
 }
 
 pub(super) fn project(

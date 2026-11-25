@@ -13787,13 +13787,13 @@ fn presentation_inventory_tracks_visibility_without_forgetting_layout() {
 /// projected empty and the stack filled the whole screen as full-width rows.
 #[test]
 fn master_stack_master_area_survives_its_window_going_away() {
+    // An app hide reaches the reactor as WindowMinimized for each window (app.rs).
     #[derive(Clone, Copy, Debug)]
     enum Away {
         Minimized,
         AxInvalidated,
-        AppHidden,
     }
-    for away in [Away::Minimized, Away::AxInvalidated, Away::AppHidden] {
+    for away in [Away::Minimized, Away::AxInvalidated] {
         let (mut apps, mut reactor) = test_context();
         let screen = CGRect::new(CGPoint::ZERO, CGSize::new(1000., 1000.));
         let space = SpaceId::new(1);
@@ -13803,8 +13803,7 @@ fn master_stack_master_area_survives_its_window_going_away() {
             mode: LayoutMode::MasterStack,
         });
         apps.make_app_and_settle(&mut reactor, 1, make_windows(3));
-        // The newest window takes the master slot; give it its own app so hiding
-        // the app takes only the master away.
+        // The newest window takes the master slot.
         apps.make_app_and_settle(&mut reactor, 2, make_windows(1));
         let master = WindowId::new(2, 1);
         let original = test_layout(&mut reactor, space, screen);
@@ -13815,17 +13814,13 @@ fn master_stack_master_area_survives_its_window_going_away() {
         );
         assert!(master_frame.size.width < screen.size.width);
 
-        let info = reactor.state.windows.window(master).unwrap().info.clone();
-        match away {
-            Away::Minimized | Away::AppHidden => {
-                // The app actor reports an app hide as WindowMinimized per window.
-                reactor.handle_event(Event::WindowMinimized(master));
+        let mut info = reactor.state.windows.window(master).unwrap().info.clone();
+        reactor.handle_event(match away {
+            Away::Minimized => Event::WindowMinimized(master),
+            Away::AxInvalidated => {
+                Event::WindowInvalidated(master, super::WindowInvalidationSource::InvalidUiElement)
             }
-            Away::AxInvalidated => reactor.handle_event(Event::WindowInvalidated(
-                master,
-                super::WindowInvalidationSource::InvalidUiElement,
-            )),
-        }
+        });
         let layout = test_layout(&mut reactor, space, screen);
         assert!(layout.iter().all(|(wid, _)| *wid != master), "{away:?}");
         assert_eq!(layout.len(), 3, "{away:?}");
@@ -13841,17 +13836,11 @@ fn master_stack_master_area_survives_its_window_going_away() {
             "{away:?}: the stack must not fill the screen, got {layout:?}"
         );
 
-        match away {
-            Away::Minimized | Away::AppHidden => {
-                reactor.handle_event(Event::WindowDeminiaturized(master));
-                let mut info = info;
-                info.is_minimized = false;
-                reactor.discover_test_windows(2, vec![(master, info)], vec![master]);
-            }
-            Away::AxInvalidated => {
-                reactor.discover_test_windows(2, vec![(master, info)], vec![master]);
-            }
+        if let Away::Minimized = away {
+            reactor.handle_event(Event::WindowDeminiaturized(master));
+            info.is_minimized = false;
         }
+        reactor.discover_test_windows(2, vec![(master, info)], vec![master]);
         assert_eq!(
             test_layout(&mut reactor, space, screen),
             original,
