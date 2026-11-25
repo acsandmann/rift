@@ -3096,10 +3096,20 @@ const SCREEN_1000: CGRect = CGRect {
     size: CGSize { width: 1000., height: 1000. },
 };
 
-fn silent_drag_under_held_button() -> SilentDrag {
+fn silent_drag_under_held_button() -> SilentDrag { silent_drag_over(None, 1) }
+
+/// `count` settled windows, in `mode` if given, and the button down.
+fn silent_drag_over(mode: Option<LayoutMode>, count: usize) -> SilentDrag {
     let (mut apps, mut reactor) = test_context();
     let space = SpaceId::new(1);
-    apps.make_app_and_settle_on_screen(&mut reactor, SCREEN_1000, space, 1, make_windows(1));
+    reactor.handle_event(space_state_event(vec![SCREEN_1000], vec![Some(space)]));
+    if let Some(mode) = mode {
+        reactor.handle_test_layout_command(LayoutCommand::SetWorkspaceLayout {
+            workspace: None,
+            mode,
+        });
+    }
+    apps.make_app_and_settle_on_screen(&mut reactor, SCREEN_1000, space, 1, make_windows(count));
     apps.requests();
     crate::sys::event::TEST_MOUSE_STATE.with(|state| state.set(Some(MouseState::Down)));
     SilentDrag { apps, reactor, space }
@@ -3121,7 +3131,10 @@ impl SilentDrag {
 
     /// A WindowServer move notification, with the cursor on the window as Chrome drags it.
     fn moves(&mut self, idx: u32, x: f64) {
-        let frame = CGRect::new(CGPoint::new(x, 200.), CGSize::new(500., 500.));
+        self.moves_to(idx, CGRect::new(CGPoint::new(x, 200.), CGSize::new(500., 500.)));
+    }
+
+    fn moves_to(&mut self, idx: u32, frame: CGRect) {
         window_server::set_cursor_location_override(Some(frame.mid()));
         let event = Event::WindowFrameChanged(
             Self::wid(idx),
@@ -3166,10 +3179,12 @@ impl SilentDrag {
         self.reactor.state.windows.claim(Self::wid(idx)).map(|claim| claim.holder)
     }
 
-    /// The tiled windows, left to right.
+    /// The tiled windows, left to right, then top to bottom.
     fn tiles(&mut self) -> Vec<WindowId> {
         let mut tiles = test_layout(&mut self.reactor, self.space, SCREEN_1000);
-        tiles.sort_by(|a, b| a.1.origin.x.total_cmp(&b.1.origin.x));
+        tiles.sort_by(|a, b| {
+            (a.1.origin.x.total_cmp(&b.1.origin.x)).then(a.1.origin.y.total_cmp(&b.1.origin.y))
+        });
         tiles.into_iter().map(|(window, _)| window).collect()
     }
 
@@ -3196,6 +3211,55 @@ impl SilentDrag {
         let writes = frame_writes(&mut self.apps);
         assert!(writes.iter().all(|(window, _)| *window != wid), "{writes:?}");
     }
+}
+
+/// The tab was torn from the bottom tile of a master-stack, which stays selected, so a new
+/// window joins right after it. Every zone of that tile is still a drop target, and the window
+/// lands where the zone says.
+#[test]
+fn a_torn_tab_can_drop_onto_the_tile_it_was_torn_from() {
+    let bottom = WindowId::new(1, 1);
+    let mut drag = silent_drag_over(Some(LayoutMode::MasterStack), 3);
+    drag.reactor
+        .handle_test_layout_event(LayoutEvent::WindowFocused(drag.space, bottom));
+    let tile = drag.reactor.state.windows.window(bottom).unwrap().frame_monotonic;
+    let over = CGRect::new(CGPoint::new(tile.origin.x, tile.origin.y - 100.), tile.size);
+    drag.appears(20_001);
+    drag.moves_to(20_001, over);
+    drag.moves_to(20_001, CGRect {
+        origin: CGPoint::new(over.origin.x + 10., over.origin.y),
+        ..over
+    });
+
+    // Its south edge: the new window goes below it, which is also where it joins.
+    drag.pointer_at(CGPoint::new(tile.mid().x, tile.max().y - 5.));
+    let target = drag
+        .reactor
+        .drag_manager
+        .actor
+        .preview_target()
+        .expect("no target on the south edge");
+    assert_eq!(target.intent.window, bottom);
+    assert_eq!(
+        target.intent.action,
+        crate::layout_engine::WindowDropAction::Insert(crate::layout_engine::Direction::Down)
+    );
+    // Its centre: a target on the same tile.
+    drag.pointer_at(tile.mid());
+    let target = drag
+        .reactor
+        .drag_manager
+        .actor
+        .preview_target()
+        .expect("no target at the centre");
+    assert_eq!(target.intent.window, bottom);
+
+    drag.pointer_at(CGPoint::new(tile.mid().x, tile.max().y - 5.));
+    drag.release();
+    drag.ax_reports(20_001);
+    let landed = drag.tiles();
+    assert_eq!(landed.last(), Some(&SilentDrag::wid(20_001)), "{landed:?}");
+    assert!(drag.reactor.state.windows.claimed_windows().next().is_none());
 }
 
 #[test]
