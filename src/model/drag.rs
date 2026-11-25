@@ -88,14 +88,6 @@ pub enum DragOrigin {
 }
 
 impl DragOrigin {
-    pub fn of(floating: bool) -> Self {
-        if floating {
-            Self::Floating
-        } else {
-            Self::Tiled
-        }
-    }
-
     /// Whether the drag hit-tests the tiles it passes over.
     pub fn targets_tiles(self) -> bool {
         match self {

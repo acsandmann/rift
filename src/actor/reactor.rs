@@ -1006,38 +1006,40 @@ impl Reactor {
         self.drag_manager.actor.source().is_some_and(|source| source.window == window)
     }
 
-    fn can_start_drag(&self, window: WindowId) -> bool {
-        !self.is_in_drag()
-            && !self.is_mission_control_active()
-            && !self.refreshes_blocked()
-            && self.state.windows.is_admitted(window)
-            && self.state.windows.can_place_window(window)
+    /// Whether any drag may start now.
+    fn drag_may_start(&self) -> bool {
+        !self.is_in_drag() && !self.is_mission_control_active() && !self.refreshes_blocked()
     }
 
-    /// Where a native drag of `window` at `frame` would come from, if one may start: a
-    /// window Rift manages, or a new window the press holds out of the layout.
+    /// Where a drag of `window` comes from: a window Rift manages and can place, or a new
+    /// window the press holds out of the layout. No other window can be dragged.
+    fn drag_origin(&self, window: WindowId) -> Option<crate::actor::drag::DragOrigin> {
+        use crate::actor::drag::DragOrigin;
+        let windows = &self.state.windows;
+        if windows.is_admitted(window) && windows.can_place_window(window) {
+            Some(if self.layout_manager.layout_engine.is_window_floating(window) {
+                DragOrigin::Floating
+            } else {
+                DragOrigin::Tiled
+            })
+        } else if windows.claim(window).is_some_and(|claim| claim.holder == ClaimHolder::Press) {
+            Some(DragOrigin::Arriving)
+        } else {
+            None
+        }
+    }
+
+    /// The origin of a native drag of `window` at `frame`, if one may start: the button is
+    /// down with the cursor on the window. The cheap checks run before the cursor queries.
     fn native_drag_origin(
         &self,
         window: WindowId,
         frame: CGRect,
     ) -> Option<crate::actor::drag::DragOrigin> {
-        let origin = if self.can_start_drag(window) {
-            crate::actor::drag::DragOrigin::of(
-                self.layout_manager.layout_engine.is_window_floating(window),
-            )
-        } else if !self.is_in_drag()
-            && !self.is_mission_control_active()
-            && !self.refreshes_blocked()
-            && self
-                .state
-                .windows
-                .claim(window)
-                .is_some_and(|claim| claim.holder == ClaimHolder::Press)
-        {
-            crate::actor::drag::DragOrigin::Arriving
-        } else {
+        if !self.drag_may_start() {
             return None;
-        };
+        }
+        let origin = self.drag_origin(window)?;
         (self.communication_manager.events_tx.is_none()
             || (crate::sys::event::left_button_down()
                 && window_server::current_cursor_location()
@@ -2050,15 +2052,13 @@ impl Reactor {
                 {
                     return Ok(());
                 }
-                let source = self.window_id_under_cursor().and_then(|window| {
+                let source = self.window_id_under_cursor().filter(|_| self.drag_may_start());
+                let source = source.and_then(|window| {
                     let state = self.state.windows.window(window)?;
-                    self.can_start_drag(window).then_some((
-                        window,
-                        state.frame_monotonic,
-                        state.info.sys_id,
-                    ))
+                    let origin = self.drag_origin(window)?;
+                    Some((window, state.frame_monotonic, state.info.sys_id, origin))
                 });
-                let Some((window, frame, server_id)) = source else {
+                let Some((window, frame, server_id, origin)) = source else {
                     return Ok(());
                 };
                 let assigned_space = self.assigned_space_for_window_id(window);
@@ -2071,9 +2071,7 @@ impl Reactor {
                     last_frame: frame,
                     origin_space: space,
                     current_space: space,
-                    origin: crate::actor::drag::DragOrigin::of(
-                        self.layout_manager.layout_engine.is_window_floating(window),
-                    ),
+                    origin,
                 };
                 let scene = self
                     .move_drag_scene(&source, crate::actor::drag::DragKind::ModifierMove)
