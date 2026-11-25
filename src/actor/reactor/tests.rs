@@ -2890,6 +2890,7 @@ fn cross_display_drag_relocates_the_window_once_and_preserves_floating() {
 struct TornTab {
     apps: Apps,
     reactor: Reactor,
+    screen: CGRect,
     space: SpaceId,
     wid: WindowId,
     info: WindowInfo,
@@ -2912,6 +2913,7 @@ fn torn_tab_in((mut apps, mut reactor): (Apps, Reactor)) -> TornTab {
     TornTab {
         apps,
         reactor,
+        screen,
         space,
         wid,
         info,
@@ -2971,9 +2973,17 @@ impl TornTab {
             .handle_event(Event::DragMotion(crate::actor::drag::DragMotion { point }));
     }
 
+    /// `wid`'s frame in the layout.
+    fn frame_of(&mut self, wid: WindowId) -> CGRect {
+        test_layout(&mut self.reactor, self.space, self.screen)
+            .into_iter()
+            .find_map(|(window, frame)| (window == wid).then_some(frame))
+            .expect("not in the layout")
+    }
+
     /// The tiled windows, left to right.
     fn tiles(&mut self) -> Vec<WindowId> {
-        let screen = CGRect::new(CGPoint::ZERO, CGSize::new(1000., 1000.));
+        let screen = self.screen;
         let engine = &self.reactor.layout_manager.layout_engine;
         let floating: Vec<_> = [WindowId::new(1, 1), self.wid]
             .into_iter()
@@ -3034,14 +3044,7 @@ fn a_torn_tab_shows_its_drop_target_and_lands_on_it_in_one_placement() {
         "the drop did not place the window"
     );
     // One placement: the window goes straight to its drop slot, never to the insertion slot.
-    let landed = test_layout(
-        &mut tab.reactor,
-        tab.space,
-        CGRect::new(CGPoint::ZERO, CGSize::new(1000., 1000.)),
-    )
-    .into_iter()
-    .find_map(|(window, frame)| (window == tab.wid).then_some(frame))
-    .unwrap();
+    let landed = tab.frame_of(tab.wid);
     let writes = tab.frame_writes_for(tab.wid);
     assert!(
         !writes.is_empty() && writes.iter().all(|frame| frame.same_as(landed)),
