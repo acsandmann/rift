@@ -575,6 +575,28 @@ pub fn get_windows(ids: &[WindowServerId]) -> Vec<WindowServerInfo> {
     out
 }
 
+/// A window's bounds and owning process, asked of the WindowServer directly. The window query
+/// can miss a window an app is dragging (Chrome's torn-out tab) while these still answer.
+#[cfg(not(test))]
+pub fn window_bounds_and_pid(id: WindowServerId) -> Option<(CGRect, pid_t)> {
+    let mut frame = CGRect::default();
+    if unsafe { CGSGetWindowBounds(*G_CONNECTION, id.as_u32(), &mut frame) } != 0 {
+        return None;
+    }
+    let mut owner = 0;
+    if unsafe { SLSGetWindowOwner(*G_CONNECTION, id.as_u32(), &mut owner) } != 0 || owner == 0 {
+        return None;
+    }
+    let mut pid: c_int = 0;
+    if unsafe { SLSConnectionGetPID(owner, &mut pid) } != 0 || pid == 0 {
+        return None;
+    }
+    Some((frame, pid))
+}
+
+#[cfg(test)]
+pub fn window_bounds_and_pid(_id: WindowServerId) -> Option<(CGRect, pid_t)> { None }
+
 pub fn get_window(id: WindowServerId) -> Option<WindowServerInfo> {
     get_window_with_transient(id).map(|(info, _)| info)
 }

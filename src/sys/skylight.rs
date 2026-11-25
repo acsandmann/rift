@@ -334,6 +334,8 @@ unsafe extern "C" {
     pub fn CGEventSourceSetLocalEventsSuppressionInterval(source: *mut CFType, interval: f64);
 
     pub fn CGSGetWindowBounds(cid: cid_t, wid: u32, frame: *mut CGRect) -> i32;
+    pub fn SLSGetWindowOwner(cid: cid_t, wid: u32, owner: *mut cid_t) -> i32;
+    pub fn SLSConnectionGetPID(cid: cid_t, pid: *mut c_int) -> i32;
     pub fn CGSSetConnectionProperty(
         cid: cid_t,
         target_cid: cid_t,
