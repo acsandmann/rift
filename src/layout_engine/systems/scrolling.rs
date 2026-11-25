@@ -206,6 +206,14 @@ impl Viewport {
     /// At rest at `offset`, not centred.
     fn at(offset: f64) -> Self { Self::Resting(Rest::At, Motion::Static(offset)) }
 
+    /// On a spring from `from` to `target`, coming to rest as `rest` says.
+    fn springing(rest: Rest, from: f64, target: f64, velocity: f64, started: Instant) -> Self {
+        Self::Resting(
+            rest,
+            Motion::Animation(CameraSpring::new(from, target, velocity, started)),
+        )
+    }
+
     // Layout queries use the requested offset; the presenter also needs the
     // previous offset until it starts the animation.
     fn offset(&self) -> f64 {
@@ -830,7 +838,7 @@ impl Serialize for LayoutState {
             self.camera.viewport,
             Viewport::Gesture(_) | Viewport::Resting(_, Motion::Animation(_))
         ) {
-            self.geometry.as_ref().map_or(current, |g| g.clamp(current))
+            self.clamp_offset(current)
         } else {
             current
         };
@@ -1274,6 +1282,11 @@ impl LayoutState {
         motion.move_target(target, Instant::now());
     }
 
+    /// `offset` within the strip bounds, once there is a geometry to bound it.
+    fn clamp_offset(&self, offset: f64) -> f64 {
+        self.geometry.as_ref().map_or(offset, |g| g.clamp(offset))
+    }
+
     /// The selected column's place in `g`; a dormant selected column has none.
     fn active_column_geometry(&self, g: &Geometry) -> Option<ColumnGeometry> {
         g.column(self.arrangement.columns.get(self.arrangement.active_column)?.id)
@@ -1646,15 +1659,7 @@ impl ScrollingLayoutSystem {
             state.camera.viewport = if p.gesturing {
                 Viewport::Gesture(p.offset)
             } else if p.offset != p.target {
-                Viewport::Resting(
-                    rest,
-                    Motion::Animation(CameraSpring::new(
-                        p.offset,
-                        p.target,
-                        p.velocity,
-                        p.timestamp,
-                    )),
-                )
+                Viewport::springing(rest, p.offset, p.target, p.velocity, p.timestamp)
             } else {
                 Viewport::Resting(rest, Motion::Static(p.offset))
             };
@@ -1756,14 +1761,12 @@ impl ScrollingLayoutSystem {
         let projected = offset - velocity / (1000.0 * 0.997_f64.ln());
         let release = self.settle(layout, projected, velocity, true)?;
         if animate {
-            self.layouts[layout].camera.viewport = Viewport::Resting(
+            self.layouts[layout].camera.viewport = Viewport::springing(
                 Rest::At,
-                Motion::Animation(CameraSpring::new(
-                    release.from_offset,
-                    release.offset,
-                    release.velocity,
-                    Instant::now(),
-                )),
+                release.from_offset,
+                release.offset,
+                release.velocity,
+                Instant::now(),
             );
         }
         Some(release)
@@ -1777,9 +1780,8 @@ impl ScrollingLayoutSystem {
                 Viewport::Gesture(_) | Viewport::Resting(_, Motion::Animation(_))
             )
         {
-            let offset = state.camera.viewport.offset();
-            let offset = state.geometry.as_ref().map_or(offset, |g| g.clamp(offset));
-            state.camera.viewport = Viewport::at(offset);
+            state.camera.viewport =
+                Viewport::at(state.clamp_offset(state.camera.viewport.offset()));
             state.camera.motion = MotionHistory::default();
         }
     }
@@ -2030,16 +2032,16 @@ impl LayoutSystem for ScrollingLayoutSystem {
 
     fn clone_layout(&mut self, layout: LayoutId) -> LayoutId {
         let mut state = self.layouts.get(layout).cloned().unwrap_or_default();
-        if matches!(
-            state.camera.viewport,
-            Viewport::Resting(_, Motion::Pending { .. })
-        ) {
-            state.camera.viewport.finish();
-        } else if matches!(state.camera.viewport, Viewport::Resting(_, Motion::Animation(_))) {
+        match state.camera.viewport {
+            Viewport::Resting(_, Motion::Pending { .. }) => state.camera.viewport.finish(),
             // An in-flight clone stops where it is, so it no longer rests centred.
-            let offset = state.camera.viewport.offset();
-            state.camera.viewport =
-                Viewport::at(state.geometry.as_ref().map_or(offset, |g| g.clamp(offset)));
+            Viewport::Resting(_, Motion::Animation(_)) => {
+                state.camera.viewport =
+                    Viewport::at(state.clamp_offset(state.camera.viewport.offset()));
+            }
+            Viewport::Uninitialized
+            | Viewport::Gesture(_)
+            | Viewport::Resting(_, Motion::Static(_)) => {}
         }
         self.layouts.insert(state)
     }
@@ -2726,10 +2728,8 @@ pub(crate) mod tests {
 
         /// Mid-scroll towards the end of a four-column strip, from 900 to 1000.
         fn scroll_towards_the_end(&mut self) {
-            self.system.layouts[self.layout].camera.viewport = Viewport::Resting(
-                Rest::At,
-                Motion::Animation(CameraSpring::new(900.0, 1000.0, 0.0, Instant::now())),
-            );
+            self.system.layouts[self.layout].camera.viewport =
+                Viewport::springing(Rest::At, 900.0, 1000.0, 0.0, Instant::now());
         }
 
         /// The drag still overscrolls at `offset`; release it and return where it
