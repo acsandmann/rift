@@ -3436,6 +3436,28 @@ fn a_torn_tab_shows_targets_from_the_first_pointer_sample() {
 
 /// A window that appears under the press but never takes focus (a helper window of the app)
 /// is never recorded or dragged.
+/// The press's first tear, reported by AX before the WindowServer: focusing the claimed window
+/// makes it the one following the cursor, and the first pointer sample drags it with a target,
+/// before any frame change.
+#[test]
+fn a_first_tear_reported_by_ax_first_is_dragged_from_the_first_pointer_sample() {
+    let mut tab = torn_tab_under_held_button().created();
+    assert!(!tab.reactor.is_in_drag());
+    let space = tab.space;
+    tab.reactor.handle_event(Event::WindowServerFocusChanged(tab.wid, space));
+    window_server::set_cursor_location_override(Some(WEST_EDGE));
+    tab.pointer_at(WEST_EDGE);
+    window_server::set_cursor_location_override(None);
+    assert!(tab.reactor.is_dragging_window(tab.wid));
+    let target = tab
+        .reactor
+        .drag_manager
+        .actor
+        .preview_target()
+        .expect("no target on the first sample");
+    assert_eq!(target.intent.window, WindowId::new(1, 1));
+}
+
 #[test]
 fn a_window_that_never_takes_focus_is_not_dragged() {
     let mut drag = silent_drag_under_held_button();

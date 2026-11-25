@@ -150,18 +150,25 @@ impl Reactor {
     }
 
     /// A window that appeared under the press took focus: it is the one following the cursor.
-    /// Record it (AX may not have reported it) and claim it, so the pointer can drag it.
+    /// Record it (AX may not have reported it) and claim it, so the pointer can drag it. It may
+    /// have reached Rift as a WindowServer appearance or, first, as an AX report the press
+    /// already claimed.
     pub(super) fn follow_focused_arrival(&mut self, changes: &mut Changes, window: WindowId) {
         let wsid = WindowServerId::new(window.idx.get());
+        let held = self
+            .state
+            .windows
+            .claim(window)
+            .is_some_and(|claim| matches!(claim.holder, ClaimHolder::Press));
         let Pointer::Down(press) = &mut self.pointer else {
             return;
         };
-        if !press.arrivals.contains(&wsid) || press.following == Some(window) {
+        if !(press.arrivals.contains(&wsid) || held) || press.following == Some(window) {
             return;
         }
         press.following = Some(window);
         debug!(?window, "press-arrival: follows the cursor");
-        if self.state.windows.tracked_window_id(wsid).is_none() {
+        if self.state.windows.record(window).is_none() {
             let frame = window_server::window_bounds_and_pid(wsid)
                 .map_or(CGRect::default(), |(frame, _)| frame);
             self.arrive_under_press(changes, window, frame);
