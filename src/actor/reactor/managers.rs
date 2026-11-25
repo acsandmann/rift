@@ -48,17 +48,17 @@ pub struct DragManager {
     pub native_motion_active: Arc<AtomicBool>,
     pub(super) preview: Option<crate::ui::drag_preview::DragPreview>,
     pub(super) preview_enabled: bool,
-    /// The press has a window following the cursor that is not dragged yet: the pointer's
-    /// samples are wanted to start its drag.
-    pub(super) follower_awaits_drag: bool,
     pub(super) haptics_enabled: bool,
 }
 
 impl DragManager {
-    pub fn sync_motion_gate(&self) {
+    /// Whether the pointer's samples are wanted: during a native move, or while the press
+    /// waits to drag a window following the cursor (which only the reactor knows). The reactor
+    /// syncs it after every event, so it is never read from a stale copy.
+    pub fn sync_motion_gate(&self, follower_awaits_drag: bool) {
         let active = self.actor.drop_enabled()
             && (self.actor.kind() == Some(crate::actor::drag::DragKind::NativeMove)
-                || self.follower_awaits_drag);
+                || follower_awaits_drag);
         if self.native_motion_active.load(Ordering::Relaxed) != active {
             self.native_motion_active.store(active, Ordering::Release);
         }
@@ -67,13 +67,11 @@ impl DragManager {
     /// A window leaving Rift's control can no longer be dragged by it.
     pub fn forget_window(&mut self, wid: WindowId) {
         self.actor.window_removed(wid);
-        self.sync_motion_gate();
         self.sync_preview();
     }
 
     pub fn reset(&mut self) {
         self.actor.cancel();
-        self.sync_motion_gate();
         self.release_preview();
     }
 

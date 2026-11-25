@@ -3796,6 +3796,17 @@ fn a_torn_tab_that_never_takes_focus_drags_from_the_first_pointer_sample() {
     );
 }
 
+/// The pointer finds the window following the cursor among everything the press holds: a tear
+/// AX reported first (a press claim, never an unrecorded arrival) that never takes focus drags
+/// from the first pointer sample too.
+#[test]
+fn a_tear_ax_reported_first_that_never_takes_focus_drags_from_the_pointer() {
+    let mut tab = torn_tab_under_held_button().created();
+    assert!(!tab.reactor.is_in_drag());
+    tab.pointer_at(CGPoint::new(450., 450.));
+    assert!(tab.reactor.is_dragging_window(tab.wid));
+}
+
 /// What follows the cursor is a window, not a helper: a window above the normal level (a
 /// tooltip, a menu, a drag image), one away from the pointer, or one of two that both hold it
 /// is not dragged without focus.
@@ -5068,7 +5079,7 @@ fn mission_control_enter_clears_active_drag_state() {
     reactor.ensure_active_drag(wid, &frame);
 
     assert!(reactor.drag_manager.actor.is_active());
-    reactor.drag_manager.sync_motion_gate();
+    reactor.drag_manager.sync_motion_gate(false);
     assert!(
         reactor
             .drag_manager

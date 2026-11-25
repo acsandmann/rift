@@ -512,7 +512,6 @@ impl Reactor {
                 preview: None,
                 preview_enabled: config.settings.drag_drop.enabled
                     && config.settings.drag_drop.preview,
-                follower_awaits_drag: false,
                 haptics_enabled: config.settings.drag_drop.haptics_enabled,
             },
             workspace_switch_manager: managers::WorkspaceSwitchManager {
@@ -1435,8 +1434,7 @@ impl Reactor {
         {
             let _ = tx.send(());
         }
-        self.drag_manager.follower_awaits_drag = self.follower_awaits_drag();
-        self.drag_manager.sync_motion_gate();
+        self.drag_manager.sync_motion_gate(self.follower_awaits_drag());
     }
 
     fn dispatch(&mut self, mut event: Event, changes: &mut Changes) -> anyhow::Result<()> {

@@ -23,10 +23,11 @@ pub(super) enum Pointer {
 /// A held button, and what waits for its release.
 pub(super) struct Press {
     pub(super) button: MouseButton,
-    /// Native windows that appeared under the left button. AX can stay silent about them
-    /// while an app runs its own drag, the WindowServer reports no moves, and the window may
-    /// never take focus, so the one following the cursor is the one that takes focus
-    /// (`follow_focused_arrival`) or the one the pointer holds (`follow_arrival_under`).
+    /// Native windows that appeared under the left button and are not recorded yet (a recorded
+    /// one is a press claim instead). AX can stay silent about them while an app runs its own
+    /// drag, the WindowServer reports no moves, and the window may never take focus, so the one
+    /// following the cursor is the one that takes focus (`follow_focused_arrival`) or the one the
+    /// pointer holds (`follow_arrival_under`), among these and the press's claims.
     pub(super) arrivals: HashSet<WindowServerId>,
     /// The arrival following the cursor (a torn-out tab). The next pointer sample starts its
     /// drag.
@@ -166,7 +167,14 @@ impl Reactor {
         let Pointer::Down(press) = &self.pointer else {
             return;
         };
-        let mut under = press.arrivals.iter().copied().filter(|&wsid| {
+        // What the press holds: unrecorded arrivals (no owner known yet), and claimed windows.
+        let claimed =
+            self.state.windows.owner_claims(ClaimOwner::Press).iter().filter_map(|&wid| {
+                let wsid = self.state.windows.record(wid)?.window_server_id()?;
+                Some((wsid, Some(wid)))
+            });
+        let held = press.arrivals.iter().map(|&wsid| (wsid, None)).chain(claimed);
+        let mut under = held.filter(|&(wsid, _)| {
             let direct = DirectWindow(wsid);
             let level = direct.level();
             let bounds = (level == Some(0)).then(|| direct.bounds()).flatten();
@@ -181,10 +189,15 @@ impl Reactor {
             );
             holds
         });
-        if let (Some(wsid), None) = (under.next(), under.next())
-            && let Some(pid) = DirectWindow(wsid).pid()
-        {
-            self.follow_arrival(changes, WindowId::new(pid, wsid.as_u32()), "holds the pointer");
+        let window = match (under.next(), under.next()) {
+            (Some((_, Some(window))), None) => Some(window),
+            (Some((wsid, None)), None) => {
+                DirectWindow(wsid).pid().map(|pid| WindowId::new(pid, wsid.as_u32()))
+            }
+            _ => None,
+        };
+        if let Some(window) = window {
+            self.follow_arrival(changes, window, "holds the pointer");
         }
     }
 
@@ -215,7 +228,11 @@ impl Reactor {
     pub(super) fn follower_awaits_drag(&self) -> bool {
         matches!(&self.pointer, Pointer::Down(press) if match press.following {
             Some(window) => !self.is_dragging_window(window),
-            None => !press.arrivals.is_empty() && !self.is_in_drag(),
+            None => {
+                !(press.arrivals.is_empty()
+                    && self.state.windows.owner_claims(ClaimOwner::Press).is_empty())
+                    && !self.is_in_drag()
+            }
         })
     }
 
