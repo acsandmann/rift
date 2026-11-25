@@ -108,7 +108,7 @@ impl MasterStackLayoutSystem {
         self.settings = settings;
         let layouts: Vec<_> = self.tiles.layout_roots.keys().collect();
         for layout in layouts {
-            let (root, master, stack) = self.region_roots(layout);
+            let RegionNodes { root, master, stack } = self.slot_regions(layout);
             let master_first = self.master_first();
             self.tiles.tree.map.set_primary_region_first(root, master_first);
             self.tiles.set_layout(root, LayoutKind::from(self.root_orientation()));
@@ -215,31 +215,6 @@ impl MasterStackLayoutSystem {
         let stack_size = (total - master_size).max(0.05);
         self.tiles.tree.map[master].layout.size = master_size;
         self.tiles.tree.map[stack].layout.size = stack_size;
-    }
-
-    /// The arrangement as shown; see [`Shown`].
-    fn shown(&self, layout: LayoutId) -> Shown<'_> {
-        let (_, master, _) = self.region_roots(layout);
-        let tiles = &self.tiles;
-        if tiles.inactive.is_empty()
-            || tiles
-                .windows_from(master, Some(master), true)
-                .all(|window| tiles.window_participates(window))
-        {
-            return Shown::Tree(self);
-        }
-        let mut shown = self.clone();
-        // Remove every away window, so none is promoted into the vacated master area.
-        for &window in &tiles.inactive {
-            shown.update(WindowChange::Remove(window));
-        }
-        Shown::WithoutAway(Box::new(shown))
-    }
-
-    pub(super) fn region_roots(&self, layout: LayoutId) -> (NodeId, NodeId, NodeId) {
-        let root = self.tiles.root(layout);
-        let (master, stack) = self.tiles.map().region_pair(root).expect("master stack region pair");
-        (root, master, stack)
     }
 
     fn enforce_master_count(
@@ -358,7 +333,7 @@ impl MasterStackLayoutSystem {
     }
 
     fn distribute_regions(&mut self, layout: LayoutId) -> bool {
-        let (_, master, stack) = self.region_roots(layout);
+        let RegionNodes { master, stack, .. } = self.slot_regions(layout);
         self.enforce_master_count(layout, master, stack, self.count_windows(master), None)
     }
 
@@ -371,7 +346,7 @@ impl MasterStackLayoutSystem {
         let layouts: Vec<_> = self.tiles.layout_roots.keys().collect();
         for layout in layouts {
             self.distribute_regions(layout);
-            let (_, master, stack) = self.region_roots(layout);
+            let RegionNodes { master, stack, .. } = self.slot_regions(layout);
             self.apply_master_ratio(master, stack);
         }
     }
@@ -390,21 +365,20 @@ impl MasterStackLayoutSystem {
     }
 
     pub fn promote_to_master(&mut self, layout: LayoutId) {
-        if let Shown::WithoutAway(shown) = self.shown(layout) {
-            // An away master keeps its slot: promotion acts among the shown windows,
-            // swapping the focused window into the shown master area's last tile.
-            let (_, master, _) = shown.region_roots(layout);
-            let masters: Vec<_> = shown.tiles.windows_from(master, Some(master), true).collect();
-            if let Some(focused) = self.tiles.selected_window(layout)
-                && !masters.contains(&focused)
-                && let Some(&last) = masters.last()
-            {
-                self.tiles.swap_windows(layout, focused, last);
-                let _ = self.tiles.focus(layout, Focus::Select(focused));
-            }
+        let Some(focused) = self.tiles.selected_window(layout) else {
             return;
+        };
+        let promotion = self.shown(layout).promotion(focused);
+        match promotion {
+            Promotion::Nothing => return,
+            Promotion::Swap(master) => {
+                self.tiles.swap_windows(layout, focused, master);
+                let _ = self.tiles.focus(layout, Focus::Select(focused));
+                return;
+            }
+            Promotion::InTree => {}
         }
-        let (_root, master, stack) = self.region_roots(layout);
+        let RegionNodes { master, stack, .. } = self.slot_regions(layout);
         let Some((node, focused_wid)) = self.tiles.focused_leaf(layout) else {
             return;
         };
@@ -434,26 +408,14 @@ impl MasterStackLayoutSystem {
     }
 
     pub fn swap_master_stack(&mut self, layout: LayoutId) {
-        let shown = self.shown(layout);
-        let shown = shown.system();
-        let (_root, master, stack) = shown.region_roots(layout);
-        let (Some(master_wid), Some(stack_wid)) = (
-            shown.focused_window_in_container(master),
-            shown.focused_window_in_container(stack),
-        ) else {
+        let Some((master, stack)) = self.shown(layout).focused_pair() else {
             return;
         };
-        let _ = self.tiles.swap_windows(layout, master_wid, stack_wid);
+        let _ = self.tiles.swap_windows(layout, master, stack);
     }
 
     pub fn rotate_master_stack(&mut self, layout: LayoutId, backwards: bool) -> bool {
-        let (_, master, stack) = self.region_roots(layout);
-        let mut windows: Vec<_> = self
-            .tiles
-            .windows_from(master, Some(master), true)
-            .chain(self.tiles.windows_from(stack, Some(stack), true))
-            .filter(|&window| self.tiles.window_participates(window))
-            .collect();
+        let mut windows = self.shown(layout).windows();
         if windows.len() < 2 {
             return false;
         }
@@ -503,7 +465,7 @@ impl LayoutSystem for MasterStackLayoutSystem {
     fn remove_layout(&mut self, layout: LayoutId) { self.tiles.remove_layout(layout); }
 
     fn window_in_direction(&self, layout: LayoutId, direction: Direction) -> Option<WindowId> {
-        self.shown(layout).system().tiles.window_in_direction(layout, direction)
+        self.shown(layout).window_in_direction(direction)
     }
 
     fn create_layout(&mut self) -> LayoutId {
@@ -526,16 +488,8 @@ impl LayoutSystem for MasterStackLayoutSystem {
         gaps: &crate::common::config::GapSettings,
         stack_line: crate::common::config::StackLineReserve,
     ) -> Vec<(WindowId, CGRect)> {
-        self.shown(layout).project(
-            layout,
-            screen,
-            stack_offset,
-            constraints,
-            gaps,
-            stack_line,
-            true,
-            None,
-        )
+        self.shown(layout)
+            .project(screen, stack_offset, constraints, gaps, stack_line, true, None)
     }
 
     fn parent_of_selection_is_stacked(&self, layout: LayoutId) -> bool {
@@ -547,11 +501,10 @@ impl LayoutSystem for MasterStackLayoutSystem {
     }
 
     fn focus(&mut self, layout: LayoutId, focus: Focus) -> FocusResult {
-        if let Focus::Direction(_) = focus
-            && let Shown::WithoutAway(mut shown) = self.shown(layout)
+        if let Focus::Direction(direction) = focus
+            && let Some(result) = self.shown(layout).focus(direction)
         {
-            // Move among the shown windows, then select the target in the real tree.
-            let result = shown.tiles.focus(layout, focus);
+            // The target was found among the shown windows; select it in the tree.
             if let Some(window) = result.window {
                 let _ = self.tiles.focus(layout, Focus::Select(window));
             }
@@ -641,7 +594,7 @@ impl MasterStackLayoutSystem {
         if self.tiles.contains_window(layout, wid) {
             return;
         }
-        let (_root, master, stack) = self.region_roots(layout);
+        let RegionNodes { master, stack, .. } = self.slot_regions(layout);
         let count = self.count_windows(master);
         let target = self.target_container_for_new_window(layout, master, stack, count);
         let node = self.insert_window_in_container(layout, target, wid);
@@ -673,14 +626,14 @@ impl MasterStackLayoutSystem {
         direction: Direction,
     ) -> bool {
         self.window_participates(window)
-            && self.shown(layout).move_target(layout, window, direction).is_some()
+            && self.shown(layout).move_target(window, direction).is_some()
     }
 
     fn move_selection(&mut self, layout: LayoutId, direction: Direction) -> bool {
         let Some((_, focused)) = self.tiles.focused_leaf(layout) else {
             return false;
         };
-        let Some(target) = self.shown(layout).move_target(layout, focused, direction) else {
+        let Some(target) = self.shown(layout).move_target(focused, direction) else {
             return false;
         };
         if !self.tiles.swap_windows(layout, focused, target) {
@@ -688,118 +641,6 @@ impl MasterStackLayoutSystem {
         }
         self.tiles.focus(layout, Focus::Select(focused)).handled;
         true
-    }
-
-    /// Only [`Shown::move_target`] calls this, so targets come from the shown arrangement.
-    fn region_move_target(
-        &self,
-        layout: LayoutId,
-        node: NodeId,
-        direction: Direction,
-    ) -> Option<WindowId> {
-        let (_, master, stack) = self.region_roots(layout);
-        let map = self.tiles.map();
-        let in_master = node.ancestors(map).any(|ancestor| ancestor == master);
-        let (region, other, axis) = if in_master {
-            (master, stack, self.master_orientation())
-        } else {
-            (stack, master, self.stack_orientation())
-        };
-        let forward = matches!(direction, Direction::Right | Direction::Down);
-        let master_first = self.master_first();
-        let parallel = direction.orientation() == axis;
-        let toward_other = direction.orientation() == self.root_orientation()
-            && (forward == master_first) == in_master;
-        let start = node.step(region, map, forward);
-        let mut neighbors = self.tiles.windows_from(region, start, forward).peekable();
-        let participates = |window| self.tiles.window_participates(window);
-        if toward_other && (!parallel || neighbors.peek().is_none()) {
-            // Enter the destination from the near edge, skipping suspended windows.
-            let edge = if forward {
-                other
-            } else {
-                other.last_descendant(map)
-            };
-            let mut destination = self.tiles.windows_from(other, Some(edge), forward).peekable();
-            if destination.peek().is_some() {
-                destination.find(|&window| participates(window))
-            } else if in_master {
-                // With no stack region, use the next master window if one exists.
-                self.tiles
-                    .windows_from(region, node.next_in_subtree(region, map), true)
-                    .find(|&window| participates(window))
-            } else if parallel {
-                neighbors.find(|&window| participates(window))
-            } else {
-                None
-            }
-        } else if parallel {
-            neighbors.find(|&window| participates(window))
-        } else {
-            None
-        }
-    }
-}
-
-/// Master-stack as it is shown.
-///
-/// A window that is away (minimized, hidden with its app, native fullscreen, or an
-/// invalid AX identity) keeps its slot in the tree so it returns to the same place,
-/// but it takes no space and no master quota: the first `master_count` shown
-/// windows are the masters. Geometry and command targets are read from this view
-/// only; edits apply to the real tree by window id.
-enum Shown<'a> {
-    /// No away window holds a master slot: the tree is what is shown.
-    Tree(&'a MasterStackLayoutSystem),
-    /// A copy of the tree with every away window removed.
-    WithoutAway(Box<MasterStackLayoutSystem>),
-}
-
-impl Shown<'_> {
-    fn system(&self) -> &MasterStackLayoutSystem {
-        match self {
-            Shown::Tree(system) => system,
-            Shown::WithoutAway(system) => system,
-        }
-    }
-
-    fn move_target(
-        &self,
-        layout: LayoutId,
-        window: WindowId,
-        direction: Direction,
-    ) -> Option<WindowId> {
-        let system = self.system();
-        let node = system.tiles.window_node(layout, window)?;
-        system.region_move_target(layout, node, direction)
-    }
-
-    #[allow(clippy::too_many_arguments)]
-    fn project(
-        &self,
-        layout: LayoutId,
-        screen: CGRect,
-        stack_offset: f64,
-        constraints: &crate::common::collections::HashMap<WindowId, WindowLayoutConstraints>,
-        gaps: &crate::common::config::GapSettings,
-        stack_line: crate::common::config::StackLineReserve,
-        emit_frames: bool,
-        groups: Option<super::tiles::GroupOutput<'_>>,
-    ) -> Vec<(WindowId, CGRect)> {
-        let system = self.system();
-        let (root, master, stack) = system.region_roots(layout);
-        super::tiles::project(
-            &system.tiles,
-            root,
-            |active| super::tiles::project_root(root, Some((master, stack)), active),
-            screen,
-            stack_offset,
-            constraints,
-            gaps,
-            stack_line,
-            emit_frames,
-            groups,
-        )
     }
 }
 
@@ -817,7 +658,6 @@ impl MasterStackLayoutSystem {
         groups: super::tiles::GroupOutput<'_>,
     ) -> Vec<(WindowId, CGRect)> {
         self.shown(layout).project(
-            layout,
             screen,
             stack_offset,
             constraints,
@@ -830,17 +670,231 @@ impl MasterStackLayoutSystem {
 }
 
 impl MasterStackLayoutSystem {
+    // Inspection shows the tree itself, away windows in their slots.
     pub(crate) fn draw_tree(&self, layout: LayoutId) -> String {
-        let (_, master, stack) = self.region_roots(layout);
+        let RegionNodes { master, stack, .. } = self.slot_regions(layout);
         self.tiles.draw_tree(layout, &[(master, "master"), (stack, "stack")])
     }
 
     pub(crate) fn container_tree(&self, layout: LayoutId) -> rift_protocol::ContainerTreeNode {
-        let (_, master, stack) = self.region_roots(layout);
+        let RegionNodes { master, stack, .. } = self.slot_regions(layout);
         self.tiles
             .container_tree_with_roles(layout, &[(master, "master"), (stack, "stack")])
     }
 }
+/// What master-stack shows, kept apart from the tree's slots.
+///
+/// A window that is away (minimized, hidden with its app, native fullscreen, or an
+/// invalid AX identity) keeps its slot in the tree so it returns to the same place
+/// (#647), but takes no space and no master quota. So the regions have two readings:
+/// - [`MasterStackLayoutSystem::slot_regions`]: the tree, where an away window still
+///   holds its slot and counts toward `master_count`. Only edits that keep slots and
+///   inspection read it.
+/// - [`Shown`]: what is on screen, where the first `master_count` shown windows are
+///   the masters. Drawing and command targets read only this.
+///
+/// This module is the only code that reads region nodes from the tree.
+mod view {
+    use std::borrow::Cow;
+
+    use super::*;
+
+    #[derive(Clone, Copy)]
+    pub(super) struct RegionNodes {
+        pub(super) root: NodeId,
+        pub(super) master: NodeId,
+        pub(super) stack: NodeId,
+    }
+
+    fn regions(system: &MasterStackLayoutSystem, layout: LayoutId) -> RegionNodes {
+        let root = system.tiles.root(layout);
+        let (master, stack) =
+            system.tiles.map().region_pair(root).expect("master stack region pair");
+        RegionNodes { root, master, stack }
+    }
+
+    impl MasterStackLayoutSystem {
+        /// The tree's regions: an away window still holds its slot here and counts
+        /// toward `master_count`. Read [`Shown`] for anything about the screen.
+        pub(super) fn slot_regions(&self, layout: LayoutId) -> RegionNodes { regions(self, layout) }
+
+        pub(super) fn shown(&self, layout: LayoutId) -> Shown<'_> {
+            let slots = regions(self, layout);
+            let tiles = &self.tiles;
+            let system = if tiles.inactive.is_empty()
+                || tiles
+                    .windows_from(slots.master, Some(slots.master), true)
+                    .all(|window| tiles.window_participates(window))
+            {
+                Cow::Borrowed(self)
+            } else {
+                let mut copy = self.clone();
+                // Remove every away window, so none is promoted into the vacated master area.
+                for &window in &tiles.inactive {
+                    copy.update(WindowChange::Remove(window));
+                }
+                Cow::Owned(copy)
+            };
+            let regions = match &system {
+                Cow::Borrowed(_) => slots,
+                Cow::Owned(copy) => regions(copy, layout),
+            };
+            Shown { system, layout, regions }
+        }
+    }
+
+    /// Master-stack as it is shown, with its regions read once. Edits apply to the
+    /// tree by window id, so an away window keeps its slot.
+    pub(super) struct Shown<'a> {
+        /// The tree itself when no away window holds a master slot; otherwise a copy
+        /// of it with every away window removed.
+        system: Cow<'a, MasterStackLayoutSystem>,
+        layout: LayoutId,
+        regions: RegionNodes,
+    }
+
+    /// What promoting the focused window does.
+    pub(super) enum Promotion {
+        /// Nothing is away from the master area: promote in the tree.
+        InTree,
+        /// Swap the focused window with this shown master.
+        Swap(WindowId),
+        /// The focused window is already shown as a master.
+        Nothing,
+    }
+
+    impl Shown<'_> {
+        fn system(&self) -> &MasterStackLayoutSystem { &self.system }
+
+        fn windows_in(&self, region: NodeId) -> impl Iterator<Item = WindowId> + '_ {
+            self.system().tiles.windows_from(region, Some(region), true)
+        }
+
+        /// Shown windows in order, masters first.
+        pub(super) fn windows(&self) -> Vec<WindowId> {
+            let tiles = &self.system().tiles;
+            self.windows_in(self.regions.master)
+                .chain(self.windows_in(self.regions.stack))
+                .filter(|&window| tiles.window_participates(window))
+                .collect()
+        }
+
+        pub(super) fn promotion(&self, focused: WindowId) -> Promotion {
+            if let Cow::Borrowed(_) = self.system {
+                return Promotion::InTree;
+            }
+            // Swap into the shown master area's last tile, keeping the away master's slot.
+            let masters: Vec<_> = self.windows_in(self.regions.master).collect();
+            match masters.last() {
+                Some(&last) if !masters.contains(&focused) => Promotion::Swap(last),
+                _ => Promotion::Nothing,
+            }
+        }
+
+        /// The focused window of the master area and of the stack.
+        pub(super) fn focused_pair(&self) -> Option<(WindowId, WindowId)> {
+            let system = self.system();
+            Some((
+                system.focused_window_in_container(self.regions.master)?,
+                system.focused_window_in_container(self.regions.stack)?,
+            ))
+        }
+
+        pub(super) fn window_in_direction(&self, direction: Direction) -> Option<WindowId> {
+            self.system().tiles.window_in_direction(self.layout, direction)
+        }
+
+        /// Directional focus among the shown windows; `None` when the tree is what is
+        /// shown and the tree's own focus applies.
+        pub(super) fn focus(self, direction: Direction) -> Option<FocusResult> {
+            match self.system {
+                Cow::Borrowed(_) => None,
+                Cow::Owned(mut copy) => {
+                    Some(copy.tiles.focus(self.layout, Focus::Direction(direction)))
+                }
+            }
+        }
+
+        pub(super) fn move_target(
+            &self,
+            window: WindowId,
+            direction: Direction,
+        ) -> Option<WindowId> {
+            let system = self.system();
+            let tiles = &system.tiles;
+            let node = tiles.window_node(self.layout, window)?;
+            let RegionNodes { master, stack, .. } = self.regions;
+            let map = tiles.map();
+            let in_master = node.ancestors(map).any(|ancestor| ancestor == master);
+            let (region, other, axis) = if in_master {
+                (master, stack, system.master_orientation())
+            } else {
+                (stack, master, system.stack_orientation())
+            };
+            let forward = matches!(direction, Direction::Right | Direction::Down);
+            let master_first = system.master_first();
+            let parallel = direction.orientation() == axis;
+            let toward_other = direction.orientation() == system.root_orientation()
+                && (forward == master_first) == in_master;
+            let start = node.step(region, map, forward);
+            let mut neighbors = tiles.windows_from(region, start, forward).peekable();
+            let participates = |window| tiles.window_participates(window);
+            if toward_other && (!parallel || neighbors.peek().is_none()) {
+                // Enter the destination from the near edge, skipping suspended windows.
+                let edge = if forward {
+                    other
+                } else {
+                    other.last_descendant(map)
+                };
+                let mut destination = tiles.windows_from(other, Some(edge), forward).peekable();
+                if destination.peek().is_some() {
+                    destination.find(|&window| participates(window))
+                } else if in_master {
+                    // With no stack region, use the next master window if one exists.
+                    tiles
+                        .windows_from(region, node.next_in_subtree(region, map), true)
+                        .find(|&window| participates(window))
+                } else if parallel {
+                    neighbors.find(|&window| participates(window))
+                } else {
+                    None
+                }
+            } else if parallel {
+                neighbors.find(|&window| participates(window))
+            } else {
+                None
+            }
+        }
+
+        #[allow(clippy::too_many_arguments)]
+        pub(super) fn project(
+            &self,
+            screen: CGRect,
+            stack_offset: f64,
+            constraints: &crate::common::collections::HashMap<WindowId, WindowLayoutConstraints>,
+            gaps: &crate::common::config::GapSettings,
+            stack_line: crate::common::config::StackLineReserve,
+            emit_frames: bool,
+            groups: Option<super::super::tiles::GroupOutput<'_>>,
+        ) -> Vec<(WindowId, CGRect)> {
+            let RegionNodes { root, master, stack } = self.regions;
+            super::super::tiles::project(
+                &self.system().tiles,
+                root,
+                |active| super::super::tiles::project_root(root, Some((master, stack)), active),
+                screen,
+                stack_offset,
+                constraints,
+                gaps,
+                stack_line,
+                emit_frames,
+                groups,
+            )
+        }
+    }
+}
+use view::{Promotion, RegionNodes};
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -917,7 +971,7 @@ mod tests {
             inner: &'a GroupLayouts,
             regions: slotmap::SecondaryMap<LayoutId, LegacyRegions>,
         }
-        let (_, master, stack) = system.region_roots(layout);
+        let RegionNodes { master, stack, .. } = system.slot_regions(layout);
         let mut regions = slotmap::SecondaryMap::new();
         regions.insert(layout, LegacyRegions { master, stack });
         let legacy = ron::to_string(&Legacy { inner: &system.tiles, regions }).unwrap();
@@ -948,7 +1002,7 @@ mod tests {
     /// order (its first window is the one shown in the master area).
     fn away_master_fixture() -> (MasterStackLayoutSystem, LayoutId, WindowId, Vec<WindowId>) {
         let (mut system, layout, _) = master_stack(1, 4);
-        let (_, master, stack) = system.region_roots(layout);
+        let RegionNodes { master, stack, .. } = system.slot_regions(layout);
         let away = system.tiles.windows_from(master, Some(master), true).next().unwrap();
         let stack: Vec<_> = system.tiles.windows_from(stack, Some(stack), true).collect();
         system.set_window_participation(away, false);
