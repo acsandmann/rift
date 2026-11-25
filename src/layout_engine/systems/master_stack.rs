@@ -833,6 +833,53 @@ mod tests {
         assert_eq!(restored.container_tree(layout), after);
     }
 
+    #[test]
+    fn second_master_going_away_promotes_the_first_stack_window() {
+        use objc2_core_foundation::{CGPoint, CGSize};
+        let screen = CGRect::new(CGPoint::ZERO, CGSize::new(1000.0, 1000.0));
+        let gaps = crate::common::config::GapSettings::default();
+        let constraints = Default::default();
+        let mut system = MasterStackLayoutSystem::new(MasterStackSettings {
+            master_count: 2,
+            ..Default::default()
+        });
+        let layout = system.create_layout();
+        for window in [w(1), w(2), w(3), w(4)] {
+            system.update(WindowChange::Add(layout, window, None));
+        }
+        let frames = |system: &MasterStackLayoutSystem| {
+            system.calculate_layout(layout, screen, 0.0, &constraints, &gaps, Default::default())
+        };
+        let original = frames(&system);
+        let masters: Vec<_> = original
+            .iter()
+            .filter(|(_, f)| f.origin.x == 0.0)
+            .map(|(wid, _)| *wid)
+            .collect();
+        assert_eq!(masters.len(), 2);
+        let (away, kept) = (masters[1], masters[0]);
+        let away_frame = original.iter().find(|(wid, _)| *wid == away).unwrap().1;
+        let kept_frame = original.iter().find(|(wid, _)| *wid == kept).unwrap().1;
+
+        system.set_window_participation(away, false);
+        let projected = frames(&system);
+        let in_master: Vec<_> = projected.iter().filter(|(_, f)| f.origin.x == 0.0).collect();
+        assert_eq!(
+            in_master.len(),
+            2,
+            "the master area keeps two windows: {projected:?}"
+        );
+        assert!(in_master.iter().any(|(wid, f)| *wid == kept && *f == kept_frame));
+        assert!(
+            in_master.iter().any(|(wid, f)| *wid != kept && *f == away_frame),
+            "a stack window takes the away master's tile: {projected:?}"
+        );
+        assert_eq!(projected.iter().filter(|(_, f)| f.origin.x > 0.0).count(), 1);
+
+        system.set_window_participation(away, true);
+        assert_eq!(frames(&system), original);
+    }
+
     /// Every combination of away windows, for each master count: away windows take
     /// no space (master quota included), the tree is never edited by projection,
     /// and bringing every window back restores the original frames.
