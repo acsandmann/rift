@@ -2152,8 +2152,8 @@ mod tests {
         assert_ne!(velocity, 0.0);
         replacement.replace(Some(next));
         let handoff = replacement.presentation.snapshot(started);
-        assert!((handoff.offset - position - delta).abs() < 1e-9);
-        assert!((handoff.velocity - velocity).abs() < 1e-9);
+        assert!((handoff.offset() - position - delta).abs() < 1e-9);
+        assert!((handoff.velocity() - velocity).abs() < 1e-9);
     }
 
     #[test]

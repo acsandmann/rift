@@ -378,12 +378,34 @@ pub(crate) struct ViewportPresentation {
 /// a camera or copying history on each display refresh.
 #[derive(Clone, Debug)]
 pub(crate) struct PresentedViewport {
-    pub offset: f64,
-    pub velocity: f64,
-    pub target: f64,
-    pub gesturing: bool,
-    pub timestamp: Instant,
+    camera: Presented,
     motion: Arc<Mutex<MotionHistory>>,
+}
+
+/// Where the presenter has the camera. How it comes to rest stays the layout's.
+#[derive(Clone, Debug)]
+enum Presented {
+    Gesture(f64),
+    Still(f64),
+    Moving(CameraSpring),
+}
+
+// Read by the presenter's handoff tests.
+#[cfg(test)]
+impl PresentedViewport {
+    pub fn offset(&self) -> f64 {
+        match &self.camera {
+            Presented::Gesture(offset) | Presented::Still(offset) => *offset,
+            Presented::Moving(spring) => spring.current,
+        }
+    }
+
+    pub fn velocity(&self) -> f64 {
+        match &self.camera {
+            Presented::Moving(spring) => spring.current_velocity,
+            Presented::Gesture(_) | Presented::Still(_) => 0.0,
+        }
+    }
 }
 
 impl ViewportPresentation {
@@ -424,16 +446,22 @@ impl ViewportPresentation {
         self.viewport.sample(now, scale).unwrap_or(self.gesturing())
     }
 
+    /// A pending move counts as started: the presenter reports it as moving.
     pub fn snapshot(&self, now: Instant) -> PresentedViewport {
+        let (offset, target) = (self.offset(), self.target());
+        let camera = match &self.viewport {
+            Viewport::Gesture(_) => Presented::Gesture(offset),
+            _ if offset == target => Presented::Still(offset),
+            viewport => {
+                let velocity = match viewport {
+                    Viewport::Resting(_, Motion::Animation(s)) => s.current_velocity,
+                    _ => 0.0,
+                };
+                Presented::Moving(CameraSpring::new(offset, target, velocity, now))
+            }
+        };
         PresentedViewport {
-            offset: self.offset(),
-            velocity: match &self.viewport {
-                Viewport::Resting(_, Motion::Animation(s)) => s.current_velocity,
-                _ => 0.0,
-            },
-            target: self.target(),
-            gesturing: self.gesturing(),
-            timestamp: now,
+            camera,
             motion: self.motion.clone(),
         }
     }
@@ -1650,18 +1678,17 @@ impl ScrollingLayoutSystem {
 
     pub(crate) fn commit_presented_viewport(&mut self, layout: LayoutId, p: &PresentedViewport) {
         if let Some(state) = self.layouts.get_mut(layout) {
-            // The presenter reports where the camera is; how it rests stays the layout's.
             // A released gesture rests at a position.
             let rest = match state.camera.viewport {
                 Viewport::Resting(rest, _) => rest,
                 Viewport::Uninitialized | Viewport::Gesture(_) => Rest::At,
             };
-            state.camera.viewport = if p.gesturing {
-                Viewport::Gesture(p.offset)
-            } else if p.offset != p.target {
-                Viewport::springing(rest, p.offset, p.target, p.velocity, p.timestamp)
-            } else {
-                Viewport::Resting(rest, Motion::Static(p.offset))
+            state.camera.viewport = match &p.camera {
+                Presented::Gesture(offset) => Viewport::Gesture(*offset),
+                Presented::Still(offset) => Viewport::Resting(rest, Motion::Static(*offset)),
+                Presented::Moving(spring) => {
+                    Viewport::Resting(rest, Motion::Animation(spring.clone()))
+                }
             };
             state.camera.motion = p.motion.lock().clone();
         }
