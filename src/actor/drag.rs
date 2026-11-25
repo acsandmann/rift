@@ -360,6 +360,7 @@ impl DragActor {
         let session = self.session.take()?;
         Some(DragCommit {
             source: session.source,
+            kind: session.kind,
             target: session.target.validated(),
         })
     }

@@ -113,6 +113,7 @@ impl DragOrigin {
 #[derive(Debug, Clone)]
 pub struct DragCommit {
     pub source: DragSource,
+    pub kind: DragKind,
     pub target: Option<DropTarget>,
 }
 

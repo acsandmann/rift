@@ -49,19 +49,25 @@ impl Reactor {
         }
     }
 
-    pub(in crate::actor::reactor) fn finish_drag(
+    /// End the drag `button` finishes and hide its preview. It lands in `land_drag`.
+    pub(in crate::actor::reactor) fn end_drag(
+        &mut self,
+        button: crate::actor::drag::MouseButton,
+    ) -> Option<crate::actor::drag::DragCommit> {
+        let commit = self.drag_manager.actor.finish(button)?;
+        self.drag_manager.release_preview();
+        Some(commit)
+    }
+
+    pub(in crate::actor::reactor) fn land_drag(
         &mut self,
         changes: &mut Changes,
-        button: crate::actor::drag::MouseButton,
+        commit: crate::actor::drag::DragCommit,
     ) {
-        let kind = self.drag_manager.actor.kind();
-        let Some(commit) = self.drag_manager.actor.finish(button) else {
-            return;
-        };
-        self.drag_manager.release_preview();
         if self.refreshes_blocked() {
             return;
         }
+        let kind = commit.kind;
         let source = commit.source;
         let window = source.window;
         let Some(workspace) = self.state.windows.workspace_for_window(window) else {
@@ -72,7 +78,7 @@ impl Reactor {
         };
         changes.arrange(Some(owner), Presentation::Animated);
 
-        if kind == Some(crate::actor::drag::DragKind::NativeResize) {
+        if kind == crate::actor::drag::DragKind::NativeResize {
             let engine = &mut self.layout_manager.layout_engine;
             if engine.is_window_floating(window) {
                 engine.store_floating_position(workspace, window, source.last_frame);
@@ -92,7 +98,7 @@ impl Reactor {
         let crossing = crossing.or_else(|| {
             // The last AX frame can lag mouse-up. Use a complete membership sample
             // only when current WindowServer membership corroborates its destination.
-            if kind != Some(crate::actor::drag::DragKind::NativeMove)
+            if kind != crate::actor::drag::DragKind::NativeMove
                 || !self.space_state.membership_complete
             {
                 return None;

@@ -2718,7 +2718,9 @@ impl Reactor {
         {
             return;
         }
-        self.finish_drag(changes, button);
+        if let Some(commit) = self.end_drag(button) {
+            self.land_drag(changes, commit);
+        }
         if let Some(window) = self.window_id_under_cursor()
             && let Some(space) = self
                 .assigned_space_for_window_id(window)
