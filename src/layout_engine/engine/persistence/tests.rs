@@ -33,28 +33,25 @@ fn evidence(window: WindowId) -> WindowFingerprint {
 fn live_state(window: WindowId) -> WindowState {
     let saved = evidence(window);
     let frame = CGRect::new(CGPoint::new(0.0, 0.0), CGSize::new(saved.width, saved.height));
-    WindowState {
-        native_transient: false,
-        info: WindowInfo {
-            has_native_tabs: false,
-            is_standard: true,
-            is_root: true,
-            is_minimized: false,
-            is_resizable: true,
-            min_size: None,
-            max_size: None,
-            title: saved.title.unwrap(),
-            frame,
-            sys_id: saved.window_server_id.map(WindowServerId::new),
-            bundle_id: saved.app_id,
-            path: None,
-            ax_role: None,
-            ax_subrole: None,
-        },
-        frame_monotonic: frame,
-        is_manageable: true,
-        manage_override: None,
+    let mut state: WindowState = WindowInfo {
+        has_native_tabs: false,
+        is_standard: true,
+        is_root: true,
+        is_minimized: false,
+        is_resizable: true,
+        min_size: None,
+        max_size: None,
+        title: saved.title.unwrap(),
+        frame,
+        sys_id: saved.window_server_id.map(WindowServerId::new),
+        bundle_id: saved.app_id,
+        path: None,
+        ax_role: None,
+        ax_subrole: None,
     }
+    .into();
+    state.is_manageable = true;
+    state
 }
 
 fn fresh(

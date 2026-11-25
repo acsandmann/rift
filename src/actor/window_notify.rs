@@ -343,7 +343,7 @@ impl Dispatcher {
                         let last_seen = tx_store
                             .as_ref()
                             .and_then(|store| store.get(&wsid))
-                            .map(|record| record.txid);
+                            .map(|record| record.txid());
                         events_tx.send(Event::WindowFrameChanged(
                             WindowId { idx, pid },
                             bounds,

@@ -219,7 +219,7 @@ fn claimed_floating_window_keeps_its_classification_and_adopts_owner_geometry() 
         Requested(false),
         None,
     ));
-    assert_eq!(reactor.state.windows.window(wid).unwrap().frame_monotonic, moved);
+    assert_eq!(reactor.state.windows.window(wid).unwrap().actual().rect(), moved);
     assert!(!reactor.is_in_drag(), "an owner move is not a Rift drag");
     let stored = |r: &Reactor| r.layout_manager.layout_engine.get_floating_position(workspace, wid);
     assert_eq!(stored(&reactor), Some(floating_frame));
@@ -248,14 +248,14 @@ fn claim_cancels_drag_animation_and_pending_geometry() {
         crate::common::config::MouseAction::Move,
         crate::actor::drag::DragScene::default(),
     );
-    let txid = reactor.transaction_manager.generate_next_txid(wsid);
-    reactor.transaction_manager.store_txid(wsid, txid, frame);
+    let txid = reactor.tx_store.fence(wsid);
+    reactor.tx_store.insert(wsid, txid, frame);
     let (animation_tx, animation_rx) = animation::AnimationSender::channel();
     reactor.animation_tx = Some(animation_tx);
 
     reactor.claim_window(wid, OWNER, NONE).unwrap();
     assert!(!reactor.drag_manager.actor.is_active());
-    assert_eq!(reactor.transaction_manager.get_target_frame(wsid), None);
+    assert_eq!(reactor.tx_store.target(&wsid), None);
     assert!(
         std::iter::from_fn(|| animation_rx.commands.try_recv().ok())
             .any(|message| matches!(message, animation::Message::Stop(ids) if ids == [wid]))
@@ -676,7 +676,8 @@ fn discovering_an_owner_moved_claimed_window_arranges_nothing() {
                 .windows
                 .window(window)
                 .unwrap()
-                .frame_monotonic
+                .actual()
+                .rect()
                 .same_as(info.frame)
         );
     }
@@ -730,7 +731,7 @@ fn minimize_and_lose_admission_while_claimed(reactor: &mut Reactor, window: Wind
     reactor.discover_test_windows(window.pid, vec![(window, info.clone())], visible.clone());
 
     let wsid = info.sys_id.unwrap();
-    let frame = reactor.state.windows.window(window).unwrap().frame_monotonic;
+    let frame = reactor.state.windows.window(window).unwrap().actual().rect();
     let server_info = |layer| WindowServerInfo {
         id: wsid,
         pid: window.pid,

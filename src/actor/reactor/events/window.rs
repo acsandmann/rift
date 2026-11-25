@@ -1,7 +1,7 @@
 use objc2_core_foundation::CGRect;
 
 use super::super::*;
-use crate::actor::reactor::transaction_manager::TransactionManager;
+use crate::model::tx_store::WindowTxStore;
 use crate::sys::event::MouseState;
 
 #[derive(Debug)]
@@ -21,7 +21,7 @@ pub struct WindowFrameChangedPayload {
 
 pub fn frame_change_needs_layout(
     state: &mut crate::model::RiftState,
-    transactions: &TransactionManager,
+    transactions: &WindowTxStore,
     wid: WindowId,
     new_frame: CGRect,
     last_seen: Option<TransactionId>,
@@ -32,26 +32,26 @@ pub fn frame_change_needs_layout(
         return false;
     };
     let server = window.info.sys_id;
-    let record = server.and_then(|server| transactions.store.get(&server));
+    let record = server.and_then(|server| transactions.get(&server));
 
     if requested {
         if let (Some(seen), Some(record)) = (last_seen, record)
-            && seen != record.txid
+            && seen != record.txid()
         {
             return false;
         }
         if let Some(server) = server {
             if let Some(seen) = last_seen {
-                transactions.store.acknowledge(server, seen, new_frame);
+                transactions.acknowledge(server, seen, new_frame);
             } else {
-                transactions.clear_target_for_window(server);
+                transactions.clear_target(&server);
             }
         }
-        window.frame_monotonic = new_frame;
+        window.record_actual(new_frame);
         return false;
     }
 
-    if window.frame_monotonic.same_as(new_frame) {
+    if window.actual().rect().same_as(new_frame) {
         return false;
     }
     if mouse_state.is_none() {
@@ -61,20 +61,20 @@ pub fn frame_change_needs_layout(
         && let Some(target) = record.target()
     {
         if new_frame.same_as(target) {
-            window.frame_monotonic = new_frame;
+            window.record_actual(new_frame);
             return false;
         }
         if *mouse_state != Some(MouseState::Down) && last_seen.is_some() {
             // Native notifications can describe an intermediate AX frame. Only
             // the app's readback completes a write.
-            if last_seen == Some(record.txid) {
-                window.frame_monotonic = new_frame;
+            if last_seen == Some(record.txid()) {
+                window.record_actual(new_frame);
             }
             return false;
         }
     }
     if let Some(server) = server {
-        transactions.clear_target_for_window(server);
+        transactions.clear_target(&server);
     }
     true
 }
@@ -102,7 +102,7 @@ impl Reactor {
             return;
         };
         let server_id = window.info.sys_id;
-        let old_frame = window.frame_monotonic;
+        let old_frame = window.actual().rect();
 
         if !old_space_active && !new_space_active {
             return;
@@ -111,7 +111,7 @@ impl Reactor {
             return;
         }
         if let Some(window) = self.state.windows.window_mut(wid) {
-            window.frame_monotonic = new_frame;
+            window.record_actual(new_frame);
         }
         // The external owner has geometry authority; keep only native facts current.
         if self.state.windows.is_claimed(wid) {

@@ -438,8 +438,8 @@ fn inventory_does_not_replace_geometry_owned_by_pending_rift_transaction() {
 
     let mut target = frame;
     target.origin.x = 200.0;
-    let txid = reactor.transaction_manager.generate_next_txid(wsid);
-    reactor.transaction_manager.store_txid(wsid, txid, target);
+    let txid = reactor.tx_store.fence(wsid);
+    reactor.tx_store.insert(wsid, txid, target);
 
     let mut parked = frame;
     parked.origin.x += frame.size.width;
@@ -450,28 +450,28 @@ fn inventory_does_not_replace_geometry_owned_by_pending_rift_transaction() {
     );
 
     assert!(
-        reactor.state.windows.window(wid).unwrap().frame_monotonic.same_as(frame),
+        reactor.state.windows.window(wid).unwrap().actual().rect().same_as(frame),
         "inventory must not feed a transient Rift-owned frame back into model geometry"
     );
-    assert_eq!(reactor.transaction_manager.get_target_frame(wsid), Some(target));
+    assert_eq!(reactor.tx_store.target(&wsid), Some(target));
     assert_eq!(
         reactor.layout_calculations.len(),
         layout_updates,
         "a passive inventory refresh must not schedule another arrange"
     );
 
-    reactor.transaction_manager.clear_target_for_window(wsid);
+    reactor.tx_store.clear_target(&wsid);
     reactor.discover_test_windows(
         wid.pid,
         vec![(wid, make_window_info(parked, Some(wsid), "Window", None))],
         vec![wid],
     );
     assert!(
-        reactor.state.windows.window(wid).unwrap().frame_monotonic.same_as(frame),
-        "after inventory geometry becomes authoritative, arrange must restore the tiled frame"
+        reactor.state.windows.window(wid).unwrap().actual().rect().same_as(parked),
+        "the model keeps the reported frame until the app answers the corrective write"
     );
     assert_eq!(
-        reactor.transaction_manager.get_target_frame(wsid),
+        reactor.tx_store.target(&wsid),
         Some(frame),
         "the authoritative inventory change must trigger a corrective frame transaction"
     );
@@ -1229,10 +1229,10 @@ fn cross_display_workspace_focus_keeps_relative_warp() {
                 Some(WindowId::new(2, 1)),
             );
             let source_frame =
-                reactor.state.windows.window(WindowId::new(2, 1)).unwrap().frame_monotonic;
+                reactor.state.windows.window(WindowId::new(2, 1)).unwrap().actual().rect();
             assert!(shared_right().contains(source_frame.mid()));
             let target = WindowId::new(1, 1);
-            let frame = reactor.state.windows.window(target).unwrap().frame_monotonic;
+            let frame = reactor.state.windows.window(target).unwrap().actual().rect();
             reactor.space_state.command_space = Some(right);
             reactor.config.settings.mouse_follows_focus = enabled;
             let (input_tx, mut input_rx) = actor::channel();
@@ -1432,7 +1432,7 @@ fn focus_display_with_window_preserves_selection_raise_and_cursor() {
             left,
             remember_focus.then_some(window),
         );
-        let center = reactor.state.windows.window(window).unwrap().frame_monotonic.mid();
+        let center = reactor.state.windows.window(window).unwrap().actual().rect().mid();
         reactor.handle_event(focus_display_command(DisplaySelector::Direction(
             Direction::Down,
         )));
@@ -1948,8 +1948,8 @@ fn reactor_with_window_moved_to_space2()
 
     assert!(reactor.assign_test_window_to_workspace(space1, wid, space1_workspace));
     assert!(reactor.assign_test_window_to_workspace(space2, wid, space2_workspace));
-    let txid = reactor.transaction_manager.generate_next_txid(wsid);
-    reactor.transaction_manager.store_txid(wsid, txid, moved_frame);
+    let txid = reactor.tx_store.fence(wsid);
+    reactor.tx_store.insert(wsid, txid, moved_frame);
     assert_eq!(reactor.assigned_space_for_window_id(wid), Some(space2));
 
     (reactor, wid, wsid, space1, space2, moved_frame)
@@ -2006,7 +2006,7 @@ fn reactor_with_floating_window() -> (Reactor, WindowId, SpaceId, CGRect, CGRect
         .expect("workspace");
     let floating_frame = CGRect::new(CGPoint::new(100., 100.), CGSize::new(400., 300.));
     if let Some(w) = reactor.state.windows.window_mut(wid) {
-        w.frame_monotonic = floating_frame;
+        w.record_actual(floating_frame);
     }
     reactor
         .layout_manager
@@ -2127,9 +2127,7 @@ fn failed_frame_write_retries_full_geometry_on_next_arrange() {
                 bounds,
             )
         });
-        let txid = reactor
-            .transaction_manager
-            .get_last_sent_txid(reactor.test_window_server_id(wid));
+        let txid = reactor.tx_store.last_txid(&reactor.test_window_server_id(wid));
         apps.requests();
 
         reactor.handle_event(Event::WindowFrameWriteFailed(wid, txid));
@@ -2201,7 +2199,7 @@ fn accepted_frame_settles_the_write_without_retrying_an_adjusted_size() {
     let target = CGRect::new(CGPoint::new(20., 20.), CGSize::new(620., 500.));
     let accepted = CGRect::new(target.origin, CGSize::new(700., 500.));
     assert!(arrange(&mut reactor, target));
-    let txid = reactor.transaction_manager.get_last_sent_txid(wsid);
+    let txid = reactor.tx_store.last_txid(&wsid);
     apps.requests();
 
     let readback = |frame, txid| {
@@ -2209,27 +2207,24 @@ fn accepted_frame_settles_the_write_without_retrying_an_adjusted_size() {
     };
     reactor.handle_event(readback(accepted, txid));
     assert_eq!(
-        reactor.state.windows.window(wid).unwrap().frame_monotonic,
+        reactor.state.windows.window(wid).unwrap().actual().rect(),
         accepted
     );
-    assert_eq!(reactor.transaction_manager.get_target_frame(wsid), None);
+    assert_eq!(reactor.tx_store.target(&wsid), None);
     let mut new_target = target;
     new_target.origin.x += 100.;
     assert!(!arrange(&mut reactor, target));
     assert!(apps.requests().is_empty());
     assert!(arrange(&mut reactor, new_target));
-    let newer = reactor.transaction_manager.get_last_sent_txid(wsid);
+    let newer = reactor.tx_store.last_txid(&wsid);
     reactor.handle_event(readback(accepted, txid));
-    assert_eq!(
-        reactor.transaction_manager.get_target_frame(wsid),
-        Some(new_target)
-    );
+    assert_eq!(reactor.tx_store.target(&wsid), Some(new_target));
     reactor.handle_event(readback(new_target, newer));
     assert_eq!(
-        reactor.state.windows.window(wid).unwrap().frame_monotonic,
+        reactor.state.windows.window(wid).unwrap().actual().rect(),
         new_target
     );
-    assert_eq!(reactor.transaction_manager.get_target_frame(wsid), None);
+    assert_eq!(reactor.tx_store.target(&wsid), None);
 }
 
 #[test]
@@ -2562,8 +2557,8 @@ fn events_that_change_no_managed_layout_do_not_arrange() {
     let moved = |wid, frame, txid, requested| {
         Event::WindowFrameChanged(wid, frame, txid, Requested(requested), Some(MouseState::Up))
     };
-    let txid = reactor.transaction_manager.generate_next_txid(wsid);
-    reactor.transaction_manager.store_txid(wsid, txid, at(40.0));
+    let txid = reactor.tx_store.fence(wsid);
+    reactor.tx_store.insert(wsid, txid, at(40.0));
     // Acknowledged, unchanged, and explicitly requested frames.
     for event in [
         moved(wid, at(40.0), Some(txid), true),
@@ -2577,8 +2572,8 @@ fn events_that_change_no_managed_layout_do_not_arrange() {
 
     // A stale transaction while a newer target is pending, duplicate minimize
     // edges, and events for unknown windows.
-    let current = reactor.transaction_manager.generate_next_txid(wsid);
-    reactor.transaction_manager.store_txid(wsid, current, at(40.0));
+    let current = reactor.tx_store.fence(wsid);
+    reactor.tx_store.insert(wsid, current, at(40.0));
     let unknown = WindowId::new(wid.pid + 100, wid.idx.get());
     for (case, (event, checked)) in [
         (moved(wid, at(60.0), Some(current.next()), false), true),
@@ -2608,7 +2603,7 @@ fn events_that_change_no_managed_layout_do_not_arrange() {
     let before = reactor.layout_calculations.len();
     reactor.handle_event(Event::WindowCreated(popup, info, None, None));
     reactor.handle_event(Event::WindowDestroyed(popup));
-    reactor.transaction_manager.clear_target_for_window(wsid);
+    reactor.tx_store.clear_target(&wsid);
     reactor.set_active_spaces(&[]);
     reactor.handle_event(moved(wid, at(70.0), None, false));
     assert_eq!(reactor.layout_calculations.len(), before);
@@ -2821,7 +2816,7 @@ fn cross_display_drag_relocates_the_window_once_and_preserves_floating() {
         }
         // Use the accepted frame after tiling. Changing its size on mouse-down
         // would send a resize rather than a native move.
-        let initial_frame = reactor.state.windows.window(wid).unwrap().frame_monotonic;
+        let initial_frame = reactor.state.windows.window(wid).unwrap().actual().rect();
         let released = CGRect::new(
             CGPoint::new(screen2.origin.x + 120.0, initial_frame.origin.y),
             initial_frame.size,
@@ -2829,7 +2824,7 @@ fn cross_display_drag_relocates_the_window_once_and_preserves_floating() {
         reactor.handle_event(Event::WindowFrameChanged(
             wid,
             if last_frame_delayed {
-                let mut intermediate = reactor.state.windows.window(wid).unwrap().frame_monotonic;
+                let mut intermediate = reactor.state.windows.window(wid).unwrap().actual().rect();
                 intermediate.origin.x += 25.;
                 intermediate
             } else {
@@ -2907,7 +2902,7 @@ fn new_window_under_a_held_pointer_waits_for_a_frame_change_before_dragging() {
         "creation alone must not acquire drag ownership"
     );
 
-    let original = reactor.state.windows.window(wid).unwrap().frame_monotonic;
+    let original = reactor.state.windows.window(wid).unwrap().actual().rect();
     let frame_changed = |frame| {
         Event::WindowFrameChanged(wid, frame, None, Requested(false), Some(MouseState::Down))
     };
@@ -2938,7 +2933,7 @@ fn unrelated_native_resize_cannot_steal_a_drag_or_revive_its_transfer() {
         Event::WindowFrameChanged(window, frame, None, Requested(false), Some(MouseState::Down))
     };
     reactor.handle_event(moved(wid, drag_frame));
-    let mut resized = reactor.state.windows.window(other).unwrap().frame_monotonic;
+    let mut resized = reactor.state.windows.window(other).unwrap().actual().rect();
     resized.size.width += 80.;
     reactor.handle_event(moved(other, resized));
 
@@ -3142,9 +3137,9 @@ fn stale_user_space_appearance_is_ignored_when_server_state_already_matches_pend
 
     assert!(reactor.assign_test_window_to_workspace(space1, wid, space1_workspace));
     reactor.state.windows.set_window_server_space(wsid, Some(space1));
-    let txid = reactor.transaction_manager.generate_next_txid(wsid);
+    let txid = reactor.tx_store.fence(wsid);
     let target_frame = CGRect::new(CGPoint::new(100., 100.), CGSize::new(800., 600.));
-    reactor.transaction_manager.store_txid(wsid, txid, target_frame);
+    reactor.tx_store.insert(wsid, txid, target_frame);
 
     window_server_appeared(&mut reactor, wsid, space2, SpaceEventKind::User);
 
@@ -3226,7 +3221,7 @@ fn discovery_prefers_authoritative_space_over_geometry_when_displays_overlap_wor
         .windows
         .window_mut(wid)
         .expect("window should exist")
-        .frame_monotonic = conflicting_frame;
+        .record_actual(conflicting_frame);
     reactor.track_test_window_server_info(wsid, wid.pid, conflicting_frame);
 
     assert_eq!(
@@ -4152,8 +4147,8 @@ fn app_rescue_after_clamped_hide_is_hidden_again() {
     assert!(reactor.assign_test_window_to_workspace(space, wid, workspaces[0]));
     let _ = apps.requests();
     assert!(reactor.arrange_test(true, None));
-    let hidden_target = reactor.transaction_manager.get_target_frame(wsid).unwrap();
-    let txid = reactor.transaction_manager.get_last_sent_txid(wsid);
+    let hidden_target = reactor.tx_store.target(&wsid).unwrap();
+    let txid = reactor.tx_store.last_txid(&wsid);
     let _ = apps.requests();
     let clamped = CGRect::new(
         CGPoint::new(hidden_target.origin.x, hidden_target.origin.y - 41.),
@@ -4214,7 +4209,10 @@ fn topology_change_clears_stale_pending_hide_target_before_next_workspace_layout
     assert!(reactor.assign_test_window_to_workspace(space, wid, hidden_workspace));
 
     if let Some(window) = reactor.state.windows.window_mut(wid) {
-        window.frame_monotonic = CGRect::new(CGPoint::new(200.0, 200.0), CGSize::new(400.0, 400.0));
+        window.record_actual(CGRect::new(
+            CGPoint::new(200.0, 200.0),
+            CGSize::new(400.0, 400.0),
+        ));
     }
 
     let gaps = reactor.config.settings.layout.gaps.clone();
@@ -4228,7 +4226,11 @@ fn topology_change_clears_stale_pending_hide_target_before_next_workspace_layout
             &gaps,
             Default::default(),
             |query_wid| {
-                reactor.state.windows.window(query_wid).map(|window| window.frame_monotonic)
+                reactor
+                    .state
+                    .windows
+                    .window(query_wid)
+                    .map(|window| reactor.tx_store.planned(window))
             },
             &[screen],
         )
@@ -4237,8 +4239,8 @@ fn topology_change_clears_stale_pending_hide_target_before_next_workspace_layout
         .map(|(_, frame)| frame)
         .expect("inactive-workspace window should still be laid out to a hidden position");
 
-    let txid = reactor.transaction_manager.generate_next_txid(wsid);
-    reactor.transaction_manager.store_txid(wsid, txid, hidden_target);
+    let txid = reactor.tx_store.fence(wsid);
+    reactor.tx_store.insert(wsid, txid, hidden_target);
 
     assert!(!reactor.arrange_test(true, None));
     assert!(
@@ -5472,14 +5474,16 @@ fn mouse_raise_queries_order_only_when_it_could_cover_a_floating_window() {
     reactor.handle_test_layout_event(LayoutEvent::WindowFocused(space, floating));
     reactor.handle_test_layout_command(LayoutCommand::ToggleWindowFloating);
     assert!(reactor.layout_manager.layout_engine.is_window_floating(floating));
-    reactor.state.windows.window_mut(floating).unwrap().frame_monotonic = smaller;
+    reactor.state.windows.window_mut(floating).unwrap().record_actual(smaller);
     window_server::set_space_window_list_for_connection_override(Some(vec![wsid.as_u32()]));
     assert!(reactor.should_raise_on_mouse_over(window, Some(space)));
     window_server::set_space_window_list_for_connection_override(None);
     assert_eq!(window_server::window_order_query_count(), before + 1);
 
-    reactor.state.windows.window_mut(floating).unwrap().frame_monotonic =
-        CGRect::new(CGPoint::new(frame.max().x + 100.0, 100.0), smaller.size);
+    reactor.state.windows.window_mut(floating).unwrap().record_actual(CGRect::new(
+        CGPoint::new(frame.max().x + 100.0, 100.0),
+        smaller.size,
+    ));
     let before = window_server::window_order_query_count();
     assert!(reactor.should_raise_on_mouse_over(window, Some(space)));
     assert_eq!(window_server::window_order_query_count(), before);
@@ -6171,7 +6175,7 @@ fn changed_layout_retargets_window_already_at_new_position_during_animation() {
     });
     manager.handle_message(rx.commands.try_recv().unwrap());
     let wsid = reactor.state.windows.window(right).unwrap().info.sys_id.unwrap();
-    let txid = reactor.transaction_manager.get_last_sent_txid(wsid);
+    let txid = reactor.tx_store.last_txid(&wsid);
     // An intermediate AX frame can coincide with the next layout's target.
     reactor.handle_event(Event::WindowFrameChanged(
         right,
@@ -6186,7 +6190,8 @@ fn changed_layout_retargets_window_already_at_new_position_during_animation() {
             .windows
             .window(right)
             .unwrap()
-            .frame_monotonic
+            .actual()
+            .rect()
             .same_as(frame(228.))
     );
     assert!({
@@ -6497,7 +6502,10 @@ fn non_active_workspace_windows_remain_hidden_even_if_frame_no_longer_matches_co
     assert!(reactor.assign_test_window_to_workspace(space, wid, inactive_workspace));
 
     if let Some(window) = reactor.state.windows.window_mut(wid) {
-        window.frame_monotonic = CGRect::new(CGPoint::new(200.0, 200.0), CGSize::new(400.0, 400.0));
+        window.record_actual(CGRect::new(
+            CGPoint::new(200.0, 200.0),
+            CGSize::new(400.0, 400.0),
+        ));
     }
 
     assert_eq!(
@@ -8054,7 +8062,7 @@ fn native_tab_creation_and_close_preserve_layout_slot_and_other_windows() {
         reactor.handle_test_layout_event(LayoutEvent::WindowFocused(space, old));
         let before = test_layout(&mut reactor, space, screen);
         let old_info = reactor.state.windows.window(old).unwrap().info.clone();
-        let frame = reactor.state.windows.window(old).unwrap().frame_monotonic;
+        let frame = reactor.state.windows.window(old).unwrap().actual().rect();
         let old_wsid = old_info.sys_id.unwrap();
         let new = WindowId::new(2, 3);
         let new_wsid = WindowServerId::new(20_003);
@@ -8142,7 +8150,7 @@ fn native_tab_switches_in_two_groups_preserve_each_groups_slot() {
         let mut expected = test_layout(&mut reactor, space, screen);
         let mut info = reactor.state.windows.window(old).unwrap().info.clone();
         let old_wsid = info.sys_id.unwrap();
-        info.frame = reactor.state.windows.window(old).unwrap().frame_monotonic;
+        info.frame = reactor.state.windows.window(old).unwrap().actual().rect();
         info.sys_id = Some(WindowServerId::new(20_000 + incoming.idx.get()));
         info.has_native_tabs = true;
         window_server::set_window_ordered_in_override(old_wsid, Some(false));
@@ -8173,7 +8181,7 @@ fn native_tab_floating_transitions_preserve_position_and_floating_state() {
             .active_workspace(space)
             .unwrap();
         let frame = CGRect::new(CGPoint::new(75., 110.), CGSize::new(430., 320.));
-        reactor.state.windows.window_mut(old).unwrap().frame_monotonic = frame;
+        reactor.state.windows.window_mut(old).unwrap().record_actual(frame);
         reactor
             .layout_manager
             .layout_engine
@@ -8239,7 +8247,7 @@ fn native_tab_matching_does_not_merge_independent_windows() {
         let mut info = reactor.state.windows.window(old).unwrap().info.clone();
         let wsid = info.sys_id.unwrap();
         info.sys_id = Some(WindowServerId::new(20_003));
-        info.frame = reactor.state.windows.window(old).unwrap().frame_monotonic;
+        info.frame = reactor.state.windows.window(old).unwrap().actual().rect();
         info.has_native_tabs = tabbed;
         if !same_frame {
             info.frame.origin.x += 40.0;
@@ -8851,7 +8859,7 @@ fn laid_out_frame(
             screen,
             &gaps,
             Default::default(),
-            |q| reactor.state.windows.window(q).map(|w| w.frame_monotonic),
+            |q| reactor.state.windows.window(q).map(|w| reactor.tx_store.planned(w)),
             &[screen],
         )
         .into_iter()
@@ -9115,8 +9123,8 @@ fn overview_cross_display_drop_arranges_only_source_and_destination_spaces() {
     assert_eq!(&reactor.layout_calculations[before..], &[source, destination]);
     assert!(
         reactor
-            .transaction_manager
-            .get_target_frame(reactor.test_window_server_id(window))
+            .tx_store
+            .target(&reactor.test_window_server_id(window))
             .is_some_and(|frame| frame.origin.x >= 1000.0)
     );
     assert_eq!(
@@ -9778,7 +9786,7 @@ fn stack_tabs_publish_in_on_screen_order_and_follow_focus() {
     for horizontal in [true, false] {
         let (mut apps, mut reactor, mut tabs, mut events) = stacked_reactor(horizontal);
         let along = |reactor: &Reactor, window: WindowId| {
-            let origin = reactor.state.windows.window(window).unwrap().frame_monotonic.origin;
+            let origin = reactor.state.windows.window(window).unwrap().actual().rect().origin;
             if horizontal { origin.x } else { origin.y }
         };
         for idx in [3, 1, 2] {
@@ -9829,7 +9837,8 @@ fn toggling_stack_tabs_reserves_and_publishes_only_while_enabled() {
             .windows
             .window(WindowId::new(1, 1))
             .unwrap()
-            .frame_monotonic
+            .actual()
+            .rect()
             .origin
             .x
     };
@@ -10340,7 +10349,7 @@ fn authoritative_display_membership_round_trip_preserves_ordered_stack() {
             }
             if returning && case == "native resize" {
                 let wid = windows[0];
-                let old = reactor.state.windows.window(wid).unwrap().frame_monotonic;
+                let old = reactor.state.windows.window(wid).unwrap().actual().rect();
                 let new = CGRect::new(
                     old.origin,
                     CGSize::new(old.size.width - 100., old.size.height - 50.),
@@ -10997,7 +11006,7 @@ fn shared_display_returning_on_new_desktop_restores_its_workspaces() {
         "no workspace is created for the new desktop"
     );
     for window in [WindowId::new(1, 1), WindowId::new(2, 1)] {
-        let frame = reactor.state.windows.window(window).unwrap().frame_monotonic;
+        let frame = reactor.state.windows.window(window).unwrap().actual().rect();
         assert!(
             shared_right().contains(frame.mid()),
             "{window:?} returns to the display"
@@ -11291,9 +11300,9 @@ fn fullscreen_exit_waits_for_ax_identity_without_losing_workspace() {
 #[test]
 fn transfer_exhaustion_preserves_written_geometry_and_accepts_later_membership() {
     let (mut reactor, window, wsid, _, target, _) = reactor_with_window_on_space1();
-    let stale = reactor.state.windows.window(window).unwrap().frame_monotonic;
+    let stale = reactor.state.windows.window(window).unwrap().actual().rect();
     let written = CGRect::new(CGPoint::new(1300., 200.), CGSize::new(700., 500.));
-    reactor.state.windows.window_mut(window).unwrap().frame_monotonic = written;
+    reactor.state.windows.window_mut(window).unwrap().record_actual(written);
     reactor.track_test_window_server_info(wsid, window.pid, stale);
     let store = &mut reactor.state.windows;
     store.request_transfer(window, Some(written), target, true);
@@ -11301,14 +11310,20 @@ fn transfer_exhaustion_preserves_written_geometry_and_accepts_later_membership()
     for revision in [11, 12, 13] {
         store.advance_transfer(window, revision, true);
     }
-    assert_eq!(store.record(window).unwrap().frame(), Some(written));
+    assert_eq!(
+        store.record(window).unwrap().actual().map(|frame| frame.rect()),
+        Some(written)
+    );
     assert_eq!(
         store.record(window).unwrap().pending_transfer().unwrap().status,
         crate::model::window_store::TransferStatus::Deferred
     );
     assert!(!store.confirm_transfer(window, generation, 14, None));
     assert!(store.confirm_transfer(window, generation, 14, Some(target)));
-    assert_eq!(store.record(window).unwrap().frame(), Some(written));
+    assert_eq!(
+        store.record(window).unwrap().actual().map(|frame| frame.rect()),
+        Some(written)
+    );
 }
 
 #[test]
@@ -11436,7 +11451,7 @@ fn two_displays_with_tiles(windows_on_b: u32) -> TwoDisplays {
         .collect();
     apps.make_app_and_settle(&mut reactor, 2, windows);
     apps.simulate_until_quiet(&mut reactor);
-    let x = |wid| reactor.state.windows.window(wid).unwrap().frame_monotonic.origin.x;
+    let x = |wid| reactor.state.windows.window(wid).unwrap().actual().rect().origin.x;
     let mut on_a = vec![WindowId::new(1, 1), WindowId::new(1, 2)];
     let mut on_b: Vec<_> = (1..=windows_on_b).map(|idx| WindowId::new(2, idx)).collect();
     on_a.sort_by(|a, b| x(*a).total_cmp(&x(*b)));
@@ -11490,7 +11505,7 @@ fn drag_onto_display_b_with_the_frame_lagging(f: &mut TwoDisplays) {
 }
 
 fn tile(reactor: &Reactor, wid: WindowId) -> CGRect {
-    reactor.state.windows.window(wid).unwrap().frame_monotonic
+    reactor.state.windows.window(wid).unwrap().actual().rect()
 }
 
 #[test]
@@ -12422,7 +12437,7 @@ fn floating_display_transfer_round_trip_preserves_user_geometry() {
         }
         reactor.handle_event(move_to(0));
         apps.simulate_until_quiet(&mut reactor);
-        let projected = reactor.state.windows.window(window).unwrap().frame_monotonic.round();
+        let projected = reactor.state.windows.window(window).unwrap().actual().rect().round();
         // AX may acknowledge an adjusted frame. A later user move back to the
         // rounded projection is still new intent, even though it matches an old write.
         let mut adjusted = projected;
@@ -13064,7 +13079,7 @@ fn master_restore_returns_a_floating_window_to_its_saved_frame() {
     let saved = CGRect::new(CGPoint::new(200., 100.), CGSize::new(300., 200.));
     let state = reactor.state.windows.window_mut(window).unwrap();
     state.info.bundle_id = Some("com.example".into());
-    state.frame_monotonic = saved;
+    state.record_actual(saved);
     let path = std::env::temp_dir().join(format!("rift-floating-{}.ron", std::process::id()));
     let engine = &reactor.layout_manager.layout_engine;
     engine
@@ -13614,7 +13629,7 @@ fn native_fullscreen_restores_middle_window_exactly_across_notification_ordering
                 reactor.handle_event(Event::WindowFrameChanged(
                     window,
                     CGRect::new(CGPoint::new(0., 1.), CGSize::new(1000., 999.)),
-                    Some(reactor.transaction_manager.get_last_sent_txid(wsid)),
+                    Some(reactor.tx_store.last_txid(&wsid)),
                     Requested(false),
                     Some(if early == 7 {
                         MouseState::Down
@@ -13780,4 +13795,224 @@ fn presentation_inventory_tracks_visibility_without_forgetting_layout() {
         assert!(reactor.query_window_info(wid).is_none());
         assert!(!reactor.state.windows.contains_window(wid));
     }
+}
+
+/// Two tiled windows of one app on a 1000x800 display, settled.
+fn two_settled_tiled_windows() -> (Apps, Reactor, WindowId, WindowId) {
+    let (mut apps, mut reactor) = test_context();
+    let screen = CGRect::new(CGPoint::ZERO, CGSize::new(1000., 800.));
+    apps.make_app_and_settle_on_screen(&mut reactor, screen, SpaceId::new(1), 1, make_windows(2));
+    (apps, reactor, WindowId::new(1, 1), WindowId::new(1, 2))
+}
+
+fn frames_written(requests: &[Request]) -> Vec<(WindowId, CGRect)> {
+    requests
+        .iter()
+        .flat_map(|request| match request {
+            Request::SetWindowFrames(frames, ..) => frames.clone(),
+            _ => Vec::new(),
+        })
+        .collect()
+}
+
+#[test]
+fn a_size_the_app_refused_is_not_asked_for_again_by_later_layout_passes() {
+    let (mut apps, mut reactor, stubborn, _) = two_settled_tiled_windows();
+    // Another window arrives; the stubborn one is asked for a narrower frame and keeps its width.
+    reactor.handle_events(apps.make_app(2, make_windows(1)));
+    let requests = apps.requests();
+    let (_, wanted) = *frames_written(&requests)
+        .iter()
+        .find(|(wid, _)| *wid == stubborn)
+        .expect("the stubborn window is written");
+    let mut events = apps.simulate_events_for_requests(requests);
+    let got = CGRect::new(
+        wanted.origin,
+        CGSize::new(wanted.size.width + 120., wanted.size.height),
+    );
+    apps.windows.get_mut(&stubborn).unwrap().frame = got;
+    for event in &mut events {
+        if let Event::WindowFrameChanged(wid, frame, _, Requested(true), _) = event
+            && *wid == stubborn
+        {
+            *frame = got;
+        }
+    }
+    reactor.handle_events(events);
+    apps.simulate_until_quiet(&mut reactor);
+    // The app reports where it put the window, unprompted, as WindowServer does.
+    let seen = apps.windows[&stubborn].last_seen_txid;
+    reactor.handle_event(Event::WindowFrameChanged(
+        stubborn,
+        got,
+        Some(seen),
+        Requested(false),
+        Some(MouseState::Up),
+    ));
+
+    for _ in 0..3 {
+        let _ = reactor.arrange_test(false, None);
+        let written = frames_written(&apps.requests());
+        assert!(
+            written.iter().all(|(wid, _)| *wid != stubborn),
+            "a refused frame was asked again: {written:?}"
+        );
+    }
+}
+
+#[test]
+fn grabbing_a_window_while_rift_is_moving_it_starts_a_drag_at_once() {
+    let (mut apps, mut reactor, grabbed, _) = two_settled_tiled_windows();
+    // Rift writes new frames that the app has not applied yet.
+    reactor.handle_events(apps.make_app(2, make_windows(1)));
+    let unanswered = apps.requests();
+    assert!(frames_written(&unanswered).iter().any(|(wid, _)| *wid == grabbed));
+
+    let start = apps.windows[&grabbed].frame;
+    let moved = CGRect::new(
+        CGPoint::new(start.origin.x + 60., start.origin.y + 40.),
+        start.size,
+    );
+    reactor.handle_event(Event::WindowFrameChanged(
+        grabbed,
+        moved,
+        Some(apps.windows[&grabbed].last_seen_txid),
+        Requested(false),
+        Some(MouseState::Down),
+    ));
+    assert!(
+        reactor.is_in_drag(),
+        "the first move of the grab was taken for Rift's echo"
+    );
+}
+
+#[test]
+fn readers_see_the_reported_frame_while_a_write_is_in_flight() {
+    let (mut apps, mut reactor, moved, _) = two_settled_tiled_windows();
+    let wsid = reactor.test_window_server_id(moved);
+    let reported = apps.windows[&moved].frame;
+    reactor.handle_events(apps.make_app(2, make_windows(1)));
+    let requests = apps.requests();
+    let (_, written) = *frames_written(&requests)
+        .iter()
+        .find(|(wid, _)| *wid == moved)
+        .expect("the window is written");
+    assert!(!written.same_as(reported));
+
+    assert!(reactor.state.windows.window(moved).unwrap().actual().rect().same_as(reported));
+    // Queries keep reporting where rift placed the window, as on main.
+    assert!(reactor.query_window_info(moved).unwrap().info.frame.same_as(written));
+    assert_eq!(reactor.tx_store.target(&wsid), Some(written));
+
+    reactor.handle_events(apps.simulate_events_for_requests(requests));
+    assert!(reactor.state.windows.window(moved).unwrap().actual().rect().same_as(written));
+    assert_eq!(reactor.tx_store.target(&wsid), None);
+}
+
+#[test]
+fn a_failed_write_leaves_the_reported_frame_and_the_next_pass_writes_once() {
+    let (mut apps, mut reactor) = test_context();
+    let screen = CGRect::new(CGPoint::ZERO, CGSize::new(1000., 1000.));
+    let space = SpaceId::new(1);
+    let wid = WindowId::new(1, 1);
+    apps.make_app_and_settle_on_screen(&mut reactor, screen, space, wid.pid, make_windows(1));
+    let wsid = reactor.test_window_server_id(wid);
+    let reported = reactor.state.windows.window(wid).unwrap().actual().rect();
+    let target = CGRect::new(CGPoint::new(20., 20.), CGSize::new(620., 500.));
+    let arrange = |reactor: &mut Reactor| {
+        let bounds = super::animation::scrolling_bounds(reactor, space);
+        super::animation::AnimationManager::apply_layout(
+            reactor,
+            space,
+            &[(wid, target)],
+            Presentation::Instant,
+            None,
+            bounds,
+        )
+    };
+    assert!(arrange(&mut reactor));
+    let txid = reactor.tx_store.last_txid(&wsid);
+    apps.requests();
+
+    reactor.handle_event(Event::WindowFrameWriteFailed(wid, txid));
+    assert!(apps.requests().is_empty(), "a failure is not retried on its own");
+    assert_eq!(reactor.tx_store.target(&wsid), None);
+    assert!(reactor.state.windows.window(wid).unwrap().actual().rect().same_as(reported));
+
+    // The ordinary comparison of reported and wanted frames writes again.
+    assert!(arrange(&mut reactor));
+    assert_eq!(frames_written(&apps.requests()), vec![(wid, target)]);
+    assert!(
+        !arrange(&mut reactor),
+        "the write in flight covers the next pass"
+    );
+    assert!(apps.requests().is_empty());
+}
+
+#[test]
+fn a_refused_write_is_not_requested_again() {
+    let (mut apps, mut reactor) = test_context();
+    let screen = CGRect::new(CGPoint::ZERO, CGSize::new(1000., 1000.));
+    let space = SpaceId::new(1);
+    let wid = WindowId::new(1, 1);
+    apps.make_app_and_settle_on_screen(&mut reactor, screen, space, wid.pid, make_windows(1));
+    let wsid = reactor.test_window_server_id(wid);
+    let target = CGRect::new(CGPoint::new(20., 20.), CGSize::new(620., 500.));
+    let refused = CGRect::new(target.origin, CGSize::new(700., 500.));
+    let arrange = |reactor: &mut Reactor| {
+        let bounds = super::animation::scrolling_bounds(reactor, space);
+        super::animation::AnimationManager::apply_layout(
+            reactor,
+            space,
+            &[(wid, target)],
+            Presentation::Instant,
+            None,
+            bounds,
+        )
+    };
+    assert!(arrange(&mut reactor));
+    let txid = reactor.tx_store.last_txid(&wsid);
+    apps.requests();
+    reactor.handle_event(Event::WindowFrameChanged(
+        wid,
+        refused,
+        Some(txid),
+        Requested(true),
+        Some(MouseState::Up),
+    ));
+    assert!(reactor.state.windows.window(wid).unwrap().actual().rect().same_as(refused));
+    for _ in 0..3 {
+        assert!(!arrange(&mut reactor));
+        assert!(apps.requests().is_empty(), "a refused frame was asked again");
+    }
+}
+
+#[test]
+fn a_drag_right_after_rift_moved_a_window_starts_from_the_reported_frame() {
+    let (mut apps, mut reactor, grabbed, _) = two_settled_tiled_windows();
+    let reported = apps.windows[&grabbed].frame;
+    reactor.handle_events(apps.make_app(2, make_windows(1)));
+    let (_, written) = *frames_written(&apps.requests())
+        .iter()
+        .find(|(wid, _)| *wid == grabbed)
+        .expect("the window is written");
+    assert!(!written.same_as(reported));
+
+    let moved = CGRect::new(
+        CGPoint::new(reported.origin.x + 60., reported.origin.y + 40.),
+        reported.size,
+    );
+    reactor.handle_event(Event::WindowFrameChanged(
+        grabbed,
+        moved,
+        Some(apps.windows[&grabbed].last_seen_txid),
+        Requested(false),
+        Some(MouseState::Down),
+    ));
+    let source = reactor.drag_manager.actor.source().expect("a drag starts");
+    assert!(
+        source.origin_frame.same_as(reported),
+        "drag starts at {:?}, not where the window is ({reported:?})",
+        source.origin_frame
+    );
 }

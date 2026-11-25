@@ -35,7 +35,7 @@ impl Reactor {
             // The owner takes over like a user drag: stop Rift's motion and pending writes.
             reactor.cancel_window_presentations(vec![wid]);
             if let Some(wsid) = reactor.state.windows.window(wid).and_then(|w| w.info.sys_id) {
-                reactor.transaction_manager.clear_target_for_window(wsid);
+                reactor.tx_store.clear_target(&wsid);
             }
             reactor.state.windows.cancel_transfer(wid);
             // Leave the projection (keeping floating state and the layout slot) before the
@@ -105,7 +105,7 @@ impl Reactor {
             if engine.is_window_floating(wid)
                 && let Some(window) = self.state.windows.window(wid)
             {
-                engine.store_floating_position(workspace, wid, window.frame_monotonic);
+                engine.store_floating_position(workspace, wid, window.actual().rect());
             }
         }
         if self.state.windows.native_fullscreen_record_for_window(wid).is_some() {

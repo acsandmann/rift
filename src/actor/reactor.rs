@@ -15,7 +15,6 @@ mod managers;
 mod native_tabs;
 mod query;
 mod replay;
-pub mod transaction_manager;
 mod transient_focus;
 mod utils;
 mod window_lifecycle;
@@ -47,7 +46,6 @@ use serde::{Deserialize, Serialize};
 use serde_with::serde_as;
 use tokio::sync::oneshot;
 use tracing::{debug, instrument, trace, warn};
-use transaction_manager::TransactionId;
 
 use super::input;
 use crate::actor::app::{
@@ -67,7 +65,8 @@ use crate::model::broadcast::{
     BroadcastEvent, BroadcastSender, protocol_window_id, protocol_workspace_id,
 };
 use crate::model::space_activation::{SpaceActivationConfig, SpaceActivationPolicy};
-use crate::model::tx_store::WindowTxStore;
+use crate::model::tx_store::{TransactionId, WindowTxStore};
+use crate::model::window_frame::ActualFrame;
 use crate::model::window_store::NativeFullscreenTransition;
 use crate::sys::event::MouseState;
 use crate::sys::executor::Executor;
@@ -411,7 +410,7 @@ pub struct Reactor {
     recording_manager: managers::RecordingManager,
     communication_manager: managers::CommunicationManager,
     notification_manager: managers::NotificationManager,
-    transaction_manager: transaction_manager::TransactionManager,
+    tx_store: WindowTxStore,
     menu_manager: managers::MenuManager,
     mission_control_manager: managers::MissionControlManager,
     window_inventory_manager: managers::WindowInventoryManager,
@@ -529,7 +528,7 @@ impl Reactor {
                 last_layout_modes_by_space: HashMap::default(),
                 _window_notify_tx: window_notify_tx,
             },
-            transaction_manager: transaction_manager::TransactionManager::new(window_tx_store),
+            tx_store: window_tx_store,
             menu_manager: managers::MenuManager {
                 menu_state: MenuState::Closed,
                 menu_tx: None,
@@ -995,7 +994,7 @@ impl Reactor {
                 continue;
             }
             if let Some(wsid) = window.info.sys_id {
-                self.transaction_manager.clear_target_for_window(wsid);
+                self.tx_store.clear_target(&wsid);
             }
         }
     }
@@ -1029,9 +1028,9 @@ impl Reactor {
             .forget_native_layout_for_window(&self.state.windows, window);
         self.state.windows.cancel_transfer(window);
         if let Some(window) = self.state.windows.window_mut(window) {
-            window.frame_monotonic = frame;
+            window.record_actual(frame);
             if let Some(server) = window.info.sys_id {
-                self.transaction_manager.invalidate_for_window(server);
+                self.tx_store.fence(server);
             }
         }
     }
@@ -1827,9 +1826,10 @@ impl Reactor {
             }
             Event::WindowFrameWriteFailed(wid, txid) => {
                 if let Some(server) = self.state.windows.window(wid).and_then(|w| w.info.sys_id) {
-                    self.transaction_manager.store.fail(server, txid);
+                    self.tx_store.clear_target_if_current(&server, txid);
                 }
-                // Retry on the next arrange pass. A busy app must not drive its own retry loop.
+                // The window stayed where the app last reported it, so the next arrange pass
+                // sees the difference and writes again. A busy app must not drive its own retry loop.
                 return Ok(());
             }
             Event::WindowFrameChanged(wid, new_frame, last_seen, requested, mouse_state) => {
@@ -1844,16 +1844,16 @@ impl Reactor {
                     && mouse_state != Some(MouseState::Down)
                     && let Some(window) = self.state.windows.window(wid)
                     && let Some(wsid) = window.info.sys_id
-                    && let Some(write) = self.transaction_manager.store.get(&wsid)
-                    && last_seen == Some(write.txid)
+                    && let Some(write) = self.tx_store.get(&wsid)
+                    && last_seen == Some(write.txid())
                     && write.target().is_some_and(|target| !new_frame.same_as(target))
                     && self.hidden_assigned_space_for_window_id(wid).is_some()
                 {
-                    self.transaction_manager.clear_target_for_window(wsid);
+                    self.tx_store.clear_target(&wsid);
                 }
                 let needs_layout = window_workflow::frame_change_needs_layout(
                     &mut self.state,
-                    &self.transaction_manager,
+                    &self.tx_store,
                     wid,
                     new_frame,
                     last_seen,
@@ -1877,7 +1877,7 @@ impl Reactor {
                     .state
                     .windows
                     .window(wid)
-                    .map(|window| (window.info.sys_id, window.frame_monotonic))
+                    .map(|window| (window.info.sys_id, window.actual().rect()))
                     .unwrap_or((None, new_frame));
                 let old_space = self.geometry_space_for_window(&old_frame, server_id);
                 let new_space = self.geometry_space_for_window(&new_frame, server_id);
@@ -2029,7 +2029,7 @@ impl Reactor {
                     let state = self.state.windows.window(window)?;
                     self.can_start_drag(window).then_some((
                         window,
-                        state.frame_monotonic,
+                        state.actual().rect(),
                         state.info.sys_id,
                     ))
                 });
@@ -2186,7 +2186,7 @@ impl Reactor {
                             .map(|s| s.frame)
                             .unwrap_or(destination);
                         let mut frame =
-                            self.state.windows.window(intent.window).unwrap().frame_monotonic;
+                            self.state.windows.window(intent.window).unwrap().actual().rect();
                         frame.origin.x += destination.origin.x - source.origin.x;
                         frame.origin.y += destination.origin.y - source.origin.y;
                         frame
@@ -2242,7 +2242,7 @@ impl Reactor {
                 self.mouse_inventory_hit = None;
                 let active_space = window.and_then(|window| {
                     self.state.windows.window(window).and_then(|state| {
-                        self.best_space_for_window(&state.frame_monotonic, state.info.sys_id)
+                        self.best_space_for_window(&state.actual().rect(), state.info.sys_id)
                             .filter(|space| self.is_space_active(*space))
                             .or_else(|| {
                                 state
@@ -2508,7 +2508,7 @@ impl Reactor {
                 let window_server_id = window_server_id.map(WindowServerId::new);
                 let resolved_space = self.best_space_for_window_id(window_id).or_else(|| {
                     self.state.windows.window(window_id).and_then(|window| {
-                        self.best_space_for_window(&window.frame_monotonic, window.info.sys_id)
+                        self.best_space_for_window(&window.actual().rect(), window.info.sys_id)
                     })
                 });
                 self.focus_window(changes, window_id, window_server_id, resolved_space);
@@ -2780,7 +2780,7 @@ impl Reactor {
         let window_server_id =
             self.state.windows.window(window).and_then(|window| window.info.sys_id);
         let transaction = if let Some(window_server_id) = window_server_id {
-            self.transaction_manager.begin(window_server_id, frame)
+            self.tx_store.begin(window_server_id, frame)
         } else {
             TransactionId::default()
         };
@@ -2934,7 +2934,7 @@ impl Reactor {
                 .filter_map(|id| {
                     let state = self.state.windows.window(id)?;
                     (state.is_admitted() && !state.info.is_minimized && state.info.is_standard)
-                        .then_some((id, state.frame_monotonic))
+                        .then(|| (id, self.tx_store.planned(state).rect()))
                 })
                 .collect();
             wm.send(WmEvent::OverviewActivationTarget(OverviewTarget {
@@ -2972,7 +2972,7 @@ impl Reactor {
             let from = self
                 .main_window()
                 .and_then(|wid| self.state.windows.window(wid))
-                .map(|window| window.frame_monotonic);
+                .map(|window| window.actual().rect());
             if let Some(to) = to
                 && let Some(input_tx) = &self.communication_manager.input_tx
             {
@@ -3073,7 +3073,9 @@ impl Reactor {
             app_name,
             info: WindowInfo {
                 title: window_state.info.title.clone(),
-                frame: window_state.frame_monotonic,
+                // Queries report where rift has placed the window (its planned frame), as
+                // before actual and planned frames were held apart.
+                frame: self.tx_store.planned(window_state).rect(),
                 bundle_id,
                 ..window_state.info.clone()
             },
@@ -3685,7 +3687,7 @@ impl Reactor {
                     self.state
                         .windows
                         .can_place_window(window)
-                        .then(|| self.state.windows.record(window)?.frame())
+                        .then(|| Some(self.state.windows.record(window)?.actual()?.rect()))
                         .flatten()
                 }) {
                     let projected = self.state.windows.project_floating_frame(
@@ -3944,8 +3946,9 @@ impl Reactor {
                     if observed == Some(target) && self.space_state.membership_complete {
                         return None;
                     }
-                    let frame =
-                        engine.get_floating_position(assignment, window).or_else(|| record.frame());
+                    let frame = engine
+                        .get_floating_position(assignment, window)
+                        .or_else(|| record.actual().map(ActualFrame::rect));
                     Some((window, target, frame))
                 })
                 .collect();
@@ -4039,7 +4042,7 @@ impl Reactor {
             .workspace_for_window(window)
             .filter(|_| engine.is_window_floating(window))
             .and_then(|workspace| engine.get_floating_position(workspace, window))
-            .or_else(|| self.state.windows.record(window)?.frame())
+            .or_else(|| Some(self.state.windows.record(window)?.actual()?.rect()))
             .map(|frame| {
                 screen.map_or(frame, |screen| {
                     self.frame_on_display(window, frame, source_frame, screen)
@@ -4490,7 +4493,7 @@ impl Reactor {
     }
 
     fn best_space_for_window_state(&self, window: &WindowState) -> Option<SpaceId> {
-        self.best_space_for_window(&window.frame_monotonic, window.info.sys_id)
+        self.best_space_for_window(&window.actual().rect(), window.info.sys_id)
     }
 
     fn hidden_assigned_space_for_frame(
@@ -4512,7 +4515,7 @@ impl Reactor {
 
     fn hidden_assigned_space_for_window_id(&self, wid: WindowId) -> Option<SpaceId> {
         let window = self.state.windows.window(wid)?;
-        self.hidden_assigned_space_for_frame(window.info.sys_id, &window.frame_monotonic)
+        self.hidden_assigned_space_for_frame(window.info.sys_id, &window.actual().rect())
     }
 
     fn assigned_space_for_window_id(&self, wid: WindowId) -> Option<SpaceId> {
@@ -4533,7 +4536,7 @@ impl Reactor {
         {
             return Some(space);
         }
-        let target_frame = self.transaction_manager.get_target_frame(wsid)?;
+        let target_frame = self.tx_store.target(&wsid)?;
         let assigned_space = self.assigned_space_for_window_id(wid)?;
         let target_space = self
             .hidden_assigned_space_for_frame(Some(wsid), &target_frame)
@@ -4671,7 +4674,7 @@ impl Reactor {
         }
         let discovery = self.assigned_space_for_window_id(wid).or(authoritative).or_else(|| {
             let window = self.state.windows.window(wid)?;
-            self.best_space_for_frame(&window.frame_monotonic).filter(|space| {
+            self.best_space_for_frame(&window.actual().rect()).filter(|space| {
                 self.is_space_active(*space)
                     || !window.info.sys_id.is_some_and(|wsid| self.is_known_fullscreen_window(wsid))
             })
@@ -4706,7 +4709,7 @@ impl Reactor {
     }
 
     fn window_frame_on_known_screen(&self, wid: WindowId) -> Option<CGRect> {
-        let frame = self.state.windows.window(wid)?.frame_monotonic;
+        let frame = self.state.windows.window(wid)?.actual().rect();
         self.screen_for_point(frame.mid()).map(|_| frame)
     }
 
@@ -4943,13 +4946,8 @@ impl Reactor {
         } else {
             CGRect::default()
         };
-        let frame = placement.resolve_frame(window.frame_monotonic, screen);
-        let current = window
-            .info
-            .sys_id
-            .and_then(|id| self.transaction_manager.get_target_frame(id))
-            .unwrap_or(window.frame_monotonic);
-        if frame.same_as(current) {
+        let frame = placement.resolve_frame(window.actual().rect(), screen);
+        if frame.same_as(self.tx_store.planned(window).rect()) {
             return;
         }
         self.state.windows.clear_floating_display_geometry(placement.window);
@@ -4984,7 +4982,7 @@ impl Reactor {
             warn!(window = ?resize.window, space = ?resize.space, "App-rule resize needs screen geometry");
             return false;
         };
-        let old_frame = window.frame_monotonic;
+        let old_frame = window.actual().rect();
         let mut new_frame = old_frame;
         new_frame.size.width = resize.size.w.unwrap_or(old_frame.size.width);
         new_frame.size.height = resize.size.h.unwrap_or(old_frame.size.height);
@@ -5055,7 +5053,7 @@ impl Reactor {
             return false;
         }
 
-        let candidate_frame = window.frame_monotonic;
+        let candidate_frame = window.actual().rect();
 
         if matches!(self.menu_manager.menu_state, MenuState::Open(_)) {
             trace!(?wid, "Skipping autoraise while menu open");
@@ -5090,7 +5088,7 @@ impl Reactor {
             other != wid
                 && state.info.sys_id.is_some()
                 && self.layout_manager.layout_engine.is_window_floating(other)
-                && candidate_frame.contains_rect(state.frame_monotonic)
+                && candidate_frame.contains_rect(state.actual().rect())
         });
         if !could_occlude {
             return true;
@@ -5120,7 +5118,7 @@ impl Reactor {
             let Some(above_state) = self.state.windows.window(above_wid) else {
                 continue;
             };
-            let above_frame = above_state.frame_monotonic;
+            let above_frame = above_state.actual().rect();
             if !candidate_frame.contains_rect(above_frame) {
                 continue;
             }
@@ -6292,7 +6290,7 @@ impl Reactor {
                 self.state
                     .windows
                     .window(wid)
-                    .map(|window_state| (wid, window_state.frame_monotonic))
+                    .map(|window_state| (wid, window_state.actual().rect()))
             })
             .collect::<Vec<_>>();
 

@@ -369,7 +369,7 @@ impl Reactor {
                         .state
                         .windows
                         .window(window)
-                        .map_or(center, |w| w.frame_monotonic.mid());
+                        .map_or(center, |w| w.actual().rect().mid());
                 }
                 self.focus_window_in_space(changes, space, window);
             }

@@ -4,6 +4,7 @@ use crate::actor::app::WindowId;
 use crate::common::collections::{HashMap, HashSet};
 use crate::model::VirtualWorkspaceId;
 use crate::model::reactor::WindowState;
+use crate::model::window_frame::ActualFrame;
 use crate::sys::screen::SpaceId;
 use crate::sys::window_server::{WindowServerId, WindowServerInfo};
 
@@ -80,9 +81,9 @@ struct FloatingDisplayGeometry {
 }
 
 impl WindowRecord {
-    /// Latest frame accepted by the reactor, including its own completed writes.
-    pub fn frame(&self) -> Option<objc2_core_foundation::CGRect> {
-        self.state.as_ref().map(|state| state.frame_monotonic)
+    /// Where the window is, as last reported.
+    pub(crate) fn actual(&self) -> Option<ActualFrame> {
+        self.state.as_ref().map(WindowState::actual)
     }
 
     pub fn window_server_id(&self) -> Option<WindowServerId> { self.window_server_id }
@@ -996,7 +997,7 @@ impl WindowStore {
         self.clear_window_server_observed(info.id);
         let window = self.window_mut(wid)?;
         if info.layer == 0 {
-            window.frame_monotonic = info.frame;
+            window.record_actual(info.frame);
         }
         Some(wid)
     }
@@ -1668,7 +1669,7 @@ impl WindowStore {
     ) -> Option<PendingWindowTransfer> {
         let available = available && self.can_place_window(window);
         let record = self.windows.get_mut(&window)?;
-        let frame = record.frame();
+        let frame = record.actual().map(ActualFrame::rect);
         let operation = record.pending_transfer.as_mut()?;
         if !available {
             operation.status = TransferStatus::Unavailable;

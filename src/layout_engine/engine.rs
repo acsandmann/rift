@@ -18,6 +18,7 @@ use crate::layout_engine::systems::{
 };
 use crate::model::app_rules::{AppRuleFrame, AppRuleOutcome, AppRuleResize, AppRuleWorkspaceFocus};
 use crate::model::virtual_workspace::{VirtualWorkspaceId, WorkspaceContext, WorkspaceStore};
+use crate::model::window_frame::PlannedFrame;
 use crate::model::{
     AppRuleEffects, AppRuleEngine, AppRuleResult, FloatingPositionStore, WindowRuleContext,
     WindowStore, WindowVisibility,
@@ -1616,7 +1617,7 @@ impl LayoutEngine {
                 self.window_layout_constraints.windows.get(&wid).copied().unwrap_or_else(|| {
                     WindowLayoutConstraints {
                         is_resizable: window.info.is_resizable,
-                        locked_height: window.frame_monotonic.size.height,
+                        locked_height: window.actual().rect().size.height,
                         min_width: window.info.min_size.map_or(0.0, |size| size.width),
                         min_height: window.info.min_size.map_or(0.0, |size| size.height),
                         max_width: window.info.max_size.map_or(0.0, |size| size.width),
@@ -1625,7 +1626,7 @@ impl LayoutEngine {
                     }
                     .normalized()
                 });
-            constraints.locked_width = window.frame_monotonic.size.width;
+            constraints.locked_width = window.actual().rect().size.width;
             self.window_layout_constraints.insert(wid, constraints);
         }
     }
@@ -2382,7 +2383,7 @@ impl LayoutEngine {
                             && let (Some(center), Some(size), Some(current)) = (
                                 visible_space_frames.get(&space).map(|frame| frame.mid()),
                                 self.workspaces[ws_id].layout_state.active_size(),
-                                window_store.window(wid).map(|window| window.frame_monotonic),
+                                window_store.window(wid).map(|window| window.actual().rect()),
                             )
                         {
                             let screen = CGRect::new(
@@ -2438,7 +2439,7 @@ impl LayoutEngine {
                         .workspace_for_window(&window_store, space, wid)
                         .or_else(|| self.workspaces.active_workspace(space));
                     if let (Some(ws), Some(frame)) =
-                        (ws, window_store.window(wid).map(|w| w.frame_monotonic))
+                        (ws, window_store.window(wid).map(|w| w.actual().rect()))
                     {
                         self.floating_positions.store(ws, wid, frame);
                     }
@@ -2806,18 +2807,19 @@ impl LayoutEngine {
         self.calculate_arrangement(workspace_id, layout, screen, gaps, stack_line)
     }
 
-    pub fn calculate_layout_with_virtual_workspaces<F>(
+    #[cfg(test)]
+    pub(crate) fn calculate_layout_with_virtual_workspaces<F>(
         &mut self,
         window_store: &WindowStore,
         space: SpaceId,
         screen: CGRect,
         gaps: &crate::common::config::GapSettings,
         stack_line: crate::common::config::StackLineReserve,
-        get_window_frame: F,
+        planned_frame: F,
         all_screens: &[CGRect],
     ) -> Vec<(WindowId, CGRect)>
     where
-        F: Fn(WindowId) -> Option<CGRect>,
+        F: Fn(WindowId) -> Option<PlannedFrame>,
     {
         self.calculate_layout_with_groups(
             window_store,
@@ -2825,7 +2827,7 @@ impl LayoutEngine {
             screen,
             gaps,
             stack_line,
-            get_window_frame,
+            planned_frame,
             all_screens,
             None,
             false,
@@ -2839,13 +2841,13 @@ impl LayoutEngine {
         screen: CGRect,
         gaps: &crate::common::config::GapSettings,
         stack_line: crate::common::config::StackLineReserve,
-        get_window_frame: F,
+        planned_frame: F,
         all_screens: &[CGRect],
         groups: Option<&mut Vec<GroupContainerInfo>>,
         finish_scrolling: bool,
     ) -> Vec<(WindowId, CGRect)>
     where
-        F: Fn(WindowId) -> Option<CGRect>,
+        F: Fn(WindowId) -> Option<PlannedFrame>,
     {
         use crate::model::{HiddenWindowPlacement, HideCorner};
         let mut positions = HashMap::default();
@@ -2854,7 +2856,8 @@ impl LayoutEngine {
             candidate
                 .filter(|rect| !HiddenWindowPlacement::is_hidden(screen, *rect, all_screens))
                 .unwrap_or_else(|| {
-                    let size = get_window_frame(window)
+                    let size = planned_frame(window)
+                        .map(PlannedFrame::rect)
                         .map_or(CGSize::new(500.0, 500.0), |frame| frame.size);
                     CGRect::new(
                         CGPoint::new(center.x - size.width / 2.0, center.y - size.height / 2.0),
@@ -2870,7 +2873,7 @@ impl LayoutEngine {
                     &mut self.workspaces[active_workspace_id].layout_system
                 {
                     system.initialize_frames(layout, screen, constraints, &|wid| {
-                        get_window_frame(wid).filter(|frame| {
+                        planned_frame(wid).map(PlannedFrame::rect).filter(|frame| {
                             !HiddenWindowPlacement::is_hidden(screen, *frame, all_screens)
                         })
                     });
@@ -2960,7 +2963,7 @@ impl LayoutEngine {
 
         let hidden_windows = self.workspaces.windows_in_inactive_workspaces(window_store, space);
         for wid in hidden_windows {
-            let original_frame = get_window_frame(wid);
+            let original_frame = planned_frame(wid).map(PlannedFrame::rect);
 
             if self.floating.is_floating(wid)
                 && let Some(workspace_id) =
@@ -3373,7 +3376,7 @@ impl LayoutEngine {
             window_store.window(window_id).filter(|_| self.is_restoring()).map(|window| {
                 (
                     context.window_title.unwrap_or(&window.info.title).to_owned(),
-                    window.frame_monotonic.size,
+                    window.actual().rect().size,
                 )
             });
         let restored = observation.is_some_and(|(title, size)| {
@@ -3718,9 +3721,6 @@ impl LayoutEngine {
         window: WindowId,
         frame: CGRect,
     ) {
-        if let Some(state) = windows.window_mut(window) {
-            state.frame_monotonic = frame;
-        }
         if self.is_window_floating(window)
             && let Some(assignment) = windows.workspace_for_window(window)
         {

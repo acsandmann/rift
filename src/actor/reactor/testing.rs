@@ -273,28 +273,25 @@ impl Reactor {
         sys_id: Option<WindowServerId>,
         is_manageable: bool,
     ) {
-        self.state.windows.insert_window(wid, super::WindowState {
-            native_transient: false,
-            info: WindowInfo {
-                has_native_tabs: false,
-                is_standard: true,
-                is_root: true,
-                is_minimized: false,
-                is_resizable: true,
-                min_size: None,
-                max_size: None,
-                title: format!("Window {wid:?}"),
-                frame,
-                sys_id,
-                bundle_id: None,
-                path: None,
-                ax_role: None,
-                ax_subrole: None,
-            },
-            frame_monotonic: frame,
-            is_manageable,
-            manage_override: None,
-        });
+        let mut window: super::WindowState = WindowInfo {
+            has_native_tabs: false,
+            is_standard: true,
+            is_root: true,
+            is_minimized: false,
+            is_resizable: true,
+            min_size: None,
+            max_size: None,
+            title: format!("Window {wid:?}"),
+            frame,
+            sys_id,
+            bundle_id: None,
+            path: None,
+            ax_role: None,
+            ax_subrole: None,
+        }
+        .into();
+        window.is_manageable = is_manageable;
+        self.state.windows.insert_window(wid, window);
     }
 }
 
@@ -490,7 +487,6 @@ pub struct Apps {
 #[derive(Default, PartialEq, Debug, Clone)]
 pub struct TestWindowState {
     pub last_seen_txid: TransactionId,
-    pub last_sent_txid: TransactionId,
     pub animating: bool,
     pub frame: CGRect,
 }

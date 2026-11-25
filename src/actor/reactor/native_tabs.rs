@@ -38,7 +38,7 @@ impl Reactor {
                     || !self.is_space_active(space)
                     || self.window_in_non_active_workspace(space, old)
                     || !(info.has_native_tabs || window.info.has_native_tabs)
-                    || !(same_tab_frame(window.frame_monotonic, info.frame)
+                    || !(same_tab_frame(window.actual().rect(), info.frame)
                         || native_frame
                             .get_or_init(|| {
                                 #[cfg(not(test))]
@@ -52,7 +52,7 @@ impl Reactor {
                                     None
                                 }
                             })
-                            .is_some_and(|frame| same_tab_frame(window.frame_monotonic, frame)))
+                            .is_some_and(|frame| same_tab_frame(window.actual().rect(), frame)))
                     || !(window_server::window_ordered_in(wsid) == Some(false)
                         // AppKit can announce the incoming tab before ordering
                         // out the focused tab. Do not tile it provisionally.
@@ -61,7 +61,7 @@ impl Reactor {
                 {
                     return None;
                 }
-                Some((old, window.frame_monotonic, window.manage_override, wsid))
+                Some((old, window.actual().rect(), window.manage_override, wsid))
             })
             .collect();
         let [(old, frame, manage_override, old_wsid)] = candidates.as_slice() else {
@@ -101,7 +101,7 @@ impl Reactor {
         #[cfg(test)]
         let successor = self.native_tab_successor;
         let Some((native, frame)) = successor else { return false };
-        if native.pid != old.pid || native == old || !same_tab_frame(window.frame_monotonic, frame)
+        if native.pid != old.pid || native == old || !same_tab_frame(window.actual().rect(), frame)
         {
             return false;
         }

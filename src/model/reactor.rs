@@ -5,6 +5,7 @@ use crate::actor::app::{AppInfo, AppThreadHandle, WindowId, pid_t};
 use crate::common::log::MetricsCommand;
 use crate::layout_engine::{LayoutCommand, WindowLayoutInfo};
 use crate::model::WindowStore;
+use crate::model::window_frame::ActualFrame;
 use crate::sys::app::WindowInfo;
 use crate::sys::screen::SpaceId;
 
@@ -71,11 +72,11 @@ pub(crate) struct AppState {
 #[derive(Debug, Clone)]
 pub(crate) struct WindowState {
     pub(crate) info: WindowInfo,
-    /// The last known frame of the window. Always includes the last write.
+    /// Where the window is. A write still in flight lives only in
+    /// `WindowTxStore`; ask `WindowTxStore::planned` for where it is going.
     ///
-    /// This value only updates monotonically with respect to writes; in other
-    /// words, we only accept reads when we know they come after the last write.
-    pub(crate) frame_monotonic: CGRect,
+    /// Reports that predate the latest write are not accepted.
+    actual: ActualFrame,
     /// Rift/macOS heuristic result, kept separately from an explicit app-rule
     /// override so every discovered window can remain tracked.
     pub(crate) is_manageable: bool,
@@ -86,7 +87,7 @@ pub(crate) struct WindowState {
 impl From<WindowInfo> for WindowState {
     fn from(info: WindowInfo) -> WindowState {
         WindowState {
-            frame_monotonic: info.frame,
+            actual: ActualFrame::reported(info.frame),
             info,
             is_manageable: false,
             native_transient: false,
@@ -96,6 +97,15 @@ impl From<WindowInfo> for WindowState {
 }
 
 impl WindowState {
+    /// Where the window is, as last reported.
+    pub(crate) fn actual(&self) -> ActualFrame { self.actual }
+
+    /// Records a report of where the window is: from its app, the window
+    /// server, or Rift's own presentation having moved it there.
+    pub(crate) fn record_actual(&mut self, frame: CGRect) {
+        self.actual = ActualFrame::reported(frame);
+    }
+
     pub(crate) fn layout_info(&self, wid: WindowId) -> WindowLayoutInfo {
         WindowLayoutInfo {
             window_id: wid,
@@ -103,7 +113,7 @@ impl WindowState {
             ax_role: self.info.ax_role.clone(),
             ax_subrole: self.info.ax_subrole.clone(),
             is_resizable: self.info.is_resizable,
-            current_size: self.frame_monotonic.size,
+            current_size: self.actual.rect().size,
             min_size: self.info.min_size,
             max_size: self.info.max_size,
         }
