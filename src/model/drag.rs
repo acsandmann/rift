@@ -36,13 +36,26 @@ pub struct DragSceneTarget {
 pub struct DragScene {
     /// Layout-wide semantic override. Stack layouts use Swap for every zone.
     pub action_override: Option<WindowDropAction>,
-    /// Whether each source-tile edge points toward a logical tiled neighbor.
-    pub source_neighbors: [bool; 4],
     pub targets: Vec<DragSceneTarget>,
-    /// Set only for a window that brings a new tile (torn out under the press, or dragged in from
-    /// another display): each drop it can make here, with the frame it lands in. The pointer then
-    /// picks the drop whose landing holds it, so the overlay is under the pointer.
-    pub slots: Vec<DragSlot>,
+    /// What the dragged window is to this layout.
+    pub place: ScenePlace,
+}
+
+/// Whether the dragged window has a slot in the layout the scene is of.
+#[derive(Debug, Clone)]
+pub enum ScenePlace {
+    /// It does (a tile over its own layout, or any scene not built for a move): a tile's slot is
+    /// its home, and each entry says whether that edge (left, right, up, down) faces a logical
+    /// tiled neighbour.
+    Home { neighbors: [bool; 4] },
+    /// It does not (torn out under the press, or from another display's layout): each drop it
+    /// can make here, with the frame it lands in. The pointer picks the drop whose landing holds
+    /// it, so the overlay is under the pointer.
+    NewTile { slots: Vec<DragSlot> },
+}
+
+impl Default for ScenePlace {
+    fn default() -> Self { Self::Home { neighbors: [false; 4] } }
 }
 
 /// A drop a window bringing a new tile can make, and the frame it lands in.
@@ -79,6 +92,7 @@ pub struct DropTarget {
 #[derive(Debug, Clone, Copy)]
 pub struct DragSource {
     pub window: WindowId,
+    /// Where the drag started. A tile's home (see `ScenePlace::Home`) is there.
     pub origin_frame: CGRect,
     pub last_frame: CGRect,
     pub origin_space: Option<SpaceId>,
@@ -89,7 +103,7 @@ pub struct DragSource {
 /// Where a dragged window comes from, which decides what it can drop onto.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DragOrigin {
-    /// A tile: it drops onto other tiles, or back onto its own slot.
+    /// A tile: it drops onto other tiles, or back onto its own slot while over its layout.
     Tiled,
     /// A floating window: it moves freely and drops onto no tile.
     Floating,
@@ -104,14 +118,6 @@ impl DragOrigin {
         match self {
             Self::Tiled | Self::Arriving => true,
             Self::Floating => false,
-        }
-    }
-
-    /// Whether the window has a slot to drop back onto.
-    pub fn has_slot(self) -> bool {
-        match self {
-            Self::Tiled => true,
-            Self::Floating | Self::Arriving => false,
         }
     }
 }

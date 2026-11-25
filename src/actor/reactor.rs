@@ -4568,7 +4568,8 @@ impl Reactor {
             .filter(|_| source.origin.targets_tiles() && kind.is_move())?;
         let mut scene = self.drag_scene(source.window, space);
         if self.brings_new_tile(source, space) {
-            scene.slots = self.new_tile_slots(source.window, space, &scene);
+            let slots = self.new_tile_slots(source.window, space, &scene);
+            scene.place = crate::actor::drag::ScenePlace::NewTile { slots };
         }
         Some(scene)
     }

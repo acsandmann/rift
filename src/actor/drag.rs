@@ -13,7 +13,7 @@ use crate::common::config::{DragDropSettings, MouseAction, MouseDropAction};
 use crate::layout_engine::{Direction, WindowDropAction};
 pub use crate::model::drag::{
     DragCancel, DragCommit, DragKind, DragOrigin, DragScene, DragSceneTarget, DragSlot, DragSource,
-    DropIntent, DropTarget, DropZone,
+    DropIntent, DropTarget, DropZone, ScenePlace,
 };
 use crate::sys::screen::SpaceId;
 
@@ -121,6 +121,29 @@ impl Session {
         self.target = TargetState::None;
         self.unavailable.clear();
     }
+
+    /// The dragged tile's own slot, while its scene is of its layout.
+    fn home(&self) -> Option<Home> {
+        match (self.source.origin, &self.scene.place) {
+            (DragOrigin::Tiled, ScenePlace::Home { neighbors }) => Some(Home {
+                window: self.source.window,
+                space: self.source.current_space,
+                frame: self.source.origin_frame,
+                neighbors: *neighbors,
+            }),
+            (DragOrigin::Tiled | DragOrigin::Floating | DragOrigin::Arriving, _) => None,
+        }
+    }
+}
+
+/// A dragged tile's own slot in the layout it is over: over it, only its edges are drop zones,
+/// and an edge with no logical neighbour moves the tile that way.
+#[derive(Debug, Clone, Copy)]
+struct Home {
+    window: WindowId,
+    space: Option<SpaceId>,
+    frame: CGRect,
+    neighbors: [bool; 4],
 }
 
 #[derive(Debug, Clone)]
@@ -149,21 +172,21 @@ impl DragActor {
                 || target.intent.action == WindowDropAction::Stack)
                 .then_some(target);
         }
-        if !session.source.origin.has_slot()
-            || !matches!(session.target, TargetState::None)
-            || !contains(session.source.origin_frame, session.pointer, 0.0)
+        let home = session.home()?;
+        if !matches!(session.target, TargetState::None)
+            || !contains(home.frame, session.pointer, 0.0)
         {
             return None;
         }
         Some(DropTarget {
             intent: DropIntent {
-                window: session.source.window,
-                space: session.source.current_space?,
-                frame: session.source.origin_frame,
+                window: home.window,
+                space: home.space?,
+                frame: home.frame,
                 zone: DropZone::Center,
                 action: WindowDropAction::Swap,
             },
-            preview_area: session.source.origin_frame,
+            preview_area: home.frame,
         })
     }
 
@@ -198,8 +221,10 @@ impl DragActor {
 
     /// Where `intent` lands, when it is one of the scene's slots (a window bringing a new tile).
     pub fn slot_area(&self, intent: DropIntent) -> Option<CGRect> {
-        let session = self.session.as_ref()?;
-        session.scene.slots.iter().find_map(|slot| {
+        let ScenePlace::NewTile { slots } = &self.session.as_ref()?.scene.place else {
+            return None;
+        };
+        slots.iter().find_map(|slot| {
             (slot.intent.window == intent.window
                 && slot.intent.zone == intent.zone
                 && slot.intent.action == intent.action)
@@ -296,9 +321,9 @@ impl DragActor {
         let Some(session) = &mut self.session else {
             return false;
         };
-        let home_preview_changed = session.source.origin.has_slot()
-            && contains(session.source.origin_frame, session.pointer, 0.0)
-                != contains(session.source.origin_frame, motion.point, 0.0);
+        let home_preview_changed = session.home().is_some_and(|home| {
+            contains(home.frame, session.pointer, 0.0) != contains(home.frame, motion.point, 0.0)
+        });
         session.pointer = motion.point;
         if session.kind == DragKind::ModifierMove {
             let dx = motion.point.x - session.anchor_point.x;
@@ -462,18 +487,19 @@ fn candidate(
         settings.drop_action,
         previous,
         &session.unavailable,
-        Some(session.source),
+        session.home(),
         None,
     );
-    if session.scene.slots.is_empty() {
-        return zone;
-    }
+    let slots = match &session.scene.place {
+        ScenePlace::Home { .. } => return zone,
+        ScenePlace::NewTile { slots } => slots,
+    };
     // One pass: the first holding slot the zone names, the largest holding one (the last of
     // equals), and the nearest open one (the first of equals).
     let mut named = None;
     let mut largest: Option<(f64, &DragSlot)> = None;
     let mut nearest: Option<(f64, &DragSlot)> = None;
-    for slot in &session.scene.slots {
+    for slot in slots {
         let intent = slot.intent;
         if session.unavailable.contains(&(intent.window, intent.zone, intent.action)) {
             continue;
@@ -547,13 +573,10 @@ fn hit_test_available(
     center: MouseDropAction,
     previous: Option<DropIntent>,
     unavailable: &[(WindowId, DropZone, WindowDropAction)],
-    source: Option<DragSource>,
+    home: Option<Home>,
     excluded: Option<WindowId>,
 ) -> Option<DropIntent> {
-    // A source's own slot is its home: over it, only its edges are drop zones. A window with
-    // no slot (one arriving) has no home; where it first appeared means nothing.
-    let home = source.filter(|source| source.origin.has_slot());
-    if !home.is_some_and(|source| contains(source.origin_frame, point, 0.0))
+    if !home.is_some_and(|home| contains(home.frame, point, 0.0))
         && let Some(previous) = previous
         && let Some(target) = scene
             .targets
@@ -592,24 +615,24 @@ fn hit_test_available(
         }
     }
 
-    if let Some(source) = home
-        && let Some(space) = source.current_space
-        && let Some(zone) = classify_zone(source.origin_frame, point, fraction)
+    if let Some(home) = home
+        && let Some(space) = home.space
+        && let Some(zone) = classify_zone(home.frame, point, fraction)
     {
         if let (None, WindowDropAction::Insert(direction)) =
             (scene.action_override, resolve_action(zone, center))
-            && !scene.source_neighbors[match direction {
+            && !home.neighbors[match direction {
                 Direction::Left => 0,
                 Direction::Right => 1,
                 Direction::Up => 2,
                 Direction::Down => 3,
             }]
-            && !unavailable.contains(&(source.window, zone, WindowDropAction::Move(direction)))
+            && !unavailable.contains(&(home.window, zone, WindowDropAction::Move(direction)))
         {
             return Some(DropIntent {
-                window: source.window,
+                window: home.window,
                 space,
-                frame: source.origin_frame,
+                frame: home.frame,
                 zone,
                 action: WindowDropAction::Move(direction),
             });
@@ -715,17 +738,15 @@ mod tests {
     fn scene(frame: CGRect) -> DragScene {
         DragScene {
             action_override: None,
-            source_neighbors: [false; 4],
             targets: vec![target(2, frame)],
-            slots: Vec::new(),
+            place: ScenePlace::default(),
         }
     }
     fn scene_with(targets: Vec<DragSceneTarget>) -> DragScene {
         DragScene {
             action_override: None,
-            source_neighbors: [false; 4],
             targets,
-            slots: Vec::new(),
+            place: ScenePlace::default(),
         }
     }
     fn motion(actor: &mut DragActor, x: f64, y: f64) -> bool {
@@ -892,7 +913,9 @@ mod tests {
     #[test]
     fn source_tile_edge_is_preview_only_until_pointer_enters_neighbor() {
         let mut drag_scene = scene(frame(200.0, 0.0, 200.0, 100.0));
-        drag_scene.source_neighbors[1] = true;
+        drag_scene.place = ScenePlace::Home {
+            neighbors: [false, true, false, false],
+        };
         let mut actor = native(DragOrigin::Tiled, rect(), drag_scene.clone());
         // Home is preview-only; mouse-up has no validated operation to commit.
         motion(&mut actor, 199.0, 50.0);

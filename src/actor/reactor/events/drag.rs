@@ -13,7 +13,9 @@ pub fn build_drag_scene(
 ) -> crate::actor::drag::DragScene {
     crate::actor::drag::DragScene {
         action_override: layout.layout_engine.drop_action_override(space),
-        source_neighbors: layout.layout_engine.source_move_neighbors(space, source),
+        place: crate::actor::drag::ScenePlace::Home {
+            neighbors: layout.layout_engine.source_move_neighbors(space, source),
+        },
         targets: layout
             .layout_engine
             .drop_scene_windows(space, source)
@@ -27,7 +29,6 @@ pub fn build_drag_scene(
                 })
             })
             .collect(),
-        slots: Vec::new(),
     }
 }
 
