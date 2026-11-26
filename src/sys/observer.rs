@@ -3,24 +3,23 @@ use std::collections::HashMap;
 use std::ffi::c_void;
 use std::marker::PhantomData;
 use std::ptr::{self, NonNull};
-use std::sync::Arc;
+use std::rc::Rc;
 
-use dispatchr::queue;
-use dispatchr::time::Time;
+use block2::RcBlock;
 use objc2_application_services::{AXError, AXObserver, AXUIElement as RawAXUIElement};
 use objc2_core_foundation::{
-    CFRetained, CFRunLoop, CFRunLoopMode, CFString, kCFRunLoopCommonModes,
+    CFAbsoluteTimeGetCurrent, CFRetained, CFRunLoop, CFRunLoopMode, CFRunLoopTimer, CFString,
+    kCFRunLoopCommonModes,
 };
 
 use crate::sys::app::pid_t;
 use crate::sys::axuielement::{AXUIElement, Error as AxError};
-use crate::sys::dispatch::DispatchExt;
 
 /// An observer for accessibility events.
 pub struct Observer {
     callback: Callback,
-    observer: CFRetained<AXObserver>,
-    subscription_ctx: RefCell<HashMap<NotificationKey, Arc<SubscriptionContext>>>,
+    observer: Rc<CFRetained<AXObserver>>,
+    subscription_ctx: RefCell<HashMap<NotificationKey, Rc<SubscriptionContext>>>,
 }
 
 static_assertions::assert_not_impl_any!(Observer: Send);
@@ -34,11 +33,12 @@ struct SubscriptionContext {
     callback: Callback,
     data: Cell<usize>,
     notification: &'static str,
+    generation: Cell<u64>,
 }
 
 enum Callback {
-    Data(Arc<dyn Fn(AXUIElement, usize)>),
-    Notification(Arc<dyn Fn(AXUIElement, &'static str)>),
+    Data(Rc<dyn Fn(AXUIElement, usize)>),
+    Notification(Rc<dyn Fn(AXUIElement, &'static str)>),
 }
 
 impl Observer {
@@ -51,16 +51,12 @@ impl Observer {
     ) -> Result<ObserverBuilder<F>, AxError> {
         let mut observer_ptr: *mut AXObserver = ptr::null_mut();
         let status = unsafe {
-            AXObserver::create(
-                pid,
-                Some(internal_callback),
-                NonNull::new(&mut observer_ptr as *mut *mut AXObserver).expect("nonnull pointer"),
-            )
+            AXObserver::create(pid, Some(internal_callback), NonNull::from(&mut observer_ptr))
         };
         make_result(status)?;
-        let observer = unsafe {
-            CFRetained::from_raw(NonNull::new(observer_ptr).expect("observer must be non-null"))
-        };
+        // SAFETY: AXObserverCreate transfers ownership of a non-null result.
+        let observer =
+            unsafe { CFRetained::from_raw(NonNull::new(observer_ptr).ok_or(AxError::NotFound)?) };
         Ok(ObserverBuilder(observer, PhantomData))
     }
 
@@ -77,13 +73,13 @@ impl Observer {
             AXObserver::create(
                 pid,
                 Some(internal_callback_with_notification),
-                NonNull::new(&mut observer_ptr as *mut *mut AXObserver).expect("nonnull pointer"),
+                NonNull::from(&mut observer_ptr),
             )
         };
         make_result(status)?;
-        let observer = unsafe {
-            CFRetained::from_raw(NonNull::new(observer_ptr).expect("observer must be non-null"))
-        };
+        // SAFETY: AXObserverCreate transfers ownership of a non-null result.
+        let observer =
+            unsafe { CFRetained::from_raw(NonNull::new(observer_ptr).ok_or(AxError::NotFound)?) };
         Ok(ObserverBuilder(observer, PhantomData))
     }
 }
@@ -92,14 +88,14 @@ impl<F: Fn(AXUIElement, usize) + 'static> ObserverBuilder<F> {
     /// Installs the observer with the supplied callback into the current
     /// thread's run loop.
     pub fn install(self, callback: F) -> Observer {
-        self.install_inner(Callback::Data(Arc::new(callback)))
+        self.install_inner(Callback::Data(Rc::new(callback)))
     }
 }
 
 impl<F: Fn(AXUIElement, &'static str) + 'static> ObserverBuilder<F> {
     /// Installs a callback that receives the registered notification name.
     pub fn install_with_notification(self, callback: F) -> Observer {
-        self.install_inner(Callback::Notification(Arc::new(callback)))
+        self.install_inner(Callback::Notification(Rc::new(callback)))
     }
 }
 
@@ -113,7 +109,7 @@ impl<F> ObserverBuilder<F> {
         }
         Observer {
             callback,
-            observer: self.0,
+            observer: Rc::new(self.0),
             subscription_ctx: RefCell::new(HashMap::new()),
         }
     }
@@ -122,32 +118,10 @@ impl<F> ObserverBuilder<F> {
 impl Clone for Callback {
     fn clone(&self) -> Self {
         match self {
-            Self::Data(callback) => Self::Data(Arc::clone(callback)),
-            Self::Notification(callback) => Self::Notification(Arc::clone(callback)),
+            Self::Data(callback) => Self::Data(Rc::clone(callback)),
+            Self::Notification(callback) => Self::Notification(Rc::clone(callback)),
         }
     }
-}
-
-struct AddNotifRetryCtx {
-    observer: CFRetained<AXObserver>,
-    elem: AXUIElement,
-    notification: &'static str,
-    callback_ctx: Arc<SubscriptionContext>,
-}
-
-extern "C" fn add_notif_retry(ctx: *mut c_void) {
-    if ctx.is_null() {
-        return;
-    }
-    let ctx = unsafe { Box::from_raw(ctx as *mut AddNotifRetryCtx) };
-    let notification_cf = CFString::from_static_str(ctx.notification);
-    let _ = unsafe {
-        ctx.observer.add_notification(
-            ctx.elem.as_concrete_TypeRef(),
-            notification_cf.as_ref(),
-            Arc::as_ptr(&ctx.callback_ctx).cast_mut().cast(),
-        )
-    };
 }
 
 impl Observer {
@@ -173,11 +147,11 @@ impl Observer {
         &self,
         elem: &AXUIElement,
         notification: &'static str,
-        callback_ctx: Arc<SubscriptionContext>,
+        callback_ctx: Rc<SubscriptionContext>,
     ) -> Result<(), AxError> {
         let notification_cf = CFString::from_static_str(notification);
         let observer: &AXObserver = &self.observer;
-        let callback_data = Arc::as_ptr(&callback_ctx).cast_mut().cast();
+        let callback_data = Rc::as_ptr(&callback_ctx).cast_mut().cast();
         let first = unsafe {
             observer.add_notification(
                 elem.as_concrete_TypeRef(),
@@ -185,28 +159,50 @@ impl Observer {
                 callback_data,
             )
         };
-        if make_result(first).is_ok() {
-            return Ok(());
-        }
-        if first == AXError::CannotComplete {
-            let retained_observer =
-                unsafe { CFRetained::retain(CFRetained::as_ptr(&self.observer)) };
-            let ctx = Box::new(AddNotifRetryCtx {
-                observer: retained_observer,
-                elem: elem.clone(),
-                notification,
-                callback_ctx,
+        if first == AXError::CannotComplete
+            && let Some(run_loop) = CFRunLoop::current()
+        {
+            let observer = Rc::downgrade(&self.observer);
+            let generation = callback_ctx.generation.get();
+            let context = Rc::downgrade(&callback_ctx);
+            let elem = elem.clone();
+            let retry = RcBlock::new(move |_: *mut CFRunLoopTimer| {
+                let (Some(observer), Some(context)) = (observer.upgrade(), context.upgrade())
+                else {
+                    return;
+                };
+                if context.generation.get() != generation {
+                    return;
+                }
+                // SAFETY: Both objects belong to this run loop. The observer's map retains the
+                // context until the observer is released.
+                let status = unsafe {
+                    observer.add_notification(
+                        elem.as_concrete_TypeRef(),
+                        notification_cf.as_ref(),
+                        Rc::as_ptr(&context).cast_mut().cast(),
+                    )
+                };
+                if status != AXError::Success && status != AXError::NotificationAlreadyRegistered {
+                    tracing::debug!(?status, notification, "AX notification retry failed");
+                }
             });
-            // The retained AX objects and subscription context survive the retry;
-            // the retry passes the callback pointer without accessing its thread-local data.
-            unsafe {
-                queue::main().after_f(
-                    Time::NOW.new_after(10_000_000),
-                    Box::into_raw(ctx) as *mut c_void,
-                    add_notif_retry,
+            // SAFETY: The one-shot timer retains the block and invokes it on the owner run loop.
+            if let Some(timer) = unsafe {
+                CFRunLoopTimer::with_handler(
+                    None,
+                    CFAbsoluteTimeGetCurrent() + 0.01,
+                    0.,
+                    0,
+                    0,
+                    Some(&retry),
                 )
-            };
-            return Ok(());
+            } {
+                // SAFETY: This is an immutable Core Foundation runtime constant.
+                let mode = unsafe { kCFRunLoopCommonModes };
+                run_loop.add_timer(Some(&timer), mode);
+                return Ok(());
+            }
         }
         make_result(first)
     }
@@ -216,18 +212,20 @@ impl Observer {
         elem: &AXUIElement,
         notification: &'static str,
         data: usize,
-    ) -> Arc<SubscriptionContext> {
+    ) -> Rc<SubscriptionContext> {
         let key = (elem.raw_ptr(), notification);
         let mut subscription_ctx = self.subscription_ctx.borrow_mut();
         let ctx = subscription_ctx.entry(key).or_insert_with(|| {
-            Arc::new(SubscriptionContext {
+            Rc::new(SubscriptionContext {
                 callback: self.callback.clone(),
                 data: Cell::new(data),
                 notification,
+                generation: Cell::new(0),
             })
         });
         ctx.data.set(data);
-        Arc::clone(ctx)
+        ctx.generation.set(ctx.generation.get().wrapping_add(1));
+        Rc::clone(ctx)
     }
 
     pub fn remove_notification(
@@ -237,6 +235,9 @@ impl Observer {
     ) -> Result<(), AxError> {
         let notification_cf = CFString::from_static_str(notification);
         let observer: &AXObserver = &self.observer;
+        if let Some(ctx) = self.subscription_ctx.borrow().get(&(elem.raw_ptr(), notification)) {
+            ctx.generation.set(ctx.generation.get().wrapping_add(1));
+        }
         let result = make_result(unsafe {
             observer.remove_notification(elem.as_concrete_TypeRef(), notification_cf.as_ref())
         });

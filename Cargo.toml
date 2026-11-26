@@ -112,7 +112,9 @@ objc2-application-services = { version = "0.3.2", default-features = false, feat
 	"libc"
 ]}
 objc2-core-foundation = { version = "0.3.2", default-features = false, features = [
+	"block2",
 	"CFArray",
+	"CFDate",
 	"CFAttributedString",
 	"CFMachPort",
 	"CFNumber",
