@@ -125,7 +125,34 @@ impl StackLine {
             tracing::debug!("stack line disabled at start; will listen for config changes");
         }
 
-        while let Some((span, event)) = self.rx.recv().await {
+        let mut pending = None;
+        loop {
+            let next = if pending.is_some() {
+                pending.take()
+            } else {
+                self.rx.recv().await
+            };
+            let Some((mut span, mut event)) = next else { break };
+            if let Event::GroupsUpdated { space_id, reorder, .. } = &event {
+                let (space, mut must_reorder) = (*space_id, *reorder);
+                // A full snapshot replaces older geometry for the same space. Preserve
+                // lifecycle, click and config events as ordering barriers.
+                for _ in 0..32 {
+                    let Ok((next_span, mut next_event)) = self.rx.try_recv() else {
+                        break;
+                    };
+                    if let Event::GroupsUpdated { space_id, reorder, .. } = &mut next_event
+                        && *space_id == space
+                    {
+                        must_reorder |= *reorder;
+                        *reorder = must_reorder;
+                        (span, event) = (next_span, next_event);
+                    } else {
+                        pending = Some((next_span, next_event));
+                        break;
+                    }
+                }
+            }
             let _guard = span.enter();
             objc2::rc::autoreleasepool(|_| self.handle_event(event));
         }
