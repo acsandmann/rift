@@ -1225,6 +1225,10 @@ impl Default for TraditionalLayoutSettings {
 #[derive(Serialize, Deserialize, Debug, PartialEq, Clone, Default, ConfigSchema)]
 #[serde(deny_unknown_fields)]
 pub struct BspLayoutSettings {
+    /// Split along the longer side of the current tile.
+    #[serde(default)]
+    #[setting(label = "Split along the longer side")]
+    pub split_by_aspect_ratio: bool,
     #[serde(flatten)]
     #[setting(ignore)]
     pub base: BaseLayoutSettings,

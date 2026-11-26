@@ -613,7 +613,15 @@ pub(super) fn layout_options(ui: Ui, model: &Rc<Model>, mode: LayoutMode) -> Pag
                 |s| &mut s.settings.layout.traditional,
             )
             .row(insertion_point!(traditional)),
-        LayoutMode::Bsp => options().row(insertion_point!(bsp)).row(aspect_ratio(&mut f)),
+        LayoutMode::Bsp => f
+            .fields(
+                options(),
+                &["split_by_aspect_ratio"],
+                |s| &s.settings.layout.bsp,
+                |s| &mut s.settings.layout.bsp,
+            )
+            .row(insertion_point!(bsp))
+            .row(aspect_ratio(&mut f)),
         LayoutMode::Stack => f
             .fields(
                 options(),

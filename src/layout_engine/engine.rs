@@ -213,8 +213,12 @@ impl LayoutConstraints {
         screen: CGRect,
         gaps: &crate::common::config::GapSettings,
     ) {
-        if let LayoutSystemKind::Scrolling(scrolling) = system {
-            scrolling.prepare(layout, screen, &self.windows, Some(self.revision), gaps);
+        match system {
+            LayoutSystemKind::Scrolling(scrolling) => {
+                scrolling.prepare(layout, screen, &self.windows, Some(self.revision), gaps);
+            }
+            LayoutSystemKind::Bsp(bsp) => bsp.prepare_split_area(layout, screen, gaps),
+            _ => {}
         }
     }
 }
@@ -1615,7 +1619,15 @@ impl LayoutEngine {
                     }
                     self.insertion_cursor = Some((space, assigned_workspace, layout, wid));
                 }
-                system.update(WindowChange::Add(layout, wid, None));
+                if let LayoutSystemKind::Bsp(bsp) = system {
+                    bsp.insert_with_constraints(
+                        layout,
+                        wid,
+                        &self.window_layout_constraints.windows,
+                    );
+                } else {
+                    system.update(WindowChange::Add(layout, wid, None));
+                }
                 inserted = true;
             }
         } else {

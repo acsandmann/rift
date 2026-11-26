@@ -100,6 +100,10 @@ window_insertion_point = "next_to_selection"
 equalize_nodes = true
 
 # these settings only apply when layout mode == "master_stack"
+[settings.layout.bsp]
+# Split along the longer side of the selected tile. False alternates by tree depth.
+split_by_aspect_ratio = false
+
 [settings.layout.master_stack]
 # Fraction of space reserved for the master area (0.05..0.95)
 master_ratio = 0.6

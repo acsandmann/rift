@@ -154,6 +154,8 @@ impl LeafMembers {
 #[derive(Serialize, Deserialize, Clone, Copy, Debug)]
 struct LayoutState {
     root: NodeId,
+    #[serde(skip)]
+    split_area: Option<(CGRect, [f64; 2])>,
 }
 
 #[derive(Clone, Deserialize, Debug)]
@@ -209,6 +211,8 @@ pub struct BspLayoutSystem {
     window_insertion_point: WindowInsertionPoint,
     #[serde(skip)]
     single_window_aspect_ratio: Option<f64>,
+    #[serde(skip)]
+    split_by_aspect_ratio: bool,
 }
 
 #[derive(Deserialize)]
@@ -669,6 +673,53 @@ impl BspLayoutSystem {
         self.single_window_aspect_ratio = ratio.filter(|ratio| ratio.is_finite() && *ratio > 0.0);
     }
 
+    pub fn set_split_by_aspect_ratio(&mut self, enabled: bool) {
+        self.split_by_aspect_ratio = enabled;
+    }
+
+    pub(in crate::layout_engine) fn prepare_split_area(
+        &mut self,
+        layout: LayoutId,
+        screen: CGRect,
+        gaps: &crate::common::config::GapSettings,
+    ) {
+        if self.split_by_aspect_ratio
+            && let Some(state) = self.layouts.get_mut(layout)
+        {
+            state.split_area = Some((compute_tiling_area(screen, gaps), [
+                gaps.inner.vertical,
+                gaps.inner.horizontal,
+            ]));
+        }
+    }
+
+    pub(in crate::layout_engine) fn insert_with_constraints(
+        &mut self,
+        layout: LayoutId,
+        wid: WindowId,
+        constraints: &HashMap<WindowId, WindowLayoutConstraints>,
+    ) {
+        if self.contains_window(layout, wid) {
+            return;
+        }
+        if self.layouts.get(layout).is_some() {
+            if self.window_insertion_point == WindowInsertionPoint::EndOfTree {
+                let mut leaf = self.layouts[layout].root;
+                while let Some([_, right]) = self.children(leaf) {
+                    leaf = right;
+                }
+                self.select(leaf);
+                self.insert_window_at_selection(layout, wid, constraints);
+                return;
+            }
+            // Try smart insertion first (with preselection support)
+            if !self.smart_insert_window(layout, wid) {
+                // Fall back to default insertion
+                self.insert_window_at_selection(layout, wid, constraints);
+            }
+        }
+    }
+
     fn node_for_window_in_layout(&self, layout: LayoutId, wid: WindowId) -> Option<NodeId> {
         fn find(arena: &SlotMap<NodeId, Node>, node: NodeId, window: WindowId) -> Option<NodeId> {
             match &arena[node].kind {
@@ -710,7 +761,23 @@ impl BspLayoutSystem {
         node
     }
 
-    fn orientation_for_leaf(&self, node: NodeId) -> Orientation {
+    fn orientation_for_leaf(
+        &self,
+        state: LayoutState,
+        node: NodeId,
+        constraints: &HashMap<WindowId, WindowLayoutConstraints>,
+    ) -> Orientation {
+        if self.split_by_aspect_ratio
+            && let Some((area, gaps)) = state.split_area
+        {
+            let prepared = self.prepare_geometry(state.root, constraints, gaps);
+            let slot = self.tile_slot(node, area, &prepared, gaps);
+            return if slot.size.width >= slot.size.height {
+                Orientation::Horizontal
+            } else {
+                Orientation::Vertical
+            };
+        }
         if self.ancestors(node).count() % 2 == 1 {
             Orientation::Horizontal
         } else {
@@ -800,6 +867,7 @@ impl BspLayoutSystem {
         &mut self,
         layout: crate::layout_engine::LayoutId,
         wid: WindowId,
+        constraints: &HashMap<WindowId, WindowLayoutConstraints>,
     ) {
         let Some(state) = self.layouts.get(layout).copied() else {
             return;
@@ -822,7 +890,7 @@ impl BspLayoutSystem {
                     (LeafMembers::Single(wid), false, false);
             }
             NodeKind::Leaf { .. } => {
-                let orientation = self.orientation_for_leaf(leaf);
+                let orientation = self.orientation_for_leaf(state, leaf, constraints);
                 self.split_leaf(leaf, orientation, Some(wid), false);
             }
             NodeKind::Split { .. } => unreachable!("descent ends at a leaf"),
@@ -863,11 +931,30 @@ impl BspLayoutSystem {
         self.select(leaf);
     }
 
+    fn tile_slot(
+        &self,
+        node: NodeId,
+        area: CGRect,
+        prepared: &ConstraintCache,
+        gaps: [f64; 2],
+    ) -> CGRect {
+        let Some(parent) = self.parent(node) else { return area };
+        let parent_slot = self.tile_slot(parent, area, prepared, gaps);
+        let NodeKind::Split {
+            children, orientation, ratio, ..
+        } = *self.kind(parent)
+        else {
+            unreachable!("a BSP parent is a split");
+        };
+        split_slots(parent_slot, children, orientation, ratio, prepared, gaps)
+            [usize::from(node == children[1])]
+    }
+
     fn prepare_geometry(
         &self,
         root: NodeId,
         constraints: &HashMap<WindowId, WindowLayoutConstraints>,
-        gaps: &crate::common::config::GapSettings,
+        gaps: [f64; 2],
     ) -> ConstraintCache {
         let mut prepared = ConstraintCache::default();
         for node in self.postorder(root) {
@@ -899,11 +986,7 @@ impl BspLayoutSystem {
                             children.into_iter().flatten().map(|axes| axes[horizontal as usize]),
                             kind,
                             horizontal,
-                            if horizontal {
-                                gaps.inner.horizontal
-                            } else {
-                                gaps.inner.vertical
-                            },
+                            gaps[usize::from(horizontal)],
                             0.0,
                             0.0,
                         );
@@ -932,7 +1015,7 @@ struct BspProjection<'a> {
     screen: CGRect,
     tiling: CGRect,
     constraints: &'a HashMap<WindowId, WindowLayoutConstraints>,
-    gaps: &'a crate::common::config::GapSettings,
+    gaps: [f64; 2],
 }
 
 impl BspProjection<'_> {
@@ -965,41 +1048,57 @@ impl BspProjection<'_> {
                 children: [first, second],
                 ..
             } => {
-                let (Some(first_axes), Some(second_axes)) =
-                    (self.prepared.get(first), self.prepared.get(second))
-                else {
-                    self.apply(*first, slot, out);
-                    self.apply(*second, slot, out);
-                    return;
-                };
-                let horizontal = *orientation == Orientation::Horizontal;
-                let (origin, total, gap) = if horizontal {
-                    (slot.origin.x, slot.size.width, self.gaps.inner.horizontal)
-                } else {
-                    (slot.origin.y, slot.size.height, self.gaps.inner.vertical)
-                };
-                let ratio = f64::from(*ratio);
-                let items =
-                    [(first_axes, ratio), (second_axes, 1.0 - ratio)].map(|(axes, weight)| {
-                        let (min, fixed, max, can_grow) = axes[horizontal as usize];
-                        AxisConstraints {
-                            min,
-                            fixed,
-                            max,
-                            weight,
-                            can_grow,
-                        }
-                    });
-                let lengths = solve_axis_lengths(items, (total - gap).max(0.0));
-                self.apply(*first, axis_slot(slot, horizontal, origin, lengths[0]), out);
-                self.apply(
-                    *second,
-                    axis_slot(slot, horizontal, origin + (lengths[0] + gap), lengths[1]),
-                    out,
+                let [first_slot, second_slot] = split_slots(
+                    slot,
+                    [*first, *second],
+                    *orientation,
+                    *ratio,
+                    self.prepared,
+                    self.gaps,
                 );
+                self.apply(*first, first_slot, out);
+                self.apply(*second, second_slot, out);
             }
         }
     }
+}
+
+fn split_slots(
+    slot: CGRect,
+    [first, second]: [NodeId; 2],
+    orientation: Orientation,
+    ratio: f32,
+    prepared: &ConstraintCache,
+    gaps: [f64; 2],
+) -> [CGRect; 2] {
+    let (Some(first_axes), Some(second_axes)) = (prepared.get(&first), prepared.get(&second))
+    else {
+        return [slot; 2];
+    };
+    let horizontal = orientation == Orientation::Horizontal;
+    let (origin, total) = if horizontal {
+        (slot.origin.x, slot.size.width)
+    } else {
+        (slot.origin.y, slot.size.height)
+    };
+    let axis = usize::from(horizontal);
+    let gap = gaps[axis];
+    let ratio = f64::from(ratio);
+    let items = [(first_axes, ratio), (second_axes, 1.0 - ratio)].map(|(axes, weight)| {
+        let (min, fixed, max, can_grow) = axes[axis];
+        AxisConstraints {
+            min,
+            fixed,
+            max,
+            weight,
+            can_grow,
+        }
+    });
+    let lengths = solve_axis_lengths(items, (total - gap).max(0.0));
+    [
+        axis_slot(slot, horizontal, origin, lengths[0]),
+        axis_slot(slot, horizontal, origin + (lengths[0] + gap), lengths[1]),
+    ]
 }
 
 #[cfg(test)]
@@ -1036,6 +1135,25 @@ mod tests {
             )
             .into_iter()
             .collect()
+    }
+
+    #[test]
+    fn aspect_splits_project_along_the_longer_axis() {
+        for (size, expected) in [
+            (CGSize::new(3200.0, 1000.0), CGSize::new(1600.0, 1000.0)),
+            (CGSize::new(1000.0, 1600.0), CGSize::new(1000.0, 800.0)),
+        ] {
+            let (mut system, layout) = tiled(&[1]);
+            system.set_split_by_aspect_ratio(true);
+            system.prepare_split_area(
+                layout,
+                CGRect::new(CGPoint::ZERO, size),
+                &Default::default(),
+            );
+            system.update(WindowChange::Add(layout, w(2), None));
+            let frames = calculate_frames(&system, layout, size, &HashMap::default());
+            assert_eq!(frames[&w(1)].size, expected);
+        }
     }
 
     #[test]
@@ -1196,7 +1314,7 @@ impl LayoutSystem for BspLayoutSystem {
 
     fn create_layout(&mut self) -> LayoutId {
         let leaf = self.make_leaf(None);
-        let state = LayoutState { root: leaf };
+        let state = LayoutState { root: leaf, split_area: None };
         self.layouts.insert(state)
     }
 
@@ -1207,7 +1325,7 @@ impl LayoutSystem for BspLayoutSystem {
             return self.create_layout();
         };
         let root = self.clone_node(state.root, None);
-        self.layouts.insert(LayoutState { root })
+        self.layouts.insert(LayoutState { root, ..state })
     }
 
     fn remove_layout(&mut self, layout: LayoutId) {
@@ -1228,6 +1346,7 @@ impl LayoutSystem for BspLayoutSystem {
         let mut out = Vec::new();
         if let Some(state) = self.layouts.get(layout).copied() {
             let rect = compute_tiling_area(screen, gaps);
+            let gaps = [gaps.inner.vertical, gaps.inner.horizontal];
             let prepared = self.prepare_geometry(state.root, constraints, gaps);
             BspProjection {
                 system: self,
@@ -1674,25 +1793,7 @@ impl BspLayoutSystem {
     }
 
     fn add_window_after_selection(&mut self, layout: LayoutId, wid: WindowId) {
-        if self.contains_window(layout, wid) {
-            return;
-        }
-        if self.layouts.get(layout).is_some() {
-            if self.window_insertion_point == WindowInsertionPoint::EndOfTree {
-                let mut leaf = self.layouts[layout].root;
-                while let Some([_, right]) = self.children(leaf) {
-                    leaf = right;
-                }
-                self.select(leaf);
-                self.insert_window_at_selection(layout, wid);
-                return;
-            }
-            // Try smart insertion first (with preselection support)
-            if !self.smart_insert_window(layout, wid) {
-                // Fall back to default insertion
-                self.insert_window_at_selection(layout, wid);
-            }
-        }
+        self.insert_with_constraints(layout, wid, &HashMap::default());
     }
 
     fn remove_window(&mut self, wid: WindowId) {
@@ -1884,7 +1985,7 @@ impl BspLayoutSystem {
         self.select(leaf);
 
         for member in windows {
-            self.insert_window_at_selection(layout, member);
+            self.insert_window_at_selection(layout, member, &HashMap::default());
         }
 
         // Insertion rebuilds leaves without fullscreen, so hand it back to the visible member.
