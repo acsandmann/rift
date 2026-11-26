@@ -6,6 +6,7 @@ use std::io::{self, Write};
 use std::os::unix::process::ExitStatusExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::time::{Duration, Instant};
 
 use clap::Subcommand;
 use nix::unistd::getuid;
@@ -232,13 +233,39 @@ fn run_launchctl(args: &[&str], suppress_output: bool) -> io::Result<i32> {
     }
 }
 
-fn service_is_running() -> io::Result<bool> {
-    let uid = getuid();
-    let service_target = format!("gui/{}/{}", uid, RIFT_PLIST);
-    match run_launchctl(&["print", &service_target], true) {
-        Ok(code) => Ok(code == 0),
-        Err(_) => Ok(false),
+fn service_is_loaded(target: &str) -> io::Result<bool> {
+    match run_launchctl(&["print", target], true)? {
+        0 => Ok(true),    // Includes a loaded job whose process is stopped.
+        113 => Ok(false), // launchctl: could not find service.
+        code => Err(io::Error::other(format!(
+            "launchctl print {target} failed (exit {code})"
+        ))),
     }
+}
+
+fn launchctl(args: &[&str]) -> io::Result<()> {
+    match run_launchctl(args, false)? {
+        0 => Ok(()),
+        code => Err(io::Error::other(format!(
+            "launchctl {} failed (exit {code})",
+            args.join(" ")
+        ))),
+    }
+}
+
+fn bootout(target: &str) -> io::Result<()> {
+    launchctl(&["bootout", target])?;
+    let deadline = Instant::now() + Duration::from_secs(3);
+    while service_is_loaded(target)? {
+        if Instant::now() >= deadline {
+            return Err(io::Error::new(
+                io::ErrorKind::TimedOut,
+                format!("{target} is still loaded"),
+            ));
+        }
+        std::thread::sleep(Duration::from_millis(25));
+    }
+    Ok(())
 }
 
 pub fn service_install_internal(plist_path: &Path) -> io::Result<()> {
@@ -247,23 +274,16 @@ pub fn service_install_internal(plist_path: &Path) -> io::Result<()> {
     Ok(())
 }
 
-fn ensure_plist_up_to_date(plist_path: &Path) -> io::Result<bool> {
-    // Nix/Home Manager own these symlinks and their service arguments. Never
-    // write through them into the store; let their manager update the job.
+fn pending_plist_update(plist_path: &Path) -> io::Result<Option<String>> {
+    // Nix/Home Manager own these symlinks and their service arguments.
     if fs::symlink_metadata(plist_path).is_ok_and(|meta| meta.file_type().is_symlink()) {
-        return Ok(false);
+        return Ok(None);
     }
     let desired = plist_contents()?;
     match fs::read_to_string(plist_path) {
-        Ok(existing) if existing == desired => Ok(false),
-        Ok(_) => {
-            write_file_atomic(plist_path, &desired)?;
-            Ok(true)
-        }
-        Err(err) if err.kind() == io::ErrorKind::NotFound => {
-            write_file_atomic(plist_path, &desired)?;
-            Ok(true)
-        }
+        Ok(existing) if existing == desired => Ok(None),
+        Ok(_) => Ok(Some(desired)),
+        Err(err) if err.kind() == io::ErrorKind::NotFound => Ok(Some(desired)),
         Err(err) => Err(err),
     }
 }
@@ -287,7 +307,7 @@ pub fn service_uninstall() -> io::Result<()> {
             format!("service file '{}' is not installed", plist_path.display()),
         ));
     }
-    if service_is_running()? {
+    if service_is_loaded(&format!("gui/{}/{}", getuid(), RIFT_PLIST))? {
         return Err(io::Error::new(
             io::ErrorKind::Other,
             "service is still running; stop it first with `rift service stop` before uninstalling",
@@ -297,129 +317,56 @@ pub fn service_uninstall() -> io::Result<()> {
     Ok(())
 }
 
-pub fn service_start() -> io::Result<()> {
-    let plist_path = plist_path()?;
-    if !plist_path.is_file() {
-        service_install_internal(&plist_path).map_err(|e| {
-            io::Error::new(
-                e.kind(),
-                format!(
-                    "service file '{}' could not be installed: {}",
-                    plist_path.display(),
-                    e
-                ),
-            )
-        })?;
-    }
+pub fn service_start() -> io::Result<()> { start_or_restart(false) }
 
-    let uid = getuid();
-    let service_target = format!("gui/{}/{}", uid, RIFT_PLIST);
-    let domain_target = format!("gui/{}", uid);
+pub fn service_restart() -> io::Result<()> { start_or_restart(true) }
 
-    let plist_changed = if env::var_os("USER").is_some() && env::var_os("PATH").is_some() {
-        ensure_plist_up_to_date(&plist_path)?
-    } else {
-        false
-    };
-
-    let is_bootstrapped = run_launchctl(&["print", &service_target], true).unwrap_or(1) == 0;
-    if is_bootstrapped && plist_changed {
-        let code = run_launchctl(&["bootout", &service_target], false)?;
-        if code != 0 {
-            return Err(io::Error::other(format!("bootout failed (exit {code})")));
-        }
-    }
-    if !is_bootstrapped || plist_changed {
-        let _ = run_launchctl(&["enable", &service_target], true);
-        let code = run_launchctl(
-            &["bootstrap", &domain_target, plist_path.to_str().unwrap()],
-            false,
-        )?;
-        if code != 0 {
-            return Err(io::Error::other(format!("bootstrap failed (exit {code})")));
-        }
-    }
-    let code = run_launchctl(&["kickstart", &service_target], false)?;
-    if code == 0 {
-        Ok(())
-    } else {
-        Err(io::Error::other(format!("kickstart failed (exit {code})")))
-    }
-}
-
-pub fn service_restart() -> io::Result<()> {
-    let plist_path = plist_path()?;
-    if !plist_path.is_file() {
+fn start_or_restart(restart: bool) -> io::Result<()> {
+    let path = plist_path()?;
+    if restart && !path.is_file() {
         return Err(io::Error::new(
             io::ErrorKind::NotFound,
-            format!("service file '{}' is not installed", plist_path.display()),
+            format!("service file '{}' is not installed", path.display()),
         ));
     }
-
-    if ensure_plist_up_to_date(&plist_path)? {
-        // launchd caches ProgramArguments; kickstart alone does not reload them.
-        let target = format!("gui/{}/{}", getuid(), RIFT_PLIST);
-        if service_is_running()? {
-            let code = run_launchctl(&["bootout", &target], false)?;
-            if code != 0 {
-                return Err(io::Error::other(format!("bootout failed (exit {code})")));
-            }
+    let domain = format!("gui/{}", getuid());
+    let target = format!("{domain}/{RIFT_PLIST}");
+    let path_str = path.to_str().ok_or_else(|| io::Error::other("non-UTF8 LaunchAgent path"))?;
+    let mut loaded = service_is_loaded(&target)?;
+    if (!path.is_file() || env::var_os("USER").is_some() && env::var_os("PATH").is_some())
+        && let Some(desired) = pending_plist_update(&path)?
+    {
+        // Keep the old plist if removal fails so a retry still detects the update.
+        if loaded {
+            bootout(&target)?;
+            loaded = false;
         }
-        return service_start();
+        write_file_atomic(&path, &desired)?;
     }
-
-    let uid = getuid();
-    let service_target = format!("gui/{}/{}", uid, RIFT_PLIST);
-    let code = run_launchctl(&["kickstart", "-k", &service_target], false)?;
-    if code == 0 {
-        Ok(())
+    if !loaded {
+        launchctl(&["enable", &target])?;
+        launchctl(&["bootstrap", &domain, path_str])?;
+    }
+    if restart && loaded {
+        launchctl(&["kickstart", "-k", &target])
     } else {
-        Err(io::Error::new(
-            io::ErrorKind::Other,
-            format!("kickstart -k failed (exit {})", code),
-        ))
+        launchctl(&["kickstart", &target])
     }
 }
 
 pub fn service_stop() -> io::Result<()> {
-    let plist_path = plist_path()?;
-    if !plist_path.is_file() {
+    let path = plist_path()?;
+    if !path.is_file() {
         return Err(io::Error::new(
             io::ErrorKind::NotFound,
-            format!("service file '{}' is not installed", plist_path.display()),
+            format!("service file '{}' is not installed", path.display()),
         ));
     }
-
-    let uid = getuid();
-    let service_target = format!("gui/{}/{}", uid, RIFT_PLIST);
-    let domain_target = format!("gui/{}", uid);
-
-    let is_bootstrapped = run_launchctl(&["print", &service_target], true).unwrap_or(1);
-
-    if is_bootstrapped != 0 {
-        let code = run_launchctl(&["kill", "SIGTERM", &service_target], false)?;
-        if code == 0 {
-            Ok(())
-        } else {
-            Err(io::Error::new(
-                io::ErrorKind::Other,
-                format!("kill SIGTERM failed (exit {})", code),
-            ))
-        }
-    } else {
-        let code1 =
-            run_launchctl(&["bootout", &domain_target, plist_path.to_str().unwrap()], false)?;
-        let code2 = run_launchctl(&["disable", &service_target], false)?;
-
-        if code1 == 0 && code2 == 0 {
-            Ok(())
-        } else {
-            Err(io::Error::new(
-                io::ErrorKind::Other,
-                format!("bootout exit {}, disable exit {}", code1, code2),
-            ))
-        }
+    let target = format!("gui/{}/{}", getuid(), RIFT_PLIST);
+    if service_is_loaded(&target)? {
+        bootout(&target)?;
     }
+    launchctl(&["disable", &target])
 }
 
 #[cfg(test)]
@@ -437,7 +384,7 @@ mod tests {
         fs::write(&managed, contents).unwrap();
         unix_fs::symlink(&managed, &agent).unwrap();
 
-        assert!(!ensure_plist_up_to_date(&agent).unwrap());
+        assert!(pending_plist_update(&agent).unwrap().is_none());
         assert_eq!(fs::read_to_string(&managed).unwrap(), contents);
         assert!(fs::symlink_metadata(&agent).unwrap().file_type().is_symlink());
     }
