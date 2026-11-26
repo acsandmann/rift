@@ -127,7 +127,7 @@ impl StackLine {
 
         while let Some((span, event)) = self.rx.recv().await {
             let _guard = span.enter();
-            self.handle_event(event);
+            objc2::rc::autoreleasepool(|_| self.handle_event(event));
         }
     }
 

@@ -10,7 +10,7 @@ use std::sync::{Arc, LazyLock, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use objc2::rc::Retained;
+use objc2::rc::{Retained, autoreleasepool};
 use objc2_app_kit::NSRunningApplication;
 use objc2_application_services::AXError;
 use objc2_core_foundation::{CGPoint, CGRect, CGSize};
@@ -1222,11 +1222,11 @@ impl State {
                 }
                 notif = notifications_rx.recv() => {
                     let Some((_, (elem, notif, hinted_wid))) = notif else { break };
-                    this.borrow_mut().handle_notification(elem, notif, hinted_wid);
+                    autoreleasepool(|_| this.borrow_mut().handle_notification(elem, notif, hinted_wid));
                     continue;
                 }
             };
-            if Self::handle_request_batch(this, &mut batch) {
+            if autoreleasepool(|_| Self::handle_request_batch(this, &mut batch)) {
                 break;
             }
         }

@@ -314,6 +314,13 @@ impl WmController {
             }
             SpaceStateUpdated(space_state, converter) => {
                 self.events_tx.send(Event::SpaceStateChanged(space_state.clone()));
+                if space_state.authoritative
+                    && let Some(tx) = &self.mission_control_tx
+                {
+                    tx.send(mission_control::Event::DesktopDisplays(
+                        space_state.screens.clone(),
+                    ));
+                }
                 _ = self
                     .input_tx
                     .send(input::Request::SpaceStateUpdated(space_state.clone(), converter));

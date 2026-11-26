@@ -1392,21 +1392,46 @@ fn set_desktop_snapshot(background: &CALayer, image: &CGImage) {
 
 // Keep one capture per connected display and mode across overview sessions.
 #[derive(Default)]
-pub(crate) struct DesktopBackgrounds(Vec<DesktopBackground>);
+pub(crate) struct DesktopBackgrounds {
+    entries: Vec<DesktopBackground>,
+    displays: Vec<(u32, CGSize, f64, Option<crate::sys::screen::SpaceId>)>,
+    generation: u64,
+}
 
 struct DesktopBackground {
     display_id: u32,
     size: CGSize,
     scale: f64,
+    wallpaper: Option<Retained<objc2_foundation::NSURL>>,
+    generation: u64,
     snapshot: Option<cgs::compositor::preview::DesktopSnapshot>,
     image: Option<Retained<CGImage>>,
 }
 
 impl DesktopBackgrounds {
+    pub(crate) fn displays_changed(&mut self, screens: &[ScreenInfo]) -> bool {
+        let displays: Vec<_> = screens
+            .iter()
+            .map(|s| (s.id.as_u32(), s.frame.size, s.backing_scale, s.space))
+            .collect();
+        let changed = self.displays != displays;
+        if changed {
+            self.entries.retain(|entry| {
+                let previous = self.displays.iter().find(|t| t.0 == entry.display_id);
+                let current = displays.iter().find(|t| t.0 == entry.display_id);
+                current.is_some_and(|new| previous.is_none_or(|old| old == new))
+            });
+            self.displays = displays;
+        }
+        changed
+    }
+
     pub(crate) fn sync(&mut self, mtm: MainThreadMarker, wake: &Sender) {
         if !CGPreflightScreenCaptureAccess() {
+            self.entries.clear();
             return;
         }
+        let workspace = NSWorkspace::sharedWorkspace();
         let screens: Vec<_> = NSScreen::screens(mtm)
             .iter()
             .filter_map(|screen| {
@@ -1415,25 +1440,33 @@ impl DesktopBackgrounds {
                     display,
                     CGDisplayBounds(display).size,
                     screen.backingScaleFactor(),
+                    workspace.desktopImageURLForScreen(&screen),
                 ))
             })
             .collect();
-        self.0.retain(|entry| {
-            screens.contains(&(entry.display_id, entry.size, entry.scale))
-                && (entry.image.is_some() || entry.snapshot.is_some())
+        self.entries.retain(|entry| {
+            screens.iter().any(|(id, size, scale, wallpaper)| {
+                (*id, *size, *scale) == (entry.display_id, entry.size, entry.scale)
+                    && wallpaper == &entry.wallpaper
+            }) && (entry.image.is_some() || entry.snapshot.is_some())
         });
-        for (display_id, size, scale) in screens {
-            if self.0.iter().any(|entry| entry.display_id == display_id) {
+        for (display_id, size, scale, wallpaper) in screens {
+            if self.entries.iter().any(|entry| entry.display_id == display_id) {
                 continue;
             }
             let wake = wake.clone();
-            match cgs::compositor::preview::DesktopSnapshot::new(display_id, scale, move || {
-                wake.send(Event::DesktopBackgroundReady(display_id));
+            self.generation += 1;
+            let generation = self.generation;
+            // A wallpaper needs one pixel per point, even behind Retina previews.
+            match cgs::compositor::preview::DesktopSnapshot::new(display_id, 1.0, move || {
+                wake.send(Event::DesktopBackgroundReady(display_id, generation));
             }) {
-                Ok(snapshot) => self.0.push(DesktopBackground {
+                Ok(snapshot) => self.entries.push(DesktopBackground {
                     display_id,
                     size,
                     scale,
+                    wallpaper,
+                    generation,
                     snapshot: Some(snapshot),
                     image: None,
                 }),
@@ -1444,8 +1477,13 @@ impl DesktopBackgrounds {
         }
     }
 
+    pub(crate) fn ready(&mut self, display_id: u32, generation: u64) -> Option<&CGImage> {
+        let entry = self.entries.iter().find(|entry| entry.display_id == display_id)?;
+        (entry.generation == generation).then(|| self.image(display_id)).flatten()
+    }
+
     pub(crate) fn image(&mut self, display_id: u32) -> Option<&CGImage> {
-        let entry = self.0.iter_mut().find(|entry| entry.display_id == display_id)?;
+        let entry = self.entries.iter_mut().find(|entry| entry.display_id == display_id)?;
         if let Some(pending) = &entry.snapshot {
             match pending.take_image() {
                 Ok(Some(captured)) => {
@@ -1484,6 +1522,18 @@ pub(crate) struct PreviewCache {
     )>,
 }
 impl PreviewCache {
+    pub(crate) fn retain_displays(&mut self, screens: &[ScreenInfo]) {
+        self.captures.retain(|(cached, _, _, _, _)| {
+            screens.iter().any(|screen| {
+                screen.id == cached.id
+                    && screen.display_uuid == cached.display_uuid
+                    && screen.space == cached.space
+                    && screen.backing_scale == cached.backing_scale
+                    && screen.frame == cached.frame
+            })
+        });
+    }
+
     fn take(
         &mut self,
         d: &mut DisplayOverview,

@@ -19,7 +19,8 @@ pub enum Event {
         workspaces: Vec<crate::model::server::RuntimeWorkspaceData>,
     },
     PumpPreviews,
-    DesktopBackgroundReady(u32),
+    DesktopBackgroundReady(u32, u64),
+    DesktopDisplays(Vec<crate::sys::screen::ScreenInfo>),
     ShowAll,
     Dismiss,
     RefreshCurrentWorkspace,
@@ -279,7 +280,7 @@ impl MissionControlActor {
                         }
                     }
                     let _guard = span.enter();
-                    self.handle(event);
+                    objc2::rc::autoreleasepool(|_| self.handle(event));
                     if !self.settings.enabled { break; }
                 }
             }
@@ -341,8 +342,16 @@ impl MissionControlActor {
                     }
                 }
             }
-            Event::DesktopBackgroundReady(display) => {
-                if let Some(image) = self.backgrounds.image(display)
+            Event::DesktopDisplays(screens) => {
+                if self.backgrounds.displays_changed(&screens) {
+                    if let Some(cache) = &mut self.cache {
+                        cache.retain_displays(&screens);
+                    }
+                    self.backgrounds.sync(self.mtm, &self.tx);
+                }
+            }
+            Event::DesktopBackgroundReady(display, generation) => {
+                if let Some(image) = self.backgrounds.ready(display, generation)
                     && let Some(session) = &self.session
                 {
                     session.set_desktop_background(display, image);
