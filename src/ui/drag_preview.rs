@@ -57,7 +57,7 @@ impl DragPreview {
         let style = Self::style(target);
         let bounds = Self::bounds(frame.size);
         let window = CgsWindow::new_compositor(frame, PREVIEW_CORNER_RADIUS)?;
-        window.set_alpha(1.0)?;
+        window.set_alpha(0.0)?;
         window.set_tags(1 << 3)?;
 
         let root = CALayer::layer();
@@ -141,25 +141,26 @@ impl DragPreview {
             });
         }
 
-        if frame_changed {
+        // Keep the overlay hidden until the checked relative-order request succeeds.
+        if ordering_changed {
+            self.window.order_above(Some(relative_window))?;
+            self.relative_window = Some(relative_window);
+        }
+        if frame_changed || !self.visible {
             let transaction = WindowTransaction::new()?;
             if size_changed {
                 transaction.set_rounded_frame(&self.window, frame, PREVIEW_CORNER_RADIUS)?;
                 self.surface.set_bounds_in(&transaction, Self::bounds(frame.size));
-            } else {
+            } else if origin_changed {
                 transaction.move_window(&self.window, frame.origin);
+            }
+            if !self.visible {
+                transaction.set_alpha(&self.window, 1.0);
             }
             transaction.commit();
             self.frame = frame;
         }
 
-        if ordering_changed {
-            if !self.visible {
-                self.window.set_alpha(1.0)?;
-            }
-            self.window.order_above(Some(relative_window))?;
-            self.relative_window = Some(relative_window);
-        }
         if style_changed || !self.visible {
             CATransaction::begin();
             CATransaction::setAnimationDuration(FADE_DURATION);
