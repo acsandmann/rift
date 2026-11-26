@@ -170,11 +170,29 @@ Enable it in System Settings > Desktop & Dock (Mission Control) and restart Rift
     rift_wm::sys::hotkey::refresh_virtual_keymap(mtm);
 
     let config_path = opt.config.clone().unwrap_or_else(|| config_file());
-    let mut config = if config_path.exists() {
-        Config::read(&config_path).unwrap()
-    } else {
-        Config::default()
+    let mut config = match Config::read(&config_path) {
+        Ok(config) => config,
+        Err(error)
+            if error
+                .downcast_ref::<std::io::Error>()
+                .is_some_and(|error| error.kind() == std::io::ErrorKind::NotFound)
+                && opt.config.is_none() =>
+        {
+            Config::default()
+        }
+        Err(error) => {
+            eprintln!("Could not read {}: {error}", config_path.display());
+            process::exit(1);
+        }
     };
+    let issues = config.validate();
+    if !issues.is_empty() {
+        eprintln!("Invalid configuration in {}:", config_path.display());
+        for issue in issues {
+            eprintln!("  {issue}");
+        }
+        process::exit(1);
+    }
     config.settings.animate &= !opt.no_animate;
     config.settings.default_disable |= opt.default_disable;
 

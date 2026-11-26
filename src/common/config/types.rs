@@ -1611,16 +1611,16 @@ impl Settings {
     pub fn validate(&self) -> Vec<String> {
         let mut issues = Vec::new();
 
-        if self.animation_duration < 0.0 {
+        if !valid_presentation_duration(self.animation_duration) {
             issues.push(format!(
-                "animation_duration must be non-negative, got {}",
+                "animation_duration must be finite, non-negative and representable, got {}",
                 self.animation_duration
             ));
         }
 
         if self.animation_fps != 0.0
             && (!self.animation_fps.is_finite()
-                || Duration::try_from_secs_f64(self.animation_fps.recip()).is_err())
+                || !valid_presentation_duration(self.animation_fps.recip()))
         {
             issues.push(format!(
                 "animation_fps must be zero or a finite rate with a representable interval, got {}",
@@ -1880,6 +1880,14 @@ fn default_master_stack_new_window_placement() -> MasterStackNewWindowPlacement 
 }
 
 fn default_animation_duration() -> f64 { 0.3 }
+
+fn valid_presentation_duration(seconds: f64) -> bool {
+    Duration::try_from_secs_f64(seconds)
+        .ok()
+        .and_then(|duration| duration.checked_mul(2))
+        .and_then(|duration| std::time::Instant::now().checked_add(duration))
+        .is_some()
+}
 
 fn default_animation_fps() -> f64 { 0.0 }
 
