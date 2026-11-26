@@ -8885,6 +8885,103 @@ fn floating_window_toggle_off_restore_previous_frame() {
 }
 
 #[test]
+fn directional_focus_exits_floating_fullscreen_only_when_enabled_and_focus_moves() {
+    for enabled in [false, true] {
+        for command in [
+            LayoutCommand::ToggleFullscreen,
+            LayoutCommand::ToggleFullscreenWithinGaps,
+        ] {
+            let (mut reactor, wid, space, screen, floating_frame) = reactor_with_floating_window();
+            if enabled {
+                let mut config = reactor.config.clone();
+                config.settings.layout.exit_fullscreen_on_move_focus = true;
+                reactor.handle_event(Event::ConfigUpdated(config));
+            }
+            reactor.handle_test_layout_command(command);
+            let fullscreen = laid_out_frame(&mut reactor, space, screen, wid).unwrap();
+            assert!(!fullscreen.same_as(floating_frame));
+
+            let before = reactor.layout_calculations.len();
+            reactor.handle_test_layout_command(LayoutCommand::MoveFocus(Direction::Right));
+            assert_eq!(reactor.layout_calculations.len(), before);
+            assert!(laid_out_frame(&mut reactor, space, screen, wid).unwrap().same_as(fullscreen));
+
+            let target = WindowId::new(1, 2);
+            let workspace = reactor
+                .layout_manager
+                .layout_engine
+                .workspaces()
+                .active_workspace(space)
+                .unwrap();
+            reactor.add_test_window(target, WindowServerId::new(122), Some(space), floating_frame);
+            assert!(reactor.assign_test_window_to_workspace(space, target, workspace));
+            reactor.handle_test_layout_event(LayoutEvent::WindowAdded(space, target));
+            reactor.handle_test_layout_event(LayoutEvent::WindowFocused(space, wid));
+            let before = reactor.layout_calculations.len();
+            reactor.handle_test_layout_command(LayoutCommand::MoveFocus(Direction::Right));
+
+            assert_eq!(
+                reactor.layout_manager.layout_engine.focused_window(),
+                Some(target)
+            );
+            let expected = if enabled { floating_frame } else { fullscreen };
+            assert!(laid_out_frame(&mut reactor, space, screen, wid).unwrap().same_as(expected));
+            assert_eq!(reactor.layout_calculations.len() - before, usize::from(enabled));
+        }
+    }
+}
+
+#[test]
+fn directional_focus_arranges_the_fullscreen_source_display() {
+    let (mut reactor, source, wid_server, left, right, frame, right_screen) =
+        reactor_with_window_on_space1_two_displays();
+    let left_screen = CGRect::new(CGPoint::ZERO, right_screen.size);
+    let mut config = reactor.config.clone();
+    config.settings.layout.exit_fullscreen_on_move_focus = true;
+    config.settings.layout.gaps.outer.left = 30.;
+    reactor.handle_event(Event::ConfigUpdated(config));
+    reactor.handle_test_layout_event(LayoutEvent::WindowAdded(left, source));
+    reactor.handle_test_layout_event(LayoutEvent::WindowFocused(left, source));
+    let normal = laid_out_frame(&mut reactor, left, left_screen, source).unwrap();
+    reactor.handle_test_layout_command(LayoutCommand::ToggleFullscreen);
+    assert!(
+        laid_out_frame(&mut reactor, left, left_screen, source)
+            .unwrap()
+            .same_as(left_screen)
+    );
+
+    let before = reactor.layout_calculations.len();
+    reactor.handle_test_layout_command(LayoutCommand::MoveFocus(Direction::Right));
+    assert_eq!(reactor.layout_calculations.len(), before);
+    assert!(
+        laid_out_frame(&mut reactor, left, left_screen, source)
+            .unwrap()
+            .same_as(left_screen)
+    );
+
+    let target = WindowId::new(1, 2);
+    let workspace = reactor.test_workspace(right, 0);
+    reactor.add_test_window(target, WindowServerId::new(122), Some(right), frame);
+    assert!(reactor.assign_test_window_to_workspace(right, target, workspace));
+    reactor.handle_test_layout_event(LayoutEvent::WindowAdded(right, target));
+    let before = reactor.layout_calculations.len();
+    reactor.handle_test_layout_command(LayoutCommand::MoveFocus(Direction::Right));
+
+    assert_eq!(
+        reactor.layout_manager.layout_engine.focused_window(),
+        Some(target)
+    );
+    assert_eq!(&reactor.layout_calculations[before..], &[left]);
+    assert!(
+        reactor
+            .transaction_manager
+            .get_target_frame(wid_server)
+            .unwrap()
+            .same_as(normal)
+    );
+}
+
+#[test]
 fn floating_window_toggles_to_fullscreen_within_gaps() {
     let (mut reactor, wid, space1, screen, _floating_frame) = reactor_with_floating_window();
     // Assymetric gaps to prevent swapped left/right or swapped width/height bugs from passing

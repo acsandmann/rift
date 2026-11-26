@@ -93,6 +93,9 @@ mode = "traditional"
 # This can be overridden per-layout in each layouts respective section.
 window_insertion_point = "next_to_selection"
 
+# Exit fullscreen when directional focus moves to another window.
+exit_fullscreen_on_move_focus = false
+
 # these settings only apply when layout mode == "traditional"
 [settings.layout.traditional]
 # Use Sway-style node normalization when adding windows. This gives a new node the

@@ -196,6 +196,7 @@ pub enum LayoutEdit {
     Fullscreen {
         within_gaps: bool,
     },
+    ExitFullscreen(WindowId),
     Swap(WindowId, WindowId),
     ReorderTab {
         window: WindowId,
@@ -259,6 +260,10 @@ fn toggle_fullscreen_mode(full: &mut bool, gaps: &mut bool, within_gaps: bool) -
         *other = false;
     }
     *target
+}
+
+fn exit_fullscreen_mode(full: &mut bool, gaps: &mut bool) -> bool {
+    core::mem::take(full) | core::mem::take(gaps)
 }
 
 /// Return whether a native resize entered or left a fullscreen frame.

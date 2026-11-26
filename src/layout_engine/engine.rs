@@ -1082,35 +1082,53 @@ impl LayoutEngine {
     fn move_focus_internal(
         &mut self,
         window_store: &mut WindowStore,
-        space: SpaceId,
+        current: (SpaceId, VirtualWorkspaceId, LayoutId),
         visible_spaces: &[SpaceId],
         visible_space_frames: &HashMap<SpaceId, CGRect>,
         direction: Direction,
         is_floating: bool,
     ) -> EventResponse {
-        let Some((ws_id, layout)) = self.workspaces.active_layout_for_space(space) else {
-            warn!(
-                "No active workspace/layout for space {:?}; move_focus ignored",
-                space
-            );
-            return EventResponse::default();
+        let (space, ws_id, layout) = current;
+        let previous = if is_floating {
+            self.focused_window
+        } else {
+            self.workspaces[ws_id].layout_system.selected_window(layout)
         };
 
         let commit = |engine: &mut Self,
                       window_store: &mut WindowStore,
-                      (space, ws, layout),
+                      (destination, ws, target_layout),
                       window,
                       raise_windows| {
-            let response = EventResponse {
+            let mut response = EventResponse {
                 changed: true,
                 focus_window: Some(window),
                 raise_windows,
                 ..Default::default()
             };
-            engine.apply_focus_response(window_store, space, ws, layout, &response);
+            if engine.layout_settings.exit_fullscreen_on_move_focus
+                && let Some(previous) = previous.filter(|&previous| previous != window)
+            {
+                if is_floating {
+                    if engine.floating.fullscreen_kind(previous).is_some()
+                        && !window_store.is_window_native_fullscreen_suspended(previous)
+                    {
+                        engine.floating.set_fullscreen(previous, None);
+                        response.layout_space = Some(space);
+                    }
+                } else if engine.workspaces[ws_id]
+                    .layout_system
+                    .edit(layout, LayoutEdit::ExitFullscreen(previous))
+                    .changed()
+                {
+                    // A saved layout could otherwise restore the fullscreen flags.
+                    engine.native_layouts.remove(&ws_id);
+                    response.layout_space = Some(space);
+                }
+            }
+            engine.apply_focus_response(window_store, destination, ws, target_layout, &response);
             response
         };
-        let current = (space, ws_id, layout);
         let visible =
             |engine: &Self,
              windows: &WindowStore,
@@ -1126,7 +1144,7 @@ impl LayoutEngine {
             let windows = self.active_floating_windows_in_workspace(window_store, space);
             if matches!(direction, Direction::Left | Direction::Right)
                 && windows.len() > 1
-                && let Some(index) = windows.iter().position(|&w| Some(w) == self.focused_window)
+                && let Some(index) = windows.iter().position(|&w| Some(w) == previous)
             {
                 let step = if direction == Direction::Left {
                     windows.len() - 1
@@ -1149,7 +1167,6 @@ impl LayoutEngine {
         }
 
         let system = &mut self.workspaces[ws_id].layout_system;
-        let previous = system.selected_window(layout);
         let focus = system.focus(layout, Focus::Direction(direction));
         if let Some(window) = self.filter_active_workspace_window(window_store, space, focus.window)
         {
@@ -2615,7 +2632,7 @@ impl LayoutEngine {
                 );
                 return self.move_focus_internal(
                     window_store,
-                    space,
+                    (space, workspace_id, layout),
                     visible_spaces,
                     visible_space_frames,
                     direction,

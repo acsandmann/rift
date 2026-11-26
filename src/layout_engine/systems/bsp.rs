@@ -1614,6 +1614,17 @@ impl LayoutSystem for BspLayoutSystem {
             LayoutEdit::Fullscreen { within_gaps } => {
                 EditResult::Raise(self.toggle_fullscreen(layout, within_gaps))
             }
+            LayoutEdit::ExitFullscreen(window) => {
+                let leaf = self.node_for_window_in_layout(layout, window);
+                match leaf.map(|leaf| self.kind_mut(leaf)) {
+                    Some(NodeKind::Leaf {
+                        fullscreen: full,
+                        fullscreen_within_gaps: gaps,
+                        ..
+                    }) => EditResult::from(super::exit_fullscreen_mode(full, gaps)),
+                    _ => EditResult::Unchanged,
+                }
+            }
             LayoutEdit::Swap(a, b) => EditResult::from(self.swap_windows(layout, a, b)),
             LayoutEdit::Drop { source, target, action } => {
                 EditResult::from(self.apply_target_drop(layout, source, target, action))

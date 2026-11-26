@@ -1248,6 +1248,10 @@ pub struct LayoutSettings {
     #[serde(default)]
     #[setting(label = "Default layout", choices)]
     pub mode: LayoutMode,
+    /// Exit fullscreen on the selected window when moving focus directionally.
+    #[serde(default)]
+    #[setting(ignore)]
+    pub exit_fullscreen_on_move_focus: bool,
     /// Traditional layout configuration
     #[serde(default)]
     #[setting(ignore)]

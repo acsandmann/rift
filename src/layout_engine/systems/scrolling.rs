@@ -2123,6 +2123,23 @@ impl LayoutSystem for ScrollingLayoutSystem {
             LayoutEdit::Fullscreen { within_gaps } => {
                 EditResult::Raise(self.toggle_fullscreen(layout, within_gaps))
             }
+            LayoutEdit::ExitFullscreen(window) => {
+                let Some(state) = self.layouts.get_mut(layout) else {
+                    return EditResult::Unchanged;
+                };
+                if state.arrangement.fullscreen.remove(&window).is_none() {
+                    return EditResult::Unchanged;
+                }
+                let active = state.arrangement.active_column;
+                if state.camera.fullscreen_restore.is_some()
+                    && state.restore_fullscreen_view()
+                    && state.arrangement.active_column != active
+                {
+                    state.arrangement.active_column = active;
+                    state.reveal(&self.settings);
+                }
+                EditResult::Changed
+            }
             LayoutEdit::Swap(a, b) => EditResult::from(self.swap_windows(layout, a, b)),
             LayoutEdit::Drop { source, target, action } => {
                 EditResult::from(self.apply_target_drop(layout, source, target, action))
@@ -2597,6 +2614,59 @@ pub(crate) mod tests {
                     .changed()
             );
         }
+    }
+
+    #[test]
+    fn exit_fullscreen_keeps_the_directional_destination_in_view() {
+        for style in [
+            ScrollingFocusNavigationStyle::Niri,
+            ScrollingFocusNavigationStyle::Anchored,
+        ] {
+            let mut f = Fixture::new(3);
+            f.system.settings.focus_navigation_style = style;
+            f.system.toggle_fullscreen(f.layout, false);
+            f.select(2);
+            f.system.finish_viewport(f.layout);
+            f.system.toggle_fullscreen(f.layout, false);
+            f.system.finish_viewport(f.layout);
+            assert_eq!(
+                f.system.focus(f.layout, Focus::Direction(Direction::Right)).window,
+                Some(wid(3))
+            );
+            f.system.finish_viewport(f.layout);
+            let destination = f.frame(3);
+            assert!(
+                destination.min().x >= f.screen.min().x && destination.max().x <= f.screen.max().x
+            );
+
+            assert!(f.system.edit(f.layout, LayoutEdit::ExitFullscreen(wid(2))).changed());
+            f.system.finish_viewport(f.layout);
+            assert_eq!(f.selected(), Some(wid(3)));
+            assert_eq!(f.frame(3), destination);
+            assert_ne!(f.frame(2), f.screen);
+            assert_eq!(f.frame(1), f.screen);
+        }
+    }
+
+    #[test]
+    fn exit_fullscreen_restores_the_view_when_focus_moves_within_the_column() {
+        let mut f = Fixture::new(3);
+        f.drop(3, 2, WindowDropAction::Insert(Direction::Down));
+        f.select(2);
+        f.system.finish_viewport(f.layout);
+        let normal = f.frame(3);
+        f.system.toggle_fullscreen(f.layout, false);
+        f.system.finish_viewport(f.layout);
+        assert_ne!(f.frame(3), normal);
+
+        assert_eq!(
+            f.system.focus(f.layout, Focus::Direction(Direction::Down)).window,
+            Some(wid(3))
+        );
+        assert!(f.system.edit(f.layout, LayoutEdit::ExitFullscreen(wid(2))).changed());
+        f.system.finish_viewport(f.layout);
+        assert_eq!(f.selected(), Some(wid(3)));
+        assert_eq!(f.frame(3), normal);
     }
 
     #[test]

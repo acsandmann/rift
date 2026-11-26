@@ -571,6 +571,17 @@ impl LayoutSystem for StackLayoutSystem {
             LayoutEdit::Fullscreen { within_gaps } => {
                 EditResult::Raise(self.toggle_fullscreen(layout, within_gaps))
             }
+            LayoutEdit::ExitFullscreen(window) => {
+                let stack = &mut self.layouts[layout];
+                let Some(member) = stack.members.iter_mut().find(|m| m.window == window) else {
+                    return EditResult::Unchanged;
+                };
+                let member_exited =
+                    super::exit_fullscreen_mode(&mut member.fullscreen, &mut member.within_gaps);
+                let root_exited =
+                    super::exit_fullscreen_mode(&mut stack.fullscreen, &mut stack.within_gaps);
+                EditResult::from(member_exited || root_exited)
+            }
             LayoutEdit::Swap(a, b) => EditResult::from(self.swap_windows(layout, a, b)),
             LayoutEdit::ReorderTab { window, target } => {
                 EditResult::from(self.move_stack_tab(layout, window, target))
