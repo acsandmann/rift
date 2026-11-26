@@ -49,8 +49,7 @@ pub(super) fn menu_bar(ui: Ui, model: &Rc<Model>) -> Page {
     f.sync_when(
         &indicator,
         |s| s.settings.ui.menu_bar.clone(),
-        move |view, s| {
-            let settings = &s.settings.ui.menu_bar;
+        move |view, settings| {
             view.update(settings);
             width.setConstant(if settings.enabled { view.width() } else { 0.0 });
             disabled_copy.set_hidden(settings.enabled);
@@ -64,12 +63,11 @@ pub(super) fn menu_bar(ui: Ui, model: &Rc<Model>) -> Page {
     let preview_caption = Rc::new(Caption::new(&ui, ""));
     f.sync_when(
         &preview_caption,
-        |s| s.settings.ui.menu_bar.clone(),
-        |caption, s| {
-            let settings = &s.settings.ui.menu_bar;
-            caption.set_text(if !settings.enabled {
+        |s| (s.settings.ui.menu_bar.enabled, s.settings.ui.menu_bar.current_display_only),
+        |caption, (enabled, current_display_only)| {
+            caption.set_text(if !enabled {
                 "Turn on the indicator to see workspace information in your menu bar."
-            } else if settings.current_display_only {
+            } else if *current_display_only {
                 "Live preview · current display · Development is active"
             } else {
                 "Live preview · two displays separated by a divider"
@@ -109,8 +107,8 @@ pub(super) fn menu_bar(ui: Ui, model: &Rc<Model>) -> Page {
     f.sync_when(
         &empty_hint,
         |s| s.settings.ui.menu_bar.mode,
-        |hint, s| {
-            hint.set_text(if s.settings.ui.menu_bar.mode == MenuBarDisplayMode::All {
+        |hint, mode| {
+            hint.set_text(if *mode == MenuBarDisplayMode::All {
                 "The active workspace is always included."
             } else {
                 "Choose All workspaces to include empty workspaces."
@@ -173,18 +171,20 @@ pub(super) fn menu_bar(ui: Ui, model: &Rc<Model>) -> Page {
     }
     f.sync_when(
         &style,
-        |s| s.settings.ui.menu_bar.clone(),
-        |style, s| {
+        |s| {
             let settings = &s.settings.ui.menu_bar;
-            let index = if settings.display_style == WorkspaceDisplayStyle::Layout {
+            (settings.display_style, settings.active_label, settings.enabled)
+        },
+        |style, (display_style, active_label, enabled)| {
+            let index = if *display_style == WorkspaceDisplayStyle::Layout {
                 0
-            } else if settings.active_label == ActiveWorkspaceLabel::Index {
+            } else if *active_label == ActiveWorkspaceLabel::Index {
                 1
             } else {
                 2
             };
             style.set_selected(index);
-            style.ns_segmented_control().setEnabled(settings.enabled);
+            style.ns_segmented_control().setEnabled(*enabled);
         },
     );
     let style = f
@@ -214,9 +214,7 @@ pub(super) fn menu_bar(ui: Ui, model: &Rc<Model>) -> Page {
     f.sync_when(
         &path,
         |s| s.settings.ui.menu_bar.layout_folder.clone(),
-        |path, s| {
-            path.set_value(&s.settings.ui.menu_bar.layout_folder);
-        },
+        |path, value| path.set_value(value),
     );
     let row = f.row("Layout folder", path, message);
     let row = f
@@ -484,14 +482,14 @@ pub(super) fn stack_tabs(ui: Ui, model: &Rc<Model>) -> Page {
     f.sync_when(
         &preview,
         |s| s.settings.ui.stack_line.clone(),
-        |view, s| view.update(&s.settings.ui.stack_line),
+        |view, settings| view.update(settings),
     );
     let caption = Rc::new(Caption::new(&ui, ""));
     f.sync_when(
         &caption,
         |s| s.settings.ui.stack_line.enabled,
-        |caption, s| {
-            caption.set_text(if s.settings.ui.stack_line.enabled {
+        |caption, enabled| {
+            caption.set_text(if *enabled {
                 "Example macOS apps. Select or close a tab."
             } else {
                 "Tabs are hidden. Example windows remain stacked."

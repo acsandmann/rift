@@ -876,6 +876,7 @@ impl Shortcuts {
             .contains('+')
             .then(|| self.model.upgrade().and_then(|model| model.source.borrow().hotkey(&query)))
             .flatten();
+        let terms: Vec<_> = query.split_whitespace().collect();
         let rows = self.rows.borrow();
         let mut any = false;
         let mut items = Vec::new();
@@ -889,7 +890,7 @@ impl Shortcuts {
                         Some(hotkey) => {
                             row.hotkey.as_ref().is_some_and(|other| other.overlaps(hotkey))
                         }
-                        None => query.split_whitespace().all(|word| row.text.contains(word)),
+                        None => terms.iter().all(|word| row.text.contains(word)),
                     };
                 if visible {
                     if empty {

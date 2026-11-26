@@ -1,5 +1,4 @@
-use cgs::app::Application;
-use cgs::collection::{EditableList, SettingsList};
+use cgs::collection::SettingsList;
 use cgs::controls::{
     AddRemoveControl, Button, Checkbox, IconButton, NumberField, Popup, SheetActions,
 };
@@ -12,7 +11,7 @@ use cgs::menu::{Menu, MenuItem};
 use cgs::settings::{Section, SettingsPage, SettingsRow, Validation, ValidationMessage};
 use cgs::text::{Caption, Label, SectionTitle};
 use cgs::view::{Metrics, NativeControl, NativeView, PageHost, WeakView};
-use cgs::window::{Popover, Sheet};
+use cgs::window::Popover;
 use cgs::{CGPoint, Insets, Ui};
 use objc2_app_kit::NSAccessibility;
 
@@ -152,28 +151,9 @@ fn record_editor_with_delete(
     } else {
         cancel
     };
-    let body: Rc<dyn NativeView> = if scrolling {
-        let scroll = ScrollView::new(&ui, page.view.clone());
-        scroll.fit_width();
-        scroll.height(430.0);
-        Rc::new(scroll)
-    } else {
-        page.view.clone()
-    };
-    let content = VStack::new(&ui)
-        .insets(Insets {
-            top: 24.0,
-            left: 24.0,
-            bottom: 20.0,
-            right: 24.0,
-        })
-        .spacing(16.0)
-        .push(SectionTitle::new(&ui, title))
-        .push(body)
-        .push(message)
-        .push(footer);
-    let sheet = Sheet::new(&ui, title, content);
-    sheet.fit_content();
+    let sheet = cgs::settings::editor_sheet(
+        &ui, title, page.view.clone(), scrolling.then_some(430.0), message, footer,
+    );
     model.sheet.borrow_mut().take();
     *model.sheet_model.borrow_mut() = Some(draft);
     sheet.show(&parent);
@@ -870,7 +850,7 @@ pub(super) fn rules(ui: Ui, model: &Rc<Model>) -> Page {
         .full_length()
         .empty_message("No matching rules")
         .symbol("app")
-        .images(application_icons(|rule: &AppWorkspaceRule| rule.app_id.clone()))
+        .images(application_icons(model, |rule: &AppWorkspaceRule| rule.app_id.as_deref()))
         .on_open(move |index| action(index))
         .reorderable(true)
         .on_reorder({
@@ -963,6 +943,9 @@ pub(super) fn rules(ui: Ui, model: &Rc<Model>) -> Page {
     let weak_model = Rc::downgrade(model);
     let indices = visible.clone();
     let search_query = query.clone();
+    let search_index = Rc::new(RefCell::new(std::cell::OnceCell::new()));
+    let cached_index = search_index.clone();
+    let indexed_revision = Cell::new(None);
     let selected_filter = filter.clone();
     let refresh: Rc<dyn Fn()> = Rc::new(move || {
         let (Some(model), Some(table)) = (weak_model.upgrade(), weak_table.upgrade()) else {
@@ -970,12 +953,35 @@ pub(super) fn rules(ui: Ui, model: &Rc<Model>) -> Page {
         };
         let source = model.source.borrow();
         let query = search_query.borrow();
+        let revision = model.source_revision.get();
+        if indexed_revision.replace(Some(revision)) != Some(revision) {
+            cached_index.borrow_mut().take();
+        }
+        let cached_index = cached_index.borrow();
+        let metadata = (!query.is_empty()).then(|| {
+            cached_index.get_or_init(|| {
+                source
+                    .virtual_workspaces
+                    .app_rules
+                    .iter()
+                    .map(|rule| {
+                        format!(
+                            "{} {} {} {rule:?}",
+                            rule_name(&model, rule),
+                            rule_summary(rule),
+                            rule_behavior(rule)
+                        )
+                        .to_lowercase()
+                    })
+                    .collect::<Vec<_>>()
+            })
+        });
         let matches: Vec<_> = source
             .virtual_workspaces
             .app_rules
             .iter()
             .enumerate()
-            .filter(|(_, rule)| {
+            .filter(|(row, rule)| {
                 let kind = match selected_filter.get() {
                     0 => true,
                     index => match &rule.workspace {
@@ -986,26 +992,21 @@ pub(super) fn rules(ui: Ui, model: &Rc<Model>) -> Page {
                         None => false,
                     },
                 };
-                kind && (query.is_empty()
-                    || format!(
-                        "{} {} {} {rule:?}",
-                        rule_name(&model, rule),
-                        rule_summary(rule),
-                        rule_behavior(rule)
-                    )
-                    .to_lowercase()
-                    .contains(query.as_str()))
+                kind && metadata.is_none_or(|metadata| metadata[*row].contains(query.as_str()))
             })
             .collect();
+        drop(cached_index);
         *indices.borrow_mut() = matches.iter().map(|(index, _)| *index).collect();
         table.set_rows_if_changed(matches.into_iter().map(|(_, rule)| rule.clone()).collect());
     });
     let names = Rc::downgrade(&table);
     let inventory_refresh = Rc::downgrade(&refresh);
+    let inventory_index = search_index;
     model.env.application_views.borrow_mut().push(Box::new(move || {
         let (Some(table), Some(refresh)) = (names.upgrade(), inventory_refresh.upgrade()) else {
             return false;
         };
+        inventory_index.borrow_mut().take();
         refresh();
         table.reload();
         true
@@ -1100,7 +1101,7 @@ fn application_picker(
         .empty_message("No matching applications")
         .fit_content(height)
         .symbol("app")
-        .images(application_icons(|app: &Rc<Choice>| app.target.0.clone()))
+        .images(application_icons(model, |app: &Rc<Choice>| app.target.0.as_deref()))
         .on_select_item(move |app| {
             if !selecting.get() {
                 choose(app.map(|app| app.target.clone()));
@@ -1146,8 +1147,12 @@ fn application_picker(
     VStack::new(&ui).push(search).push(list)
 }
 
-fn application_icons<T>(bundle_id: impl Fn(&T) -> Option<String>) -> impl Fn(&T) -> Option<Image> {
-    move |item| Application::icon_for_bundle(&bundle_id(item)?)
+fn application_icons<T, F: Fn(&T) -> Option<&str> + 'static>(
+    model: &Rc<Model>,
+    bundle_id: F,
+) -> impl Fn(&T) -> Option<Image> + 'static {
+    let env = Rc::downgrade(&model.env);
+    move |item| env.upgrade()?.application_icons.get(bundle_id(item)?)
 }
 
 fn app_picker(
@@ -1292,7 +1297,7 @@ fn window_tag_picker(f: &mut FormBuilder, model: &Rc<Model>, i: usize) -> Settin
         let checkbox = Rc::new(Checkbox::new(&ui, &label).on_change(change));
         checkbox.ns_button().setFont(Some(&cgs::style::Font::caption()));
         checkbox.tooltip(&format!("{name} · bit {}", mask.trailing_zeros()));
-        f.sync_when(&checkbox, get, move |input, source| input.set_value(get(source)));
+        f.sync_when(&checkbox, get, |input, value| input.set_value(*value));
         let bit = Caption::single_line(&ui, &format!("Bit {}", mask.trailing_zeros()));
         bit.width(40.0);
         let row = Rc::new(
@@ -1517,14 +1522,7 @@ fn rule_detail(ui: Ui, model: &Rc<Model>, i: usize) -> Page {
                 .get(i)
                 .is_some_and(|rule| rule.app_id.is_some() || rule.app_name.is_some())
         },
-        move |button, source| {
-            let constrained = source
-                .virtual_workspaces
-                .app_rules
-                .get(i)
-                .is_some_and(|rule| rule.app_id.is_some() || rule.app_name.is_some());
-            button.set_hidden(!constrained);
-        },
+        |button, constrained| button.set_hidden(!constrained),
     );
     matches = matches
         .row(SettingsRow::new(
@@ -1706,67 +1704,37 @@ fn rule_detail(ui: Ui, model: &Rc<Model>, i: usize) -> Page {
 pub(super) fn strings(
     f: &mut FormBuilder,
     title: &str,
-    get: impl Fn(&ConfigSource) -> Vec<String> + Copy + 'static,
+    get: impl Fn(&ConfigSource) -> Vec<String> + Copy + Send + 'static,
     set: impl Fn(&mut ConfigSource, Vec<String>) + Copy + Send + 'static,
 ) -> Section {
-    // Native list and a text field. No embedded TOML or serialization in the UI.
+    use cgs::settings::{StringListEdit, editable_strings};
+
     let ui = f.ui;
     let message = Rc::new(ValidationMessage::new(&ui));
     let error = Rc::downgrade(&message);
-    let weak = f.model.clone();
-    let field = Rc::new(TextField::new(&ui).placeholder("Add an entry"));
-    let input = Rc::downgrade(&field);
-    let add = Button::new(&ui, "Add").on_click(move || {
-        if let (Some(model), Some(input)) = (weak.upgrade(), input.upgrade()) {
-            let value = input.get_value();
-            if value.trim().is_empty() {
-                return;
-            }
-            let mut values = get(&model.source.borrow());
-            values.push(value);
-            Model::submit(
-                &weak,
-                Box::new(move |s| {
-                    set(s, values);
-                    Ok(())
-                }),
-                error.clone(),
-            );
-            input.set_value("");
-        }
-    });
-    let weak = f.model.clone();
-    let error = Rc::downgrade(&message);
-    let list = Rc::new(
-        EditableList::new(&ui, |s: &String| s.clone())
-            .full_length()
-            .on_remove(move |i| {
-                if let Some(model) = weak.upgrade() {
-                    let mut values = get(&model.source.borrow());
-                    if i < values.len() {
-                        values.remove(i);
+    let model = f.model.clone();
+    let (input, list) = editable_strings(&ui, move |edit| {
+        Model::submit(
+            &model,
+            Box::new(move |source| {
+                let mut values = get(source);
+                match edit {
+                    StringListEdit::Add(value) => values.push(value),
+                    StringListEdit::Remove(index, expected) => {
+                        if values.get(index) != Some(&expected) {
+                            return Err("The list changed elsewhere. Select the entry again.".into());
+                        }
+                        values.remove(index);
                     }
-                    Model::submit(
-                        &weak,
-                        Box::new(move |s| {
-                            set(s, values);
-                            Ok(())
-                        }),
-                        error.clone(),
-                    );
                 }
+                set(source, values);
+                Ok(())
             }),
-    );
-    let weak_list = Rc::downgrade(&list);
-    f.sync.push(Box::new(move |s| {
-        if let Some(list) = weak_list.upgrade() {
-            list.set_items(get(s));
-        }
-    }));
-    Section::new(&ui, title)
-        .content(HStack::new(&ui).push(field).push(add))
-        .content(list)
-        .footer(message)
+            error.clone(),
+        );
+    });
+    f.sync_when(&list, get, |list, values| list.set_items(values.clone()));
+    Section::new(&ui, title).content(input).content(list).footer(message)
 }
 
 /// A connected display’s name.
@@ -1982,12 +1950,13 @@ pub(super) fn display_inspector(ui: Ui, model: &Rc<Model>) -> Page {
         .push(state.adding.clone())
         .push(objc2::Message::retain(state.status.ns_view()));
     let row = SettingsRow::new(&ui, "Display", control).label_baseline(state.popup.ns_view());
+    let alignment = cgs::settings::FormAlignment::new(180.0);
     let page = VStack::new(&ui)
         .spacing(10.0)
-        .push(Section::form(&ui, "").row(row))
+        .push(Section::form(&ui, "").aligned(&alignment).row(row))
         .push(state.host.clone())
         .keep(state);
-    super::pages::align_form(page.ns_view());
+    alignment.apply();
     f.finish(page)
 }
 
@@ -1997,7 +1966,8 @@ pub(super) fn display_inspector(ui: Ui, model: &Rc<Model>) -> Page {
 fn display_options(ui: Ui, model: &Rc<Model>, uuid: String) -> Page {
     use super::pages::{AXES, EDGES, set_spacing_gap, spacing_gap};
     let mut f = FormBuilder::new(ui, model);
-    let mut section = Section::form(&ui, "");
+    let alignment = cgs::settings::FormAlignment::new(180.0);
+    let mut section = Section::form(&ui, "").aligned(&alignment);
     for outer in [true, false] {
         let names: &[&str] = if outer { &EDGES } else { &AXES };
         let message = Rc::new(ValidationMessage::new(&ui));
@@ -2145,7 +2115,7 @@ fn display_options(ui: Ui, model: &Rc<Model>, uuid: String) -> Page {
             &ui,
             "Empty fields inherit. Enter a value to customize it for this display.",
         ));
-    super::pages::align_form(page.ns_view());
+    alignment.apply();
     f.finish(page)
 }
 
@@ -2200,13 +2170,11 @@ fn override_group(
     let first = objc2::Message::retain(fields[0].1.ns_text_field());
     let weak_reset = Rc::downgrade(&reset);
     let source = source.to_owned();
-    let current = overridden.clone();
     f.sync_when(
         &status,
-        move |s| current(s),
-        move |status, s| {
-            let custom = overridden(s);
-            status.set_text(&if custom {
+        overridden,
+        move |status, custom| {
+            status.set_text(&if *custom {
                 "Custom for this display".to_owned()
             } else {
                 format!("From {source}")
@@ -2216,29 +2184,8 @@ fn override_group(
             }
         },
     );
-    let control = field_group(&ui, unit, fields).push(reset);
+    let control = cgs::controls::number_field_group(&ui, unit, fields).push(reset);
     f.row(title, control, message).description_view(status).label_baseline(&first)
-}
-
-/// Compact fields in a row, each captioned beneath, as in an inspector.
-pub(super) fn field_group(ui: &Ui, unit: &str, fields: Vec<(&str, Rc<NumberField>)>) -> HStack {
-    fields.into_iter().fold(
-        HStack::new(ui)
-            .spacing(8.0)
-            .alignment(objc2_app_kit::NSLayoutAttribute::FirstBaseline),
-        |row, (name, field)| {
-            let value = field.unit_field(ui, unit);
-            field.width(cgs::view::Metrics::VALUE_FIELD_WIDTH);
-            row.push(
-                VStack::new(ui)
-                    .spacing(3.0)
-                    .alignment(objc2_app_kit::NSLayoutAttribute::CenterX)
-                    .push(value)
-                    .push(Caption::single_line(ui, name))
-                    .keep(field),
-            )
-        },
-    )
 }
 
 /// A numeric field showing `get`’s inherited value (second) as a placeholder unless it’s
@@ -2261,11 +2208,10 @@ fn inherited_field(
     // Assistive apps read an empty field’s placeholder: the inherited value.
     input.accessibility_label(name);
     input.tooltip(&format!("In {unit}. Leave empty to inherit."));
-    let current = get.clone();
     f.sync_when(
         &input,
-        move |s| current(s),
-        move |input, s| match get(s) {
+        move |s| get(s),
+        move |input, values| match *values {
             (Some(value), _) => input.set_value(value * scale),
             // At most two decimals, without float noise.
             (None, inherited) => {

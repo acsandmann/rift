@@ -1,7 +1,7 @@
 //! Native controls generated from config metadata, using the same ConfigActor
 //! submission and sheet draft ownership as handcrafted Settings controls.
-use cgs::app::Application;
 use cgs::controls::{NumberField, NumberSlider, Popup, Slider, Switch};
+use objc2_app_kit::NSUserInterfaceItemIdentification;
 use cgs::input::TextField;
 use cgs::settings::{Section, SettingsRow, ValidationMessage};
 use cgs::tabs::TabSelector;
@@ -101,6 +101,7 @@ impl FormBuilder {
             error,
         );
         let draft = self.draft;
+        let mut stretch_slider = None;
         let control: Box<dyn NativeView> = match field.kind {
             FieldKind::Bool => {
                 let input = Rc::new(
@@ -109,9 +110,9 @@ impl FormBuilder {
                 self.sync_when(
                     &input,
                     move |source| read(get(source)),
-                    move |input, source| {
-                        if let FieldValue::Bool(value) = read(get(source)) {
-                            input.set_value(value);
+                    |input, value| {
+                        if let FieldValue::Bool(value) = value {
+                            input.set_value(*value);
                         }
                     },
                 );
@@ -132,8 +133,6 @@ impl FormBuilder {
                     .upgrade()
                     .and_then(|model| slider_options(field.key, &model.source.borrow()));
                 if let Some((min, max, notches)) = options {
-                    let weak_input = Rc::downgrade(&input);
-                    let app = Application::shared(&self.ui);
                     let model = self.model.clone();
                     let slider = Slider::new(&self.ui).range(min, max).continuous(true);
                     let slider = match slider_step(field.key) {
@@ -147,7 +146,7 @@ impl FormBuilder {
                     } else {
                         slider
                     };
-                    let slider = Rc::new(slider.on_change(move |value| {
+                    let slider = Rc::new(NumberSlider::track(&self.ui, slider, &input, move |value, _| {
                         // Give immediate visual feedback, but save once on release.
                         // Exact text entry remains independent of these convenient ranges.
                         let (min, max, _) = model
@@ -155,7 +154,7 @@ impl FormBuilder {
                             .and_then(|model| slider_options(field.key, &model.source.borrow()))
                             .unwrap_or((min, max, None));
                         let precision = if max <= 1.0 { 100.0 } else { 10.0 };
-                        let value = if value <= min || value >= max {
+                        Some(if value <= min || value >= max {
                             // Keep exact endpoints even when the bound has finer precision.
                             value
                         } else if integer {
@@ -163,41 +162,37 @@ impl FormBuilder {
                         } else {
                             (value * precision).round() / precision
                         }
-                        .clamp(min, max);
-                        if let Some(input) = weak_input.upgrade() {
-                            input.set_value(value);
-                        }
-                        if !app.is_mouse_dragging() {
-                            change(value);
-                        }
-                    }));
+                        .clamp(min, max))
+                    }, change));
                     slider.accessibility_label(field.title);
                     input.accessibility_label(field.title);
                     let weak_slider = Rc::downgrade(&slider);
                     self.sync_when(
                         &input,
                         move |source| (read(get(source)), slider_options(field.key, source)),
-                        move |input, source| {
-                            if let FieldValue::Number(value) = read(get(source)) {
-                                input.set_value(value * scale);
+                        move |input, (value, options)| {
+                            if let FieldValue::Number(value) = value {
+                                let value = *value * scale;
+                                input.set_value(value);
                                 if let Some(slider) = weak_slider.upgrade() {
-                                    if let Some((min, max, _)) = slider_options(field.key, source) {
+                                    if let Some((min, max, _)) = *options {
                                         slider.set_range(min, max);
                                     }
-                                    slider.set_value(value * scale);
+                                    slider.set_value(value);
                                 }
                             }
                         },
                     );
+                    stretch_slider = Some(slider.clone());
                     Box::new(NumberSlider::new(&self.ui, slider, input))
                 } else {
                     input.accessibility_label(field.title);
                     self.sync_when(
                         &input,
                         move |source| read(get(source)),
-                        move |input, source| {
-                            if let FieldValue::Number(value) = read(get(source)) {
-                                input.set_value(value * scale);
+                        move |input, value| {
+                            if let FieldValue::Number(value) = value {
+                                input.set_value(*value * scale);
                             }
                         },
                     );
@@ -215,9 +210,9 @@ impl FormBuilder {
                 self.sync_when(
                     &input,
                     move |source| read(get(source)),
-                    move |input, source| {
-                        if let FieldValue::Text(value) = read(get(source)) {
-                            input.set_value(&value);
+                    |input, value| {
+                        if let FieldValue::Text(value) = value {
+                            input.set_value(value);
                         }
                     },
                 );
@@ -237,9 +232,9 @@ impl FormBuilder {
                     self.sync_when(
                         &input,
                         move |source| read(get(source)),
-                        move |input, source| {
-                            if let FieldValue::Choice(value) = read(get(source)) {
-                                input.set_selected(value);
+                        move |input, value| {
+                            if let FieldValue::Choice(value) = value {
+                                input.set_selected(*value);
                             }
                         },
                     );
@@ -256,9 +251,9 @@ impl FormBuilder {
                     self.sync_when(
                         &input,
                         move |source| read(get(source)),
-                        move |input, source| {
-                            if let FieldValue::Choice(value) = read(get(source)) {
-                                input.set_selected(value);
+                        move |input, value| {
+                            if let FieldValue::Choice(value) = value {
+                                input.set_selected(*value);
                             }
                         },
                     );
@@ -268,6 +263,9 @@ impl FormBuilder {
             FieldKind::Custom => return None,
         };
         let mut row = self.row(field.title, control, message);
+        if let Some(slider) = stretch_slider {
+            row = row.stretch_slider(slider.ns_slider());
+        }
         if !field.unit.is_empty() {
             row = row.suffix(field.unit);
         }
@@ -305,11 +303,18 @@ impl FormBuilder {
         } else {
             row.help(field.help)
         };
+        row.control_view().setIdentifier(Some(&objc2_foundation::NSString::from_str(
+            &setting_identifier::<T>(field.key),
+        )));
         if let Some(enabled) = field.enabled {
             self.enabled(&row, move |source| enabled(get(source)));
         }
         row
     }
+}
+
+pub(super) fn setting_identifier<T>(key: &str) -> String {
+    format!("rift.setting.{}.{}", std::any::type_name::<T>(), key)
 }
 
 /// Useful interaction ranges in display units, rather than config limits.

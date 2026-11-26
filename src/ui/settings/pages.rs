@@ -460,8 +460,9 @@ pub(super) fn layout_spacing(ui: Ui, model: &Rc<Model>) -> Page {
     let mut f = FormBuilder::new(ui, model);
     // Built first, so the sliders preview their drags in it.
     let preview = gap_preview(ui, &mut f, None, PREVIEW);
-    let mut simple = Section::form(&ui, "");
-    let mut detailed = Section::form(&ui, "");
+    let alignment = cgs::settings::FormAlignment::new(180.0);
+    let mut simple = Section::form(&ui, "").aligned(&alignment);
+    let mut detailed = Section::form(&ui, "").aligned(&alignment);
     for (outer, title, names) in [
         (true, "Screen edges", &EDGES[..]),
         (false, "Between windows", &AXES[..]),
@@ -477,8 +478,9 @@ pub(super) fn layout_spacing(ui: Ui, model: &Rc<Model>) -> Page {
         let value = input.unit_field(&ui, "pt");
         input.min_width(Metrics::VALUE_FIELD_WIDTH);
         // The bezel hosts the field’s view; keep its Rust owner with the row.
-        let control = HStack::new(&ui).spacing(8.0).push(slider.unwrap()).push(value).keep(input);
-        simple = simple.row(f.row(title, control, message));
+        let slider = slider.unwrap();
+        let control = HStack::new(&ui).spacing(8.0).push(slider.clone()).push(value).keep(input);
+        simple = simple.row(f.row(title, control, message).stretch_slider(slider.ns_slider()));
         let mut messages = Vec::new();
         let fields = names
             .iter()
@@ -500,7 +502,7 @@ pub(super) fn layout_spacing(ui: Ui, model: &Rc<Model>) -> Page {
         let control = messages.into_iter().fold(
             VStack::new(&ui)
                 .spacing(2.0)
-                .push(super::editors::field_group(&ui, "pt", fields)),
+                .push(cgs::controls::number_field_group(&ui, "pt", fields)),
             |stack, message| stack.push(message),
         );
         detailed = detailed.row(SettingsRow::new(&ui, title, control).label_baseline(&first));
@@ -522,7 +524,7 @@ pub(super) fn layout_spacing(ui: Ui, model: &Rc<Model>) -> Page {
         .push(stage(&ui, preview, Some(Box::new(mode))))
         .push(simple)
         .push(detailed);
-    align_form(page.ns_view());
+    alignment.apply();
     f.finish(page)
 }
 
@@ -574,6 +576,7 @@ const AUTOMATIC: Following = ("Automatic", "Automatic", |value| {
 pub(super) fn layout_options(ui: Ui, model: &Rc<Model>, mode: LayoutMode) -> Page {
     let mut f = FormBuilder::new(ui, model);
     f.tooltips = true;
+    let alignment = cgs::settings::FormAlignment::new(180.0);
     let subsection = |title: &str| {
         let title = SubsectionTitle::new(&ui, title);
         title
@@ -582,12 +585,12 @@ pub(super) fn layout_options(ui: Ui, model: &Rc<Model>, mode: LayoutMode) -> Pag
                 objc2_app_kit::NSFont::smallSystemFontSize(),
                 unsafe { objc2_app_kit::NSFontWeightMedium },
             )));
-        Section::form(&ui, "").content(title)
+        Section::form(&ui, "").aligned(&alignment).content(title)
     };
     let options = || match mode {
         LayoutMode::MasterStack => subsection("Master area"),
         LayoutMode::Scrolling => subsection("Column sizing"),
-        _ => Section::form(&ui, ""),
+        _ => Section::form(&ui, "").aligned(&alignment),
     };
     // A layout either follows the shared position or overrides it.
     macro_rules! insertion_point {
@@ -725,7 +728,7 @@ pub(super) fn layout_options(ui: Ui, model: &Rc<Model>, mode: LayoutMode) -> Pag
         LayoutMode::Floating => return f.finish(page),
     };
     let page = page.push(section);
-    align_form(page.ns_view());
+    alignment.apply();
     f.finish(page)
 }
 
@@ -765,14 +768,14 @@ fn aspect_ratio(f: &mut FormBuilder) -> SettingsRow {
             .push(Caption::single_line(&ui, "1.78 is 16:9")),
     );
     let weak = Rc::downgrade(&custom);
-    f.sync_when(&mode, ratio, move |mode, s| {
-        mode.set_selected(usize::from(ratio(s).is_some()));
+    f.sync_when(&mode, ratio, move |mode, ratio| {
+        mode.set_selected(usize::from(ratio.is_some()));
         if let Some(custom) = weak.upgrade() {
-            custom.set_hidden(ratio(s).is_none());
+            custom.set_hidden(ratio.is_none());
         }
     });
-    f.sync_when(&field, ratio, move |field, s| {
-        field.set_value(ratio(s).unwrap_or(SIXTEEN_NINE))
+    f.sync_when(&field, ratio, |field, ratio| {
+        field.set_value(ratio.unwrap_or(SIXTEEN_NINE))
     });
     let control = HStack::new(&ui).spacing(10.0).push(mode).push(custom).keep(field);
     f.row("Single window aspect ratio", control, message).tooltip(
@@ -785,131 +788,74 @@ fn width_presets(f: &mut FormBuilder) -> SettingsRow {
     let message = Rc::new(ValidationMessage::new(&f.ui));
     // A chip collection contains distinct controls and structural operations;
     // keep each submission as an ordered transaction rather than coalescing it.
-    let write_model = f.model.clone();
-    let error = Rc::downgrade(&message);
-    let write = move |widths| {
-        Model::submit(
-            &write_model,
-            Box::new(move |source| {
-                source.settings.layout.scrolling.preset_column_widths = widths;
-                Ok(())
-            }),
-            error.clone(),
-        );
-    };
     let model = f.model.clone();
+    let error = Rc::downgrade(&message);
     let chips = Rc::new(
         ValueChips::new(&f.ui, "Width preset", "%", 5.0, 100.0)
             .compact()
             .format(|percent| percentage_text(percent / 100.0))
             .on_edit(move |edit| {
-                let Some(model) = model.upgrade() else { return };
-                // Untouched presets keep their full precision.
-                let mut widths =
-                    model.source.borrow().settings.layout.scrolling.preset_column_widths.clone();
-                match edit {
-                    ChipEdit::Add(percent) => widths.push(percent / 100.0),
-                    ChipEdit::Change(index, percent) if index < widths.len() => {
-                        widths[index] = percent / 100.0
-                    }
-                    ChipEdit::Remove(index) if index < widths.len() => {
-                        widths.remove(index);
-                    }
-                    ChipEdit::Move(from, to) if from < widths.len() && to < widths.len() => {
-                        let width = widths.remove(from);
-                        widths.insert(to, width);
-                    }
-                    _ => return,
-                }
-                write(widths);
+                let snapshot = model.upgrade().map(|model| {
+                    model.source.borrow().settings.layout.scrolling.preset_column_widths.clone()
+                });
+                let Some(snapshot) = snapshot else { return };
+                Model::submit(
+                    &model,
+                    Box::new(move |source| {
+                        let widths = &mut source.settings.layout.scrolling.preset_column_widths;
+                        if let ChipEdit::Add(percent) = edit {
+                            widths.push(percent / 100.0);
+                            return Ok(());
+                        }
+                        let resolve = |index: usize| -> Option<usize> {
+                            let value = snapshot.get(index)?;
+                            if widths.as_slice() == snapshot {
+                                return Some(index);
+                            }
+                            // Duplicates have no stable record identity. If a snapshot
+                            // has shifted, only an unambiguous value can identify a chip.
+                            if snapshot.iter().filter(|item| *item == value).count() != 1 {
+                                return None;
+                            }
+                            let mut candidates = widths.iter().enumerate().filter(|(_, v)| *v == value);
+                            let (found, _) = candidates.next()?;
+                            candidates.next().is_none().then_some(found)
+                        };
+                        let conflict = || "Width presets changed elsewhere. Try the edit again.".to_owned();
+                        match edit {
+                            ChipEdit::Change(index, percent) => {
+                                let index = resolve(index).ok_or_else(conflict)?;
+                                widths[index] = percent / 100.0;
+                            }
+                            ChipEdit::Remove(index) => {
+                                let index = resolve(index).ok_or_else(conflict)?;
+                                widths.remove(index);
+                            }
+                            ChipEdit::Move(from, to) if from != to => {
+                                let (source, target) = (resolve(from).ok_or_else(conflict)?, resolve(to).ok_or_else(conflict)?);
+                                let width = widths.remove(source);
+                                let target = target - usize::from(source < target) + usize::from(from < to);
+                                widths.insert(target, width);
+                            }
+                            ChipEdit::Move(..) => {}
+                            ChipEdit::Add(_) => unreachable!(),
+                        }
+                        Ok(())
+                    }),
+                    error.clone(),
+                );
             }),
     );
     f.sync_when(
         &chips,
         |s| s.settings.layout.scrolling.preset_column_widths.clone(),
-        |chips, s| {
-            let widths = &s.settings.layout.scrolling.preset_column_widths;
+        |chips, widths| {
             chips.set_values(&widths.iter().map(|width| width * 100.0).collect::<Vec<_>>());
         },
     );
     f.row("Width presets", chips, message).tooltip(
         "Column widths the preset column width command cycles through, as percentages of the screen width. Drag widths to reorder them; click to adjust, or hover to remove.",
     )
-}
-
-/// Sliders on the Layouts page start at a comfortable length and take any room the
-/// form has to spare, so their row spans the pane.
-pub(super) fn lengthen_sliders(view: &objc2_app_kit::NSView) {
-    if let Some(slider) = view.downcast_ref::<objc2_app_kit::NSSlider>() {
-        slider
-            .widthAnchor()
-            .constraintGreaterThanOrEqualToConstant(140.0)
-            .setActive(true);
-        slider.setContentHuggingPriority_forOrientation(
-            1.0,
-            objc2_app_kit::NSLayoutConstraintOrientation::Horizontal,
-        );
-    }
-    for child in view.subviews() {
-        lengthen_sliders(&child);
-    }
-}
-
-/// Whether a form control should span its column: sliders do; popups, switches, chips
-/// and fields keep their natural width.
-fn stretches(view: &objc2_app_kit::NSView) -> bool {
-    view.downcast_ref::<objc2_app_kit::NSSlider>().is_some()
-        || view.subviews().iter().any(|child| stretches(&child))
-}
-
-/// The narrowest label column on the Layouts page, so its forms share one control edge.
-pub(super) const LABEL_COLUMN: f64 = 180.0;
-
-/// Give every form grid in `view` the same label column and trailing control edge, so
-/// rows in separate subsections and groups line up, with sliders spanning between.
-pub(super) fn align_form(view: &objc2_app_kit::NSView) {
-    lengthen_sliders(view);
-    fn grids(view: &objc2_app_kit::NSView, out: &mut Vec<Retained<objc2_app_kit::NSGridView>>) {
-        if let Some(grid) = view.downcast_ref::<objc2_app_kit::NSGridView>()
-            && grid.numberOfColumns() >= 2
-        {
-            out.push(objc2::Message::retain(grid));
-        }
-        for child in view.subviews() {
-            grids(&child, out);
-        }
-    }
-    let mut found = Vec::new();
-    grids(view, &mut found);
-    let width = found
-        .iter()
-        .flat_map(|grid| {
-            (0..grid.numberOfRows()).filter_map(|row| {
-                // Measure the title alone; descriptions beneath it wrap to the column.
-                fn title(view: &objc2_app_kit::NSView) -> Option<Retained<objc2_app_kit::NSView>> {
-                    if view.downcast_ref::<objc2_app_kit::NSTextField>().is_some() {
-                        return Some(objc2::Message::retain(view));
-                    }
-                    view.subviews().iter().find_map(|child| title(&child))
-                }
-                let content = grid.cellAtColumnIndex_rowIndex(0, row).contentView()?;
-                Some(title(&content).unwrap_or(content).fittingSize().width)
-            })
-        })
-        .fold(LABEL_COLUMN, f64::max);
-    for grid in found {
-        grid.columnAtIndex(0).setWidth(width);
-        for row in 0..grid.numberOfRows() {
-            let cell = grid.cellAtColumnIndex_rowIndex(1, row);
-            // Controls sit at the trailing edge, as in every other pane.
-            let fill = cell.contentView().is_some_and(|view| stretches(&view));
-            cell.setXPlacement(if fill {
-                objc2_app_kit::NSGridCellPlacement::Fill
-            } else {
-                objc2_app_kit::NSGridCellPlacement::Trailing
-            });
-        }
-    }
 }
 
 fn input(ui: Ui, model: &Rc<Model>) -> Page {
@@ -1099,12 +1045,12 @@ fn focus_suspend(f: &mut FormBuilder) -> Section {
                 s.settings.focus_follows_mouse,
             )
         },
-        |recorder, s| {
+        |recorder, (key, enabled)| {
             recorder.set_value(None);
-            if let Some(HotkeySpec::Hotkey(key)) = &s.settings.focus_follows_mouse_disable_hotkey {
+            if let Some(key) = key {
                 recorder.set_title(&key.to_string());
             }
-            recorder.set_enabled(s.settings.focus_follows_mouse);
+            recorder.set_enabled(*enabled);
         },
     );
     f.sync_when(
@@ -1120,12 +1066,9 @@ fn focus_suspend(f: &mut FormBuilder) -> Section {
                 s.settings.focus_follows_mouse,
             )
         },
-        |recorder, s| {
-            recorder.set_value(match &s.settings.focus_follows_mouse_disable_hotkey {
-                Some(HotkeySpec::ModifiersOnly { modifiers }) => from_rift_modifiers(*modifiers),
-                _ => Modifiers::empty(),
-            });
-            recorder.set_enabled(s.settings.focus_follows_mouse);
+        |recorder, (modifiers, enabled)| {
+            recorder.set_value(*modifiers);
+            recorder.set_enabled(*enabled);
         },
     );
     let clear = Button::new(&ui, "Clear").on_click(move || submit(None));

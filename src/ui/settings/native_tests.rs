@@ -289,7 +289,18 @@ pub fn run(ui: Ui) {
             "startup does not construct the Layouts workspace"
         );
         late_runtime_populates_picker(&settings, &mut pending);
-        let search = find::<objc2_app_kit::NSSearchField>(&root).unwrap();
+        fn sidebar_search(view: &NSView) -> Option<Retained<objc2_app_kit::NSSearchField>> {
+            if view.isHidden() {
+                return None;
+            }
+            if let Some(field) = view.downcast_ref::<objc2_app_kit::NSSearchField>()
+                && field.placeholderString().is_some_and(|text| text.to_string() == "Search")
+            {
+                return Some(field.retain());
+            }
+            view.subviews().iter().find_map(|child| sidebar_search(&child))
+        }
+        let search = sidebar_search(&root).expect("visible sidebar search");
         change_text(&search, "focus follows pointer");
         assert!(
             named::<NSTableView>(&root, "Settings categories").is_none(),
@@ -1960,15 +1971,17 @@ fn interface_controls(
     );
     toggle("Enabled", true);
     commit(&mut source, pending);
-    let placement = named::<NSPopUpButton>(&root, "Horizontal placement").unwrap();
-    choose(&placement, 1);
+    let placement = named::<NSSegmentedControl>(&root, "Horizontal placement").unwrap();
+    placement.setSelectedSegment(1);
+    assert!(unsafe { placement.sendAction_to(placement.action(), placement.target().as_deref()) });
     commit(&mut source, pending);
     assert_eq!(
         source.settings.ui.stack_line.horiz_placement,
         HorizontalPlacement::Bottom
     );
-    let vertical = named::<NSPopUpButton>(&root, "Vertical placement").unwrap();
-    choose(&vertical, 1);
+    let vertical = named::<NSSegmentedControl>(&root, "Vertical placement").unwrap();
+    vertical.setSelectedSegment(1);
+    assert!(unsafe { vertical.sendAction_to(vertical.action(), vertical.target().as_deref()) });
     commit(&mut source, pending);
     assert_eq!(
         source.settings.ui.stack_line.vert_placement,

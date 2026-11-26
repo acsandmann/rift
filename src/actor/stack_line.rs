@@ -426,14 +426,16 @@ impl StackLine {
                 let icon = app.and_then(|a| a.icon()).or_else(|| tab.bundle_id.as_deref().and_then(cgs::app::Application::icon_for_bundle));
                 (name, icon)
             });
-            cgs::tabs::TabBarItem { title: if tab.title.is_empty() { name.clone() } else { tab.title.clone() }, icon: icon.clone() }
+            let id = (u64::from(tab.window_id.pid as u32) << 32) | u64::from(tab.window_id.idx.get());
+            let title = if tab.title.is_empty() { name.clone() } else { tab.title.clone() };
+            (id, cgs::tabs::TabBarItem { title, icon: icon.clone() })
         }).collect();
         {
             let mut shown = group.shown.borrow_mut();
             shown.clear();
             shown.extend(group.info.tabs.iter().map(|tab| tab.window_id));
         }
-        group.bar.set_tabs(tabs, group.info.selected_index);
+        group.bar.set_keyed_tabs(tabs, group.info.selected_index);
     }
 
     fn update_native_group(&mut self, info: GroupInfo) {

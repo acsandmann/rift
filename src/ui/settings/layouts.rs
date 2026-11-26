@@ -190,8 +190,9 @@ impl Inspector {
                     }
                 }
             }));
-            let position = Section::form(&ui, "").row(pages::window_position(&mut form));
-            pages::align_form(position.ns_view());
+            let alignment = cgs::settings::FormAlignment::new(180.0);
+            let position = Section::form(&ui, "").aligned(&alignment).row(pages::window_position(&mut form));
+            alignment.apply();
             let shared = VStack::new(&ui)
                 .spacing(0.0)
                 .push(View::new(&ui).content(position, Insets {

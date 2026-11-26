@@ -1,11 +1,15 @@
 //! Searchable settings destinations, without constructing hidden page trees.
+use cgs::settings::SettingsSearchRow;
+
 use super::Category::*;
 use super::{CATEGORIES, Category};
 use crate::common::config::LayoutMode;
 
 /// A destination with its search text precomputed once.
+#[derive(PartialEq)]
 pub(super) struct Entry {
     pub title: &'static str,
+    pub identifier: Option<String>,
     pub location: String,
     pub page: Category,
     pub layout: Option<LayoutMode>,
@@ -13,12 +17,6 @@ pub(super) struct Entry {
     name: String,
     context: String,
     haystack: String,
-}
-
-#[derive(Clone, Copy)]
-pub(super) enum Row {
-    Heading(&'static str),
-    Setting(&'static Entry),
 }
 
 impl Entry {
@@ -57,16 +55,21 @@ impl Entry {
     }
 }
 
-pub(super) fn grouped(results: &[&'static Entry]) -> Vec<Row> {
+pub(super) fn sidebar_results(query: &str) -> (Option<&'static Entry>, Vec<SettingsSearchRow<&'static Entry>>) {
+    let results = results(query);
     let mut rows = Vec::new();
     for &(page, heading, _) in &CATEGORIES {
         let mut matches = results.iter().filter(|entry| entry.page == page).peekable();
         if matches.peek().is_some() {
-            rows.push(Row::Heading(heading));
-            rows.extend(matches.map(|entry| Row::Setting(entry)));
+            rows.push(SettingsSearchRow::Heading(heading));
+            rows.extend(matches.map(|&entry| SettingsSearchRow::Setting {
+                destination: entry,
+                title: entry.title,
+                description: &entry.description,
+            }));
         }
     }
-    rows
+    (results.first().copied(), rows)
 }
 
 struct Draft {
@@ -75,6 +78,7 @@ struct Draft {
     page: Category,
     layout: Option<LayoutMode>,
     key: &'static str,
+    identifier: Option<String>,
     help: &'static str,
     aliases: String,
 }
@@ -88,6 +92,7 @@ impl Draft {
             format!("{name} {context} {} {} {}", self.aliases, self.key, self.help).to_lowercase();
         Entry {
             title: self.title,
+            identifier: self.identifier,
             location: self.location,
             page: self.page,
             layout: self.layout,
@@ -317,6 +322,7 @@ fn catalog() -> &'static [Entry] {
                     page,
                     layout,
                     key: field.key,
+                    identifier: Some(super::schema::setting_identifier::<T>(field.key)),
                     help: field.help,
                     aliases: format!("{} {}", field.aliases, field.title),
                 });
@@ -357,6 +363,7 @@ fn catalog() -> &'static [Entry] {
             page: Overview,
             layout: None,
             key: "",
+            identifier: None,
             help: "",
             aliases: "hotkeys keybindings".into(),
         }));
@@ -433,6 +440,7 @@ fn catalog() -> &'static [Entry] {
                     page,
                     layout,
                     key: "",
+            identifier: None,
                     help: "",
                     aliases: aliases.to_owned(),
                 }),
