@@ -10,7 +10,7 @@ use super::{Direction, FloatingManager, LayoutId, LayoutSystemKind, ResizeOrient
 use crate::actor::app::AppInfo;
 use crate::actor::app::{WindowId, pid_t};
 use crate::common::collections::{HashMap, HashSet};
-use crate::common::config::{LayoutMode, LayoutSettings, WorkspaceSelector};
+use crate::common::config::{LayoutMode, LayoutSettings, WindowInsertionPoint, WorkspaceSelector};
 use crate::layout_engine::LayoutSystem;
 use crate::layout_engine::floating::FloatingFullscreenKind;
 use crate::layout_engine::systems::{
@@ -231,6 +231,7 @@ pub struct LayoutEngine {
     floating_positions: FloatingPositionStore,
     app_rules: AppRuleEngine,
     focused_window: Option<WindowId>,
+    insertion_cursor: Option<(SpaceId, VirtualWorkspaceId, LayoutId, WindowId)>,
     window_layout_constraints: LayoutConstraints,
     workspaces: WorkspaceStore,
     layout_settings: LayoutSettings,
@@ -274,6 +275,7 @@ impl LayoutEngine {
         &mut self,
         request: crate::layout_engine::WindowDropRequest,
     ) -> bool {
+        self.insertion_cursor = None;
         if self.active_layout_mode_at(request.space) == LayoutMode::Floating {
             return false;
         }
@@ -752,6 +754,7 @@ impl LayoutEngine {
 
 impl LayoutEngine {
     pub fn set_layout_settings(&mut self, settings: &LayoutSettings) {
+        self.insertion_cursor = None;
         if &self.layout_settings != settings {
             self.apply_layout_settings(settings);
         }
@@ -895,6 +898,7 @@ impl LayoutEngine {
         space: SpaceId,
         focus_window: Option<WindowId>,
     ) {
+        self.insertion_cursor = None;
         let Some(workspace_id) = self.workspaces.active_workspace(space) else {
             self.focused_window = None;
             return;
@@ -929,6 +933,7 @@ impl LayoutEngine {
         workspace_id: VirtualWorkspaceId,
         preferred_focus_window: Option<WindowId>,
     ) -> EventResponse {
+        self.insertion_cursor = None;
         if !self.workspaces.set_active_workspace(space, workspace_id) {
             return EventResponse::default();
         }
@@ -1592,9 +1597,25 @@ impl LayoutEngine {
                 {
                     self.preserve_scrolling_window_width(window_store, wid);
                 }
-                self.workspaces[assigned_workspace]
-                    .layout_system
-                    .update(WindowChange::Add(layout, wid, None));
+                let mode = self.workspaces[assigned_workspace].layout_mode;
+                let system = &mut self.workspaces[assigned_workspace].layout_system;
+                if self.focused_window.is_some()
+                    && self.layout_settings.window_insertion_point_for(mode)
+                        == WindowInsertionPoint::NextToSelection
+                {
+                    if let Some((cursor_space, workspace, cursor_layout, anchor)) =
+                        self.insertion_cursor
+                        && (cursor_space, workspace, cursor_layout)
+                            == (space, assigned_workspace, layout)
+                        && system.window_participates(anchor)
+                        && system.selected_window(layout) != Some(anchor)
+                        && system.contains_window(layout, anchor)
+                    {
+                        let _ = system.focus(layout, Focus::Select(anchor));
+                    }
+                    self.insertion_cursor = Some((space, assigned_workspace, layout, wid));
+                }
+                system.update(WindowChange::Add(layout, wid, None));
                 inserted = true;
             }
         } else {
@@ -1791,6 +1812,7 @@ impl LayoutEngine {
             floating_positions: FloatingPositionStore::default(),
             app_rules: AppRuleEngine::new(&virtual_workspace_config.app_rules),
             focused_window: None,
+            insertion_cursor: None,
             window_layout_constraints: LayoutConstraints::default(),
             workspaces,
             layout_settings: layout_settings.clone(),
@@ -1914,6 +1936,13 @@ impl LayoutEngine {
         app_rule_outcome: &mut AppRuleOutcome,
     ) -> EventResponse {
         debug!(?event);
+        match &event {
+            LayoutEvent::WindowFocused(_, wid) if self.focused_window != Some(*wid) => {
+                self.insertion_cursor = None;
+            }
+            LayoutEvent::WindowResized { .. } => self.insertion_cursor = None,
+            _ => {}
+        }
         // Claims keep a nonparticipating canonical slot until release. Ordinary
         // observations cannot reactivate it; destruction ends the claim first.
         if let LayoutEvent::WindowAdded(_, wid)
@@ -2127,6 +2156,7 @@ impl LayoutEngine {
                     )
                 });
                 if self.focused_window.is_some_and(|wid| wid.pid == pid) {
+                    self.insertion_cursor = None;
                     self.focused_window = None;
                 }
                 for (_, ws) in self.workspaces.workspaces.iter_mut() {
@@ -2265,6 +2295,7 @@ impl LayoutEngine {
         visible_space_frames: &HashMap<SpaceId, CGRect>,
         command: LayoutCommand,
     ) -> EventResponse {
+        self.insertion_cursor = None;
         if !matches!(
             command,
             LayoutCommand::NextWindow
@@ -3098,6 +3129,7 @@ impl LayoutEngine {
         context: impl Into<crate::model::virtual_workspace::WorkspaceContext<'a>>,
         command: &LayoutCommand,
     ) -> EventResponse {
+        self.insertion_cursor = None;
         let context = context.into();
         let space = context.space;
         match command {
@@ -3838,6 +3870,42 @@ mod tests {
         LayoutMode, LayoutSettings, VirtualWorkspaceSettings, WorkspaceSelector,
     };
     use crate::layout_engine::systems::{Focus, WindowQuery};
+
+    #[test]
+    fn bsp_admissions_advance_insertion_while_native_focus_stays_put() {
+        let settings = LayoutSettings {
+            mode: LayoutMode::Bsp,
+            ..Default::default()
+        };
+        let mut engine = LayoutEngine::new(&VirtualWorkspaceSettings::default(), &settings);
+        let mut store = WindowStore::default();
+        let space = SpaceId::new(91);
+        let size = CGSize::new(1200.0, 800.0);
+        let screen = CGRect::new(CGPoint::ZERO, size);
+        let gaps = &settings.gaps;
+        let _ = engine.handle_event(&mut store, LayoutEvent::SpaceExposed(space, size));
+        let owner = engine.workspaces.active_workspace(space).unwrap();
+        let focused = WindowId::new(1, 1);
+        let mut focused_frame = None;
+        for index in 1..=4 {
+            let window = WindowId::new(1, index);
+            store.insert_window(window, live_window(size));
+            assert!(engine.workspaces.assign_window_to_workspace(&mut store, space, window, owner));
+            let _ = engine.handle_event(&mut store, LayoutEvent::WindowAdded(space, window));
+            // The OS keeps reporting the first window while the new ones appear.
+            let _ = engine.handle_event(&mut store, LayoutEvent::WindowFocused(space, focused));
+            if index > 1 {
+                let frame = engine
+                    .calculate_layout(space, screen, gaps, Default::default())
+                    .into_iter()
+                    .find(|(wid, _)| *wid == focused)
+                    .unwrap()
+                    .1;
+                assert_eq!(*focused_frame.get_or_insert(frame), frame);
+            }
+        }
+        assert_eq!(engine.focused_window(), Some(focused));
+    }
 
     #[test]
     fn simultaneous_suspensions_keep_workspace_owners_through_inactive_returns_and_mode_changes() {

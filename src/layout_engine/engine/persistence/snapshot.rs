@@ -258,6 +258,7 @@ impl PersistedLayout {
             floating_positions: FloatingPositionStore::default(),
             app_rules: AppRuleEngine::default(),
             focused_window: None,
+            insertion_cursor: None,
             window_layout_constraints: Default::default(),
             workspaces: self.workspaces,
             layout_settings: LayoutSettings::default(),
