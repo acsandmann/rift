@@ -195,8 +195,9 @@ impl Reactor {
             self.state.windows.mark_window_server_observed(wsid);
             if let Some(info) = window_server_info
                 && (info.layer != 0
-                    || info.frame.size.width < 50.0
-                    || info.frame.size.height < 50.0)
+                    || info.frame.size.width <= 0.0
+                    || info.frame.size.height <= 0.0
+                    || (info.frame.size.width < 50.0 && info.frame.size.height < 50.0))
             {
                 self.state.windows.clear_window_server_observed(wsid);
                 return;
