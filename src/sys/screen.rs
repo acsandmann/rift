@@ -776,21 +776,20 @@ pub fn order_visible_spaces_by_position(
 pub fn managed_display_space_ids() -> HashMap<String, Vec<SpaceId>> {
     let mut out: HashMap<String, Vec<SpaceId>> = HashMap::default();
     unsafe {
-        let raw = CGSCopyManagedDisplaySpaces(main_connection());
-        if raw.is_null() {
+        let Some(raw) = NonNull::new(CGSCopyManagedDisplaySpaces(main_connection()).cast()) else {
             return out;
-        }
-
-        let displays: CFRetained<CFArray<CFDictionary<CFString, CFType>>> =
-            CFRetained::from_raw(std::ptr::NonNull::new_unchecked(raw.cast()));
+        };
+        // The Copy result owns the array; validate the type of each item before reading it.
+        let displays: CFRetained<CFArray<CFType>> = CFRetained::from_raw(raw);
         let display_id_key = CFString::from_static_str("Display Identifier");
         let spaces_key = CFString::from_static_str("Spaces");
         let managed_space_id_key = CFString::from_static_str("ManagedSpaceID");
 
-        for idx in 0..displays.len() {
-            let Some(display_entry) = displays.get(idx) else {
+        for item in displays.iter() {
+            let Ok(entry) = item.downcast::<CFDictionary>() else {
                 continue;
             };
+            let display_entry = CFRetained::cast_unchecked::<CFDictionary<CFString, CFType>>(entry);
             let display_id = display_entry
                 .get(&display_id_key)
                 .and_then(|v| v.downcast::<CFString>().ok())

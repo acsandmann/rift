@@ -385,11 +385,11 @@ impl AXUIElement {
     }
 
     pub fn process_id(&self) -> Result<pid_t> {
-        let pid = unsafe { NonNull::new_unchecked(&mut 0i32) };
-        if unsafe { self.inner.pid(pid) } == AXError::Success {
-            Ok(unsafe { *pid.as_ref() })
-        } else {
-            Err(Error::Ax(unsafe { self.inner.pid(pid) }))
+        let mut pid = 0;
+        // SAFETY: AXUIElementGetPid writes to this local for the duration of the call.
+        match unsafe { self.inner.pid(NonNull::from(&mut pid)) } {
+            AXError::Success => Ok(pid),
+            error => Err(error.into()),
         }
     }
 }

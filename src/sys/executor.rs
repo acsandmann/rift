@@ -131,10 +131,8 @@ impl State {
         let waker = self.wakeup.clone().into();
         let mut context = Context::from_waker(&waker);
 
-        if objc2::rc::autoreleasepool(|_| {
-            self.main_task.as_mut().unwrap().as_mut().poll(&mut context)
-        }) == Poll::Ready(())
-        {
+        let Some(task) = self.main_task.as_mut() else { return };
+        if objc2::rc::autoreleasepool(|_| task.as_mut().poll(&mut context)) == Poll::Ready(()) {
             self.main_task.take();
             if let Some(rl) = CFRunLoop::current() {
                 rl.stop();
