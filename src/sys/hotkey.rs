@@ -1280,12 +1280,11 @@ fn generate_virtual_keymap(_mtm: MainThreadMarker) -> StdHashMap<String, KeyCode
         };
 
         if status == 0 && actual_len > 0 {
-            let len = usize::try_from(actual_len).unwrap_or(0);
-            if len == 0 {
+            let Ok(len) = usize::try_from(actual_len) else { continue };
+            let Some(translated) = chars.get(..len).filter(|chars| !chars.is_empty()) else {
                 continue;
-            }
-
-            let s = String::from_utf16_lossy(&chars[..len]).to_lowercase();
+            };
+            let s = String::from_utf16_lossy(translated).to_lowercase();
 
             keymap.entry(s).or_insert(key_code_enum);
         }

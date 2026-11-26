@@ -102,28 +102,18 @@ pub fn update_window_notifications(window_ids: &[u32]) {
 }
 
 #[inline(always)]
-fn read<T: Copy + Sized + 'static>(bytes: &[u8], off: usize) -> Option<T> {
-    let n = std::mem::size_of::<T>();
-    if bytes.len() < off + n {
-        return None;
-    }
-    let mut buf = [0u8; 32];
-    assert!(n <= buf.len(), "read_ne: type too large");
-    buf[..n].copy_from_slice(&bytes[off..off + n]);
-    Some(unsafe { std::ptr::read_unaligned(buf.as_ptr() as *const T) })
+fn read_u32(bytes: &[u8], offset: usize) -> Option<u32> {
+    Some(u32::from_ne_bytes(*bytes.get(offset..)?.first_chunk()?))
 }
 
-fn read_u32s(bytes: &[u8], off: usize, count: usize) -> Option<Vec<u32>> {
-    let byte_count = count.checked_mul(std::mem::size_of::<u32>())?;
-    if bytes.len() < off + byte_count {
-        return None;
-    }
+fn read_u64(bytes: &[u8], offset: usize) -> Option<u64> {
+    Some(u64::from_ne_bytes(*bytes.get(offset..)?.first_chunk()?))
+}
 
-    let mut out = Vec::with_capacity(count);
-    for idx in 0..count {
-        out.push(read::<u32>(bytes, off + idx * std::mem::size_of::<u32>())?);
-    }
-    Some(out)
+fn read_u32s(bytes: &[u8], offset: usize, count: usize) -> Option<Vec<u32>> {
+    let byte_count = count.checked_mul(size_of::<u32>())?;
+    let fields = bytes.get(offset..)?.get(..byte_count)?.as_chunks::<4>().0;
+    Some(fields.iter().copied().map(u32::from_ne_bytes).collect())
 }
 
 extern "C" fn connection_callback(
@@ -157,8 +147,8 @@ extern "C" fn connection_callback(
     match kind {
         CGSEventType::Known(KnownCGSEvent::SpaceWindowDestroyed)
         | CGSEventType::Known(KnownCGSEvent::SpaceWindowCreated) => {
-            if let Some(sid) = read::<u64>(bytes, 0) {
-                if let Some(wid) = read::<u32>(bytes, std::mem::size_of::<u64>()) {
+            if let Some(sid) = read_u64(bytes, 0) {
+                if let Some(wid) = read_u32(bytes, std::mem::size_of::<u64>()) {
                     space_id = Some(sid);
                     window_id = Some(wid);
                 } else {
@@ -172,7 +162,7 @@ extern "C" fn connection_callback(
         CGSEventType::Known(KnownCGSEvent::SpaceCreated)
         | CGSEventType::Known(KnownCGSEvent::SpaceDestroyed)
         | CGSEventType::Known(KnownCGSEvent::SpaceCurrentChanged) => {
-            if let Some(sid) = read::<u64>(bytes, 0) {
+            if let Some(sid) = read_u64(bytes, 0) {
                 space_id = Some(sid)
             } else {
                 warn!("no space_id on {kind}");
@@ -180,13 +170,13 @@ extern "C" fn connection_callback(
         }
 
         CGSEventType::Known(KnownCGSEvent::SpaceWindowBatchReassociated) => {
-            if let Some(sid) = read::<u64>(bytes, 0) {
+            if let Some(sid) = read_u64(bytes, 0) {
                 space_id = Some(sid);
             } else {
                 warn!("Skylight event {kind} payload too short for space id (len={len})");
             }
 
-            match read::<u32>(bytes, std::mem::size_of::<u64>()) {
+            match read_u32(bytes, std::mem::size_of::<u64>()) {
                 Some(n) => {
                     count = Some(n);
                     let expected = n as usize;
@@ -218,12 +208,12 @@ extern "C" fn connection_callback(
         | CGSEventType::Known(KnownCGSEvent::SpaceWindowManagementCapabilitiesChanged) => {
             // These appear to be space-management notifications. Observed call
             // sites suggest a leading space identifier and sometimes a window id.
-            if let Some(sid) = read::<u64>(bytes, 0) {
+            if let Some(sid) = read_u64(bytes, 0) {
                 space_id = Some(sid);
-                if let Some(wid) = read::<u32>(bytes, std::mem::size_of::<u64>()) {
+                if let Some(wid) = read_u32(bytes, std::mem::size_of::<u64>()) {
                     window_id = Some(wid);
                 }
-            } else if let Some(wid) = read::<u32>(bytes, 0) {
+            } else if let Some(wid) = read_u32(bytes, 0) {
                 window_id = Some(wid);
             } else if len != 0 {
                 warn!(
@@ -234,7 +224,7 @@ extern "C" fn connection_callback(
 
         CGSEventType::Known(KnownCGSEvent::WindowManagerSpaceFrontConnectionChanged)
         | CGSEventType::Known(KnownCGSEvent::WindowManagerGlobalFrontConnectionChanged) => {
-            if let Some(cid) = read::<u32>(bytes, 0) {
+            if let Some(cid) = read_u32(bytes, 0) {
                 connection_id = Some(cid);
             } else {
                 warn!("Skylight event {kind} payload too short for connection id (len={len})");
@@ -251,7 +241,7 @@ extern "C" fn connection_callback(
         | CGSEventType::Known(KnownCGSEvent::WindowManagerActivatingClickOrdering)
         | CGSEventType::Known(KnownCGSEvent::WindowOrderingGroupChanged)
         | CGSEventType::Known(KnownCGSEvent::WindowParentChanged) => {
-            if let Some(wid) = read::<u32>(bytes, 0) {
+            if let Some(wid) = read_u32(bytes, 0) {
                 window_id = Some(wid);
             } else {
                 warn!("Skylight event {kind} payload too short for window id (len={len})");
