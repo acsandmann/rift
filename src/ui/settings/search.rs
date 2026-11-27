@@ -55,7 +55,9 @@ impl Entry {
     }
 }
 
-pub(super) fn sidebar_results(query: &str) -> (Option<&'static Entry>, Vec<SettingsSearchRow<&'static Entry>>) {
+pub(super) fn sidebar_results(
+    query: &str,
+) -> (Option<&'static Entry>, Vec<SettingsSearchRow<&'static Entry>>) {
     let results = results(query);
     let mut rows = Vec::new();
     for &(page, heading, _) in &CATEGORIES {
@@ -440,7 +442,7 @@ fn catalog() -> &'static [Entry] {
                     page,
                     layout,
                     key: "",
-            identifier: None,
+                    identifier: None,
                     help: "",
                     aliases: aliases.to_owned(),
                 }),

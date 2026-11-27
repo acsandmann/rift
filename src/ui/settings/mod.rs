@@ -5,7 +5,9 @@ use std::rc::{Rc, Weak};
 use std::sync::Arc;
 
 use cgs::app::ApplicationIcons;
-use cgs::controls::{ChoicePopup, FollowingPopup, NumberField, NumberSlider, Popup, Slider, Switch};
+use cgs::controls::{
+    ChoicePopup, FollowingPopup, NumberField, NumberSlider, Popup, Slider, Switch,
+};
 use cgs::input::TextField;
 use cgs::menu::{Menu, MenuItem};
 use cgs::navigation::{HeaderControls, NavigationSplitView, Toolbar};
@@ -758,11 +760,7 @@ impl FormBuilder {
         let current = get.clone();
         let change = self.assign(move |s| current(s), set, Rc::downgrade(&message));
         let input = Rc::new(Switch::new(&self.ui).on_change(change));
-        self.sync_when(
-            &input,
-            move |s| get(s),
-            |input, value| input.set_value(*value),
-        );
+        self.sync_when(&input, move |s| get(s), |input, value| input.set_value(*value));
         self.row(title, input, message)
     }
 
@@ -778,8 +776,12 @@ impl FormBuilder {
         // Percentages move in steps of five; the field still takes exact values.
         let slider = slider.unwrap();
         slider.set_step(5.0);
-        self.row(title, NumberSlider::new(&self.ui, slider.clone(), input), message)
-            .stretch_slider(slider.ns_slider())
+        self.row(
+            title,
+            NumberSlider::new(&self.ui, slider.clone(), input),
+            message,
+        )
+        .stretch_slider(slider.ns_slider())
     }
 
     // Bind native controls independently of their form layout.
@@ -818,26 +820,32 @@ impl FormBuilder {
             let preview = self.live_preview.clone();
             let mut local_preview = None::<ConfigSource>;
             let slider = Slider::new(&self.ui).range(min, max).continuous(true);
-            let slider = Rc::new(NumberSlider::track(&self.ui, slider, &input, move |v, dragging| {
-                let model = model.upgrade()?;
-                let (min, max) = range(&model.source.borrow());
-                let value = if preview.is_some() && !integer {
-                    (v * 10.0).round() / 10.0
-                } else {
-                    v.round()
-                }
-                .clamp(min, max);
-                if let Some(preview) = &preview {
-                    let local =
-                        local_preview.get_or_insert_with(|| model.source.borrow().as_ref().clone());
-                    edit_preview(local, value / scale);
-                    preview(local);
-                }
-                if !dragging {
-                    local_preview = None;
-                }
-                Some(value)
-            }, commit));
+            let slider = Rc::new(NumberSlider::track(
+                &self.ui,
+                slider,
+                &input,
+                move |v, dragging| {
+                    let model = model.upgrade()?;
+                    let (min, max) = range(&model.source.borrow());
+                    let value = if preview.is_some() && !integer {
+                        (v * 10.0).round() / 10.0
+                    } else {
+                        v.round()
+                    }
+                    .clamp(min, max);
+                    if let Some(preview) = &preview {
+                        let local = local_preview
+                            .get_or_insert_with(|| model.source.borrow().as_ref().clone());
+                        edit_preview(local, value / scale);
+                        preview(local);
+                    }
+                    if !dragging {
+                        local_preview = None;
+                    }
+                    Some(value)
+                },
+                commit,
+            ));
             slider.accessibility_label(title);
             slider
         });
@@ -881,11 +889,7 @@ impl FormBuilder {
         } else {
             field.on_commit(commit)
         });
-        self.sync_when(
-            &input,
-            move |s| get(s),
-            |input, value| input.set_value(value),
-        );
+        self.sync_when(&input, move |s| get(s), |input, value| input.set_value(value));
         self.row(title, input, message)
     }
 

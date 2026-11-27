@@ -817,11 +817,13 @@ fn width_presets(f: &mut FormBuilder) -> SettingsRow {
                             if snapshot.iter().filter(|item| *item == value).count() != 1 {
                                 return None;
                             }
-                            let mut candidates = widths.iter().enumerate().filter(|(_, v)| *v == value);
+                            let mut candidates =
+                                widths.iter().enumerate().filter(|(_, v)| *v == value);
                             let (found, _) = candidates.next()?;
                             candidates.next().is_none().then_some(found)
                         };
-                        let conflict = || "Width presets changed elsewhere. Try the edit again.".to_owned();
+                        let conflict =
+                            || "Width presets changed elsewhere. Try the edit again.".to_owned();
                         match edit {
                             ChipEdit::Change(index, percent) => {
                                 let index = resolve(index).ok_or_else(conflict)?;
@@ -832,9 +834,13 @@ fn width_presets(f: &mut FormBuilder) -> SettingsRow {
                                 widths.remove(index);
                             }
                             ChipEdit::Move(from, to) if from != to => {
-                                let (source, target) = (resolve(from).ok_or_else(conflict)?, resolve(to).ok_or_else(conflict)?);
+                                let (source, target) = (
+                                    resolve(from).ok_or_else(conflict)?,
+                                    resolve(to).ok_or_else(conflict)?,
+                                );
                                 let width = widths.remove(source);
-                                let target = target - usize::from(source < target) + usize::from(from < to);
+                                let target =
+                                    target - usize::from(source < target) + usize::from(from < to);
                                 widths.insert(target, width);
                             }
                             ChipEdit::Move(..) => {}

@@ -1,11 +1,11 @@
 //! Native controls generated from config metadata, using the same ConfigActor
 //! submission and sheet draft ownership as handcrafted Settings controls.
 use cgs::controls::{NumberField, NumberSlider, Popup, Slider, Switch};
-use objc2_app_kit::NSUserInterfaceItemIdentification;
 use cgs::input::TextField;
 use cgs::settings::{Section, SettingsRow, ValidationMessage};
 use cgs::tabs::TabSelector;
 use cgs::view::NativeView;
+use objc2_app_kit::NSUserInterfaceItemIdentification;
 
 use super::*;
 use crate::common::config::{ConfigField, ConfigSchema, FieldKind, FieldValue};
@@ -146,24 +146,32 @@ impl FormBuilder {
                     } else {
                         slider
                     };
-                    let slider = Rc::new(NumberSlider::track(&self.ui, slider, &input, move |value, _| {
-                        // Give immediate visual feedback, but save once on release.
-                        // Exact text entry remains independent of these convenient ranges.
-                        let (min, max, _) = model
-                            .upgrade()
-                            .and_then(|model| slider_options(field.key, &model.source.borrow()))
-                            .unwrap_or((min, max, None));
-                        let precision = if max <= 1.0 { 100.0 } else { 10.0 };
-                        Some(if value <= min || value >= max {
-                            // Keep exact endpoints even when the bound has finer precision.
-                            value
-                        } else if integer {
-                            value.round()
-                        } else {
-                            (value * precision).round() / precision
-                        }
-                        .clamp(min, max))
-                    }, change));
+                    let slider = Rc::new(NumberSlider::track(
+                        &self.ui,
+                        slider,
+                        &input,
+                        move |value, _| {
+                            // Give immediate visual feedback, but save once on release.
+                            // Exact text entry remains independent of these convenient ranges.
+                            let (min, max, _) = model
+                                .upgrade()
+                                .and_then(|model| slider_options(field.key, &model.source.borrow()))
+                                .unwrap_or((min, max, None));
+                            let precision = if max <= 1.0 { 100.0 } else { 10.0 };
+                            Some(
+                                if value <= min || value >= max {
+                                    // Keep exact endpoints even when the bound has finer precision.
+                                    value
+                                } else if integer {
+                                    value.round()
+                                } else {
+                                    (value * precision).round() / precision
+                                }
+                                .clamp(min, max),
+                            )
+                        },
+                        change,
+                    ));
                     slider.accessibility_label(field.title);
                     input.accessibility_label(field.title);
                     let weak_slider = Rc::downgrade(&slider);

@@ -152,7 +152,12 @@ fn record_editor_with_delete(
         cancel
     };
     let sheet = cgs::settings::editor_sheet(
-        &ui, title, page.view.clone(), scrolling.then_some(430.0), message, footer,
+        &ui,
+        title,
+        page.view.clone(),
+        scrolling.then_some(430.0),
+        message,
+        footer,
     );
     model.sheet.borrow_mut().take();
     *model.sheet_model.borrow_mut() = Some(draft);
@@ -850,7 +855,9 @@ pub(super) fn rules(ui: Ui, model: &Rc<Model>) -> Page {
         .full_length()
         .empty_message("No matching rules")
         .symbol("app")
-        .images(application_icons(model, |rule: &AppWorkspaceRule| rule.app_id.as_deref()))
+        .images(application_icons(model, |rule: &AppWorkspaceRule| {
+            rule.app_id.as_deref()
+        }))
         .on_open(move |index| action(index))
         .reorderable(true)
         .on_reorder({
@@ -1101,7 +1108,9 @@ fn application_picker(
         .empty_message("No matching applications")
         .fit_content(height)
         .symbol("app")
-        .images(application_icons(model, |app: &Rc<Choice>| app.target.0.as_deref()))
+        .images(application_icons(model, |app: &Rc<Choice>| {
+            app.target.0.as_deref()
+        }))
         .on_select_item(move |app| {
             if !selecting.get() {
                 choose(app.map(|app| app.target.clone()));
@@ -1722,7 +1731,9 @@ pub(super) fn strings(
                     StringListEdit::Add(value) => values.push(value),
                     StringListEdit::Remove(index, expected) => {
                         if values.get(index) != Some(&expected) {
-                            return Err("The list changed elsewhere. Select the entry again.".into());
+                            return Err(
+                                "The list changed elsewhere. Select the entry again.".into()
+                            );
                         }
                         values.remove(index);
                     }
@@ -2170,20 +2181,16 @@ fn override_group(
     let first = objc2::Message::retain(fields[0].1.ns_text_field());
     let weak_reset = Rc::downgrade(&reset);
     let source = source.to_owned();
-    f.sync_when(
-        &status,
-        overridden,
-        move |status, custom| {
-            status.set_text(&if *custom {
-                "Custom for this display".to_owned()
-            } else {
-                format!("From {source}")
-            });
-            if let Some(reset) = weak_reset.upgrade() {
-                reset.set_hidden(!custom);
-            }
-        },
-    );
+    f.sync_when(&status, overridden, move |status, custom| {
+        status.set_text(&if *custom {
+            "Custom for this display".to_owned()
+        } else {
+            format!("From {source}")
+        });
+        if let Some(reset) = weak_reset.upgrade() {
+            reset.set_hidden(!custom);
+        }
+    });
     let control = cgs::controls::number_field_group(&ui, unit, fields).push(reset);
     f.row(title, control, message).description_view(status).label_baseline(&first)
 }

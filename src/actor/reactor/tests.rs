@@ -5012,6 +5012,28 @@ fn activation_follows_sole_admitted_window_without_ax_main_window() {
 }
 
 #[test]
+fn activation_follows_sole_admitted_window_when_ax_reports_an_overlay() {
+    let (mut apps, mut reactor, space, main, _) = pending_activation_context();
+    let overlay = WindowId::new(main.pid, 2);
+    let mut info = make_window(2);
+    (info.is_standard, info.is_root) = (false, false);
+    reactor.handle_event(Event::WindowCreated(overlay, info, None, None));
+    reactor.handle_event(Event::ApplicationMainWindowChanged(
+        main.pid,
+        Some(overlay),
+        Quiet::No,
+    ));
+
+    reactor.handle_event(Event::ApplicationActivated(main.pid, Quiet::No));
+    assert_eq!(
+        reactor.layout_manager.layout_engine.workspaces().active_workspace_idx(space),
+        Some(0)
+    );
+    assert_eq!(reactor.layout_manager.layout_engine.focused_window(), Some(main));
+    apps.simulate_until_quiet(&mut reactor);
+}
+
+#[test]
 fn activation_follows_ax_restored_window_on_inactive_workspace() {
     for stale_metadata in [false, true] {
         let (mut apps, mut reactor, space, main, _) = pending_activation_context();

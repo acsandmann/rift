@@ -63,7 +63,12 @@ pub(super) fn menu_bar(ui: Ui, model: &Rc<Model>) -> Page {
     let preview_caption = Rc::new(Caption::new(&ui, ""));
     f.sync_when(
         &preview_caption,
-        |s| (s.settings.ui.menu_bar.enabled, s.settings.ui.menu_bar.current_display_only),
+        |s| {
+            (
+                s.settings.ui.menu_bar.enabled,
+                s.settings.ui.menu_bar.current_display_only,
+            )
+        },
         |caption, (enabled, current_display_only)| {
             caption.set_text(if !enabled {
                 "Turn on the indicator to see workspace information in your menu bar."
