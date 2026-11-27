@@ -354,6 +354,24 @@ pub fn running_apps(bundle: Option<String>) -> impl Iterator<Item = (pid_t, AppI
         })
 }
 
+/// The running apps with the regular activation policy that have finished
+/// launching. Unlike `running_apps`, it observes no other app.
+pub fn regular_apps() -> impl Iterator<Item = (pid_t, AppInfo)> {
+    NSWorkspace::sharedWorkspace()
+        .runningApplications()
+        .into_iter()
+        .filter_map(|app| {
+            (app.activationPolicy() == NSApplicationActivationPolicy::Regular
+                && app.isFinishedLaunching()
+                && !app.isTerminated())
+            .then(|| (app.pid(), AppInfo::from(&*app)))
+        })
+}
+
+pub fn is_running(pid: pid_t) -> bool {
+    NSRunningApplication::with_process_id(pid).is_some_and(|app| !app.isTerminated())
+}
+
 /// Check one bundle identity without producing a process inventory.
 ///
 /// Persistence uses this only to decide whether a stale saved window still has a running
