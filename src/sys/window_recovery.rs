@@ -146,7 +146,7 @@ mod tests {
                 } else {
                     HideCorner::BottomRight
                 };
-                let parked = HiddenWindowPlacement::calculate(
+                let (parked, _) = HiddenWindowPlacement::calculate(
                     screen,
                     rect(0.0, 0.0, 1100.0, 900.0),
                     corner,

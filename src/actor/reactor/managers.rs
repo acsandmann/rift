@@ -6,6 +6,7 @@ use rift_protocol::StackInfo;
 use tracing::trace;
 
 use super::changes::SpaceChange;
+use super::parking_occluders::{ParkingOccluders, strip};
 use super::replay::Record;
 use super::{AppState, Changes, Event, Presentation, WorkspaceSwitchOrigin};
 use crate::actor;
@@ -205,6 +206,7 @@ pub struct RecordingManager {
 /// Manages layout engine state
 pub struct LayoutManager {
     pub layout_engine: LayoutEngine,
+    pub(super) parking_occluders: ParkingOccluders,
 }
 
 pub(super) use crate::model::hidden_window_placement::ScrollingDisplayBounds;
@@ -358,7 +360,10 @@ impl LayoutManager {
                 change,
                 placed: 0,
             };
+            let mut strips = [None::<CGRect>; 4];
             if has_windows {
+                let physical = reactor.layout_manager.parking_occluders.physical_bounds(screen);
+                let windows = &reactor.state.windows;
                 let display_uuid = screen.display_uuid_opt();
                 let gaps = reactor.config.settings.layout.gaps.effective_for_display(display_uuid);
                 // Accepted topology owns display information. Geometry uses it without
@@ -376,6 +381,28 @@ impl LayoutManager {
                     all_screen_frames,
                     collect_groups.then_some(&mut update.groups),
                     matches!(presentation, Presentation::Instant | Presentation::Force),
+                    |wid, location, target| {
+                        if Some(wid) == skip_wid
+                            || !windows.can_place_window(wid)
+                            || !windows
+                                .record(wid)
+                                .is_some_and(|record| record.pending_transfer().is_none())
+                        {
+                            return;
+                        }
+                        if let Some(frame) = strip(
+                            location,
+                            target.round(),
+                            screen.frame,
+                            physical,
+                            screen.backing_scale,
+                        ) {
+                            let slot = &mut strips[location.index()];
+                            if slot.is_none_or(|old| old.size.height < frame.size.height) {
+                                *slot = Some(frame);
+                            }
+                        }
+                    },
                 );
                 let engine = &reactor.layout_manager.layout_engine;
                 let bounds = (engine.active_layout_mode_at(space) == LayoutMode::Scrolling)
@@ -397,6 +424,7 @@ impl LayoutManager {
                 update.frames = layout;
                 update.bounds = bounds;
             }
+            reactor.layout_manager.parking_occluders.reconcile(screen, space, strips);
             if let Some(slot) = inline.iter_mut().find(|slot| slot.is_none()) {
                 *slot = Some(update);
             } else {

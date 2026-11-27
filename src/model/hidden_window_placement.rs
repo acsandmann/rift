@@ -1,4 +1,4 @@
-use objc2_core_foundation::{CGPoint, CGRect, CGSize};
+use objc2_core_foundation::{CGPoint, CGRect};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum HideCorner {
@@ -78,6 +78,18 @@ impl ScrollingDisplayBounds {
     }
 }
 
+#[derive(Clone, Copy)]
+pub(crate) struct ParkingLocation {
+    pub corner: HideCorner,
+    pub bottom: bool,
+}
+
+impl ParkingLocation {
+    pub(crate) fn index(self) -> usize {
+        2 * usize::from(self.bottom) + usize::from(self.corner == HideCorner::BottomRight)
+    }
+}
+
 /// Pure geometry used to place inactive-workspace windows just offscreen.
 pub struct HiddenWindowPlacement;
 
@@ -99,12 +111,12 @@ impl HiddenWindowPlacement {
         width * height
     }
 
-    pub fn calculate(
+    pub(crate) fn calculate(
         screen: CGRect,
         window: CGRect,
         preferred_corner: HideCorner,
         other_screens: &[CGRect],
-    ) -> CGRect {
+    ) -> (CGRect, ParkingLocation) {
         let overlap = |candidate: &CGRect| {
             other_screens
                 .iter()
@@ -115,22 +127,24 @@ impl HiddenWindowPlacement {
         // A bottom corner lands on any display stacked below; parking just past the
         // side edge, top-aligned and no taller than the display, avoids that.
         let corners = [preferred_corner, preferred_corner.opposite()];
-        let bottom = corners.map(|corner| Self::rect_for_corner(screen, window, corner));
-        let side = bottom.map(|rect| {
-            CGRect::new(
-                CGPoint::new(rect.origin.x, screen.origin.y),
-                CGSize::new(window.size.width, window.size.height.min(screen.size.height)),
-            )
-        });
-        bottom
+        [true, false]
             .into_iter()
-            .chain(side)
+            .flat_map(|bottom| {
+                corners.map(|corner| {
+                    let mut frame = Self::rect_for_corner(screen, window, corner);
+                    if !bottom {
+                        frame.origin.y = screen.origin.y;
+                        frame.size.height = window.size.height.min(screen.size.height);
+                    }
+                    (frame, ParkingLocation { corner, bottom })
+                })
+            })
             // Score each candidate once; a comparator otherwise rescans all
             // displays for the current best candidate on every comparison.
-            .map(|candidate| (candidate, overlap(&candidate)))
+            .map(|candidate| (candidate, overlap(&candidate.0)))
             .min_by(|(_, a), (_, b)| a.total_cmp(b))
             .map(|(candidate, _)| candidate)
-            .unwrap_or(window)
+            .expect("four parking candidates")
     }
 
     pub fn is_hidden(screen: CGRect, window: CGRect, other_screens: &[CGRect]) -> bool {
@@ -144,7 +158,7 @@ impl HiddenWindowPlacement {
             || visible_height <= Self::VISIBLE_THRESHOLD_PX
             || [HideCorner::BottomLeft, HideCorner::BottomRight]
                 .into_iter()
-                .any(|corner| Self::calculate(screen, window, corner, other_screens) == window)
+                .any(|corner| Self::calculate(screen, window, corner, other_screens).0 == window)
     }
 }
 
@@ -183,7 +197,7 @@ mod tests {
 
     #[test]
     fn anchors_to_requested_corner() {
-        let hidden = HiddenWindowPlacement::calculate(
+        let (hidden, _) = HiddenWindowPlacement::calculate(
             rect(0.0, 0.0, 1000.0, 800.0),
             rect(10.0, 20.0, 200.0, 100.0),
             HideCorner::BottomRight,
@@ -195,7 +209,7 @@ mod tests {
     #[test]
     fn avoids_an_adjacent_monitor() {
         let screen = rect(0.0, 0.0, 1000.0, 800.0);
-        let hidden = HiddenWindowPlacement::calculate(
+        let (hidden, _) = HiddenWindowPlacement::calculate(
             screen,
             rect(0.0, 0.0, 200.0, 100.0),
             HideCorner::BottomRight,
@@ -209,7 +223,7 @@ mod tests {
         let upper = rect(81.0, -1049.0, 1920.0, 1049.0);
         let lower = rect(0.0, 40.0, 2056.0, 1289.0);
         let window = rect(16.0, 100.0, 1007.0, 1219.0);
-        let hidden =
+        let (hidden, _) =
             HiddenWindowPlacement::calculate(upper, window, HideCorner::BottomRight, &[lower]);
         assert_eq!(hidden, rect(2000.0, -1049.0, 1007.0, 1049.0));
         assert!(HiddenWindowPlacement::is_hidden(upper, hidden, &[lower]));

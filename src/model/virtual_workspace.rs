@@ -2889,7 +2889,8 @@ mod tests {
         let screen = CGRect::new(CGPoint::new(0.0, 0.0), CGSize::new(100.0, 100.0));
         let frame = CGRect::new(CGPoint::new(20.0, 37.0), CGSize::new(30.0, 20.0));
 
-        let hidden = HiddenWindowPlacement::calculate(screen, frame, HideCorner::BottomRight, &[]);
+        let (hidden, _) =
+            HiddenWindowPlacement::calculate(screen, frame, HideCorner::BottomRight, &[]);
 
         assert_eq!(hidden.origin.y, screen.max().y - 1.0);
         assert_eq!(hidden.origin.x, screen.max().x - 1.0);
@@ -2901,9 +2902,10 @@ mod tests {
         let right_neighbor = CGRect::new(CGPoint::new(100.0, 0.0), CGSize::new(100.0, 100.0));
         let frame = CGRect::new(CGPoint::new(20.0, 25.0), CGSize::new(30.0, 20.0));
 
-        let hidden = HiddenWindowPlacement::calculate(primary, frame, HideCorner::BottomRight, &[
-            right_neighbor,
-        ]);
+        let (hidden, _) =
+            HiddenWindowPlacement::calculate(primary, frame, HideCorner::BottomRight, &[
+                right_neighbor,
+            ]);
 
         assert_eq!(hidden.origin.y, primary.max().y - 1.0);
         assert_eq!(hidden.origin.x, primary.origin.x - frame.size.width + 1.0);

@@ -2889,6 +2889,7 @@ impl LayoutEngine {
             all_screens,
             None,
             false,
+            |_, _, _| {},
         )
     }
 
@@ -2903,6 +2904,7 @@ impl LayoutEngine {
         all_screens: &[CGRect],
         groups: Option<&mut Vec<GroupContainerInfo>>,
         finish_scrolling: bool,
+        mut parked: impl FnMut(WindowId, crate::model::hidden_window_placement::ParkingLocation, CGRect),
     ) -> Vec<(WindowId, CGRect)>
     where
         F: Fn(WindowId) -> Option<CGRect>,
@@ -3037,12 +3039,15 @@ impl LayoutEngine {
 
             let reference_frame = original_frame
                 .unwrap_or_else(|| CGRect::new(screen.origin, CGSize::new(500.0, 500.0)));
-            let hidden_rect = HiddenWindowPlacement::calculate(
+            let (hidden_rect, location) = HiddenWindowPlacement::calculate(
                 screen,
                 reference_frame,
                 HideCorner::BottomRight,
                 all_screens,
             );
+            if !window_store.is_temporarily_unavailable(wid) {
+                parked(wid, location, hidden_rect);
+            }
             positions.insert(wid, hidden_rect);
         }
 

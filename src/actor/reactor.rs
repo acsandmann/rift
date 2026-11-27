@@ -13,6 +13,7 @@ pub(crate) use crate::layout_engine::WorkspaceDropRequest as OverviewDrop;
 mod main_window;
 mod managers;
 mod native_tabs;
+mod parking_occluders;
 mod query;
 mod replay;
 pub mod transaction_manager;
@@ -493,7 +494,10 @@ impl Reactor {
             one_space,
             binding_mode: "default".into(),
             app_manager: managers::AppManager::new(),
-            layout_manager: managers::LayoutManager { layout_engine },
+            layout_manager: managers::LayoutManager {
+                layout_engine,
+                parking_occluders: Default::default(),
+            },
             state: RiftState::default(),
             space_state: ForwardedSpaceState::default(),
             last_screen_frames: HashMap::default(),
@@ -576,6 +580,9 @@ impl Reactor {
         for space in spaces.iter().flatten().copied() {
             self.active_spaces.insert(space);
         }
+        self.layout_manager
+            .parking_occluders
+            .retire(&self.space_state.screens, &self.active_spaces);
     }
 
     fn is_space_active(&self, space: SpaceId) -> bool { self.active_spaces.contains(&space) }
@@ -2397,6 +2404,7 @@ impl Reactor {
                     println!("Could not save master file; Rift is still running: {error}");
                     return Ok(());
                 }
+                self.layout_manager.parking_occluders.clear();
                 std::process::exit(0);
             }
             Event::Command(Command::Reactor(ReactorCommand::SaveLayout { path })) => {
@@ -3558,6 +3566,9 @@ impl Reactor {
 
         self.refocus_manager.stale_cleanup_state = StaleCleanupState::Enabled;
         let previous_screens = std::mem::replace(&mut self.space_state.screens, screens);
+        self.layout_manager
+            .parking_occluders
+            .update_displays(&self.space_state.screens, &self.active_spaces);
         // macOS may resize windows without AX notifications during display changes.
         // Reapply the complete layout even when cached frames still match.
         let force_frames = display_set_changed
@@ -5887,6 +5898,9 @@ impl Reactor {
         };
         if self.is_mission_control_active() == active {
             return;
+        }
+        if active {
+            self.layout_manager.parking_occluders.clear();
         }
         self.mission_control_manager.mission_control_state = new_state;
         self.update_focus_follows_mouse_state();
