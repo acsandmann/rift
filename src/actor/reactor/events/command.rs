@@ -18,11 +18,16 @@ impl Reactor {
         let multiple;
         let visible_space_frames;
         let visible_spaces = if self.active_spaces.len() <= 1 {
-            single = self
-                .iter_active_spaces()
-                .next()
-                .filter(|&space| self.space_state.screen_by_space(space).is_some());
-            visible_space_frames = HashMap::default();
+            let space_frame = self.iter_active_spaces().next().and_then(|space| {
+                self.space_state.screen_by_space(space).map(|screen| (space, screen.frame))
+            });
+            single = space_frame.map(|(space, _)| space);
+            visible_space_frames =
+                if matches!(cmd, LayoutCommand::ToggleWindowFloatingWithOptions(_)) {
+                    space_frame.into_iter().collect()
+                } else {
+                    HashMap::default()
+                };
             single.as_slice()
         } else {
             (multiple, visible_space_frames) = self.visible_spaces_for_layout();

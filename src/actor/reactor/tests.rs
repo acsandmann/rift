@@ -1991,6 +1991,24 @@ fn reactor_with_window_on_space1_two_displays() -> (
     (reactor, wid, wsid, space1, space2, initial_frame, screen2)
 }
 
+#[test]
+fn floating_options_center_and_resize_window_on_single_display() {
+    let (mut reactor, wid, _, space, _, _) = reactor_with_window_on_space1();
+    reactor.handle_test_layout_event(LayoutEvent::WindowAdded(space, wid));
+    reactor.handle_test_layout_event(LayoutEvent::WindowFocused(space, wid));
+    reactor.handle_test_layout_command(LayoutCommand::ToggleWindowFloatingWithOptions(
+        rift_protocol::ToggleWindowFloatingOptions {
+            center: true,
+            size: Some(rift_protocol::FloatingWindowSize::Dimensions { w: 640., h: 480. }),
+        },
+    ));
+
+    assert_eq!(
+        reactor.state.windows.window(wid).unwrap().frame_monotonic,
+        CGRect::new(CGPoint::new(400., 210.), CGSize::new(640., 480.)),
+    );
+}
+
 fn reactor_with_floating_window() -> (Reactor, WindowId, SpaceId, CGRect, CGRect) {
     let (mut reactor, wid, _wsid, space1, _space2, screen) = reactor_with_window_on_space1();
     reactor.handle_test_layout_event(LayoutEvent::WindowAdded(space1, wid));
