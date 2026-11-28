@@ -270,6 +270,7 @@ fn bootout(target: &str) -> io::Result<()> {
 
 pub fn service_install_internal(plist_path: &Path) -> io::Result<()> {
     let plist = plist_contents()?;
+    crate::ui::onboarding::register_service_install()?;
     write_file_atomic(plist_path, &plist)?;
     Ok(())
 }
