@@ -3020,6 +3020,16 @@ impl LayoutEngine {
             }
         }
 
+        // Lay out each inactive workspace so its windows are resized as they are parked.
+        let active = self.workspaces.active_workspace(space);
+        let mut tile_sizes = HashMap::default();
+        for id in self.workspaces.workspace_ids(space) {
+            if Some(id) != active {
+                let frames = self.calculate_workspace_layout(space, id, screen, gaps, stack_line);
+                tile_sizes.extend(frames.into_iter().map(|(wid, frame)| (wid, frame.size)));
+            }
+        }
+
         let hidden_windows = self.workspaces.windows_in_inactive_workspaces(window_store, space);
         for wid in hidden_windows {
             let original_frame = get_window_frame(wid);
@@ -3037,8 +3047,13 @@ impl LayoutEngine {
                 );
             }
 
-            let reference_frame = original_frame
+            let mut reference_frame = original_frame
                 .unwrap_or_else(|| CGRect::new(screen.origin, CGSize::new(500.0, 500.0)));
+            if !self.floating.is_floating(wid)
+                && let Some(&size) = tile_sizes.get(&wid)
+            {
+                reference_frame.size = size;
+            }
             let (hidden_rect, location) = HiddenWindowPlacement::calculate(
                 screen,
                 reference_frame,
