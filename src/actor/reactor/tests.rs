@@ -4264,6 +4264,47 @@ fn stacking_dispatches_before_final_focus() {
 }
 
 #[test]
+fn move_and_follow_retiles_the_source_before_parking_it() {
+    let (mut apps, mut reactor) = test_context_with_workspace_count(2);
+    let screen = CGRect::new(CGPoint::ZERO, CGSize::new(1000., 800.));
+    let space = SpaceId::new(1);
+    apps.make_app_and_settle_on_screen(&mut reactor, screen, space, 1, make_windows(3));
+    reactor.handle_test_layout_command(LayoutCommand::SetWorkspaceLayout {
+        workspace: None,
+        mode: LayoutMode::Bsp,
+    });
+    apps.simulate_until_quiet(&mut reactor);
+    let a = WindowId::new(1, 1);
+    let b = WindowId::new(1, 2);
+    // C already lives at the destination.
+    reactor.handle_test_layout_command(LayoutCommand::MoveWindowToWorkspace {
+        workspace: WorkspaceSelector::Index(1),
+        follow: false,
+        window_id: Some(3),
+    });
+    apps.simulate_until_quiet(&mut reactor);
+    let before = apps.windows[&a].frame;
+    reactor.handle_test_layout_command(LayoutCommand::MoveWindowToWorkspace {
+        workspace: WorkspaceSelector::Index(1),
+        follow: true,
+        window_id: Some(2),
+    });
+    apps.simulate_until_quiet(&mut reactor);
+    let spaces = reactor.query_workspaces(Some(space));
+    assert!(spaces[1].is_active);
+    let parked = apps.windows[&a].frame;
+    assert!(parked.intersection(&screen).size.width <= 1.);
+    assert!(apps.windows[&b].frame.intersection(&screen).size.width > 1.);
+    assert!(
+        parked.size != before.size,
+        "source window kept its old tile: {parked:?}"
+    );
+    reactor.handle_test_layout_command(LayoutCommand::SwitchToWorkspace(0));
+    apps.simulate_until_quiet(&mut reactor);
+    assert_eq!(parked.size, apps.windows[&a].frame.size);
+}
+
+#[test]
 fn workspace_switch_batches_all_window_positions_with_eui_enabled() {
     let (mut apps, mut reactor) = test_context();
     let screen = CGRect::new(CGPoint::new(0., 0.), CGSize::new(1000., 1000.));
