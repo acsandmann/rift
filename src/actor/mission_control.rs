@@ -274,6 +274,14 @@ impl MissionControlActor {
                     {
                         for _ in 0..32 {
                             let Ok((next_span, next)) = self.rx.try_recv() else { break };
+                            // Tab still wraps when directional movement stops at the edges.
+                            if self.settings.prevent_wrapping
+                                && (matches!(event, Event::Input(Input::Cycle(_)))
+                                    || matches!(next, Event::Input(Input::Cycle(_))))
+                            {
+                                pending_event = Some((next_span, next));
+                                break;
+                            }
                             if let Err(next) = merge_motion(&mut event, next) {
                                 pending_event = Some((next_span, next));
                                 break;

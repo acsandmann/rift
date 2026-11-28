@@ -1088,6 +1088,10 @@ pub struct MissionControlSettings {
         enabled_by = "enabled"
     )]
     pub activate_on_hotkey_release: bool,
+    /// Stop directional window selection at the first and last windows in Overview.
+    #[serde(default)]
+    #[setting(label = "Stop at first and last window", enabled_by = "enabled")]
+    pub prevent_wrapping: bool,
     /// Include workspaces without windows in Overview.
     #[serde(default = "yes")]
     #[setting(label = "Show empty workspaces", enabled_by = "enabled")]

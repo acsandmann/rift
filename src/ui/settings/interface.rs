@@ -293,7 +293,11 @@ pub(super) fn overview(ui: Ui, model: &Rc<Model>) -> Page {
     f.enabled(&duration, |s| {
         s.settings.ui.mission_control.enabled && s.settings.ui.mission_control.fade_enabled
     });
-    let mut shortcuts = Section::new(&ui, "Keyboard Shortcuts");
+    let mut shortcuts = Section::new(&ui, "Keyboard Shortcuts").row(f.field(
+        "prevent_wrapping",
+        |s| &s.settings.ui.mission_control,
+        |s| &mut s.settings.ui.mission_control,
+    ));
     for (action, label) in OVERVIEW_SHORTCUTS {
         let controls = Rc::new(VStack::new(&ui).spacing(4.));
         let message = Rc::new(ValidationMessage::new(&ui));

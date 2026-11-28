@@ -1732,6 +1732,7 @@ pub struct OverviewSession {
     reveal: Option<Instant>,
     show_empty: bool,
     hide_toolbar: bool,
+    prevent_wrapping: bool,
     shared: bool,
     duration: f64,
     fade_duration: f64,
@@ -1810,6 +1811,7 @@ impl OverviewSession {
             previews: false,
             show_empty: settings.show_empty_workspaces,
             hide_toolbar: settings.hide_toolbar,
+            prevent_wrapping: settings.prevent_wrapping,
             shared,
             duration: settings.fade_duration_ms.max(1.) / 1000.,
             fade_duration: if settings.fade_enabled {
@@ -2983,10 +2985,19 @@ impl OverviewSession {
                     _ => -1,
                 };
                 let count = windows.len() as i64;
-                let next = match current {
-                    Some(index) => (index as i64 + steps % count).rem_euclid(count),
-                    None => (steps - steps.signum()).rem_euclid(count),
+                let stop_at_edge = self.prevent_wrapping && !matches!(input, Input::Cycle(_));
+                let next = if stop_at_edge {
+                    let start = current.map_or(if steps < 0 { count } else { -1 }, |i| i as i64);
+                    start.saturating_add(steps).clamp(0, count - 1)
+                } else {
+                    match current {
+                        Some(index) => (index as i64 + steps % count).rem_euclid(count),
+                        None => (steps - steps.signum()).rem_euclid(count),
+                    }
                 } as usize;
+                if stop_at_edge && current == Some(next) {
+                    return None;
+                }
                 self.select(windows[next]);
             }
             _ => {}

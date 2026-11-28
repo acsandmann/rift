@@ -213,6 +213,8 @@ vertical = 0
 # Activate the selected window/workspace after releasing the opening hotkey and all modifiers.
 # Leave false to keep Overview open until a click or Enter.
 activate_on_hotkey_release = false
+# Stop directional window selection at the first and last windows.
+prevent_wrapping = false
 # enable a niri style overview
 enabled = false
 # Include empty workspaces as navigation and drag destinations.
