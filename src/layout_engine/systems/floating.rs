@@ -2,7 +2,7 @@ use objc2_core_foundation::{CGPoint, CGRect, CGSize};
 use rift_protocol::DirectionalDistance;
 use serde::{Deserialize, Serialize};
 
-use super::groups::GroupLayouts;
+use super::groups::{GroupLayouts, Seat};
 use super::{
     EditResult, Focus, FocusResult, GroupEdit, LayoutEdit, LayoutSystem, WindowChange,
     WindowLayoutConstraints, WindowQuery,
@@ -160,12 +160,11 @@ impl FloatingLayoutSystem {
 
     pub(crate) fn cycle_windows(&self, layout: LayoutId) -> Vec<WindowId> {
         if let Some((node, _)) = self.groups.focused_leaf(layout)
-            && let Some(parent) = node.parent(self.groups.map())
-            && self.groups.layout(parent).is_stacked()
+            && let Some(stack) = self.groups.seat(node).stack()
         {
             return self
                 .groups
-                .windows_from(parent, Some(parent), true)
+                .windows_from(stack, Some(stack), true)
                 .filter(|&window| self.window_participates(window))
                 .collect();
         }
@@ -221,34 +220,32 @@ impl FloatingLayoutSystem {
 
     fn focus_target(&self, layout: LayoutId, direction: Direction) -> Option<WindowId> {
         let (node, focused) = self.groups.focused_leaf(layout)?;
-        let parent = node.parent(self.groups.map())?;
-        let kind = self.groups.layout(parent);
-        let forward = matches!(direction, Direction::Right | Direction::Down);
-        let map = self.groups.map();
-        let stack_target = if kind.is_stacked() {
-            let next = node.step(parent, map, forward);
-            self.groups.windows_from(parent, next, forward).next()
-        } else {
-            None
+        let neighbor = || {
+            self.directional_window(layout, focused, direction, None)
+                .map(|(_, window)| window)
         };
-        // Walk hidden members along the stack axis, then try physical neighbors.
-        if kind.orientation() == direction.orientation() && stack_target.is_some() {
-            return stack_target;
-        }
-        self.directional_window(layout, focused, direction, None)
-            .map(|(_, window)| window)
-            .or(stack_target)
-            .or_else(|| {
-                if !kind.is_stacked() {
-                    return None;
+        match self.groups.seat(node) {
+            Seat::Root => None,
+            Seat::Pane { .. } => neighbor(),
+            Seat::Tab { stack, orientation } => {
+                let forward = matches!(direction, Direction::Right | Direction::Down);
+                let map = self.groups.map();
+                let next = node.step(stack, map, forward);
+                let stack_target = self.groups.windows_from(stack, next, forward).next();
+                // Walk hidden members along the stack axis, then try physical neighbors.
+                if orientation == direction.orientation() && stack_target.is_some() {
+                    return stack_target;
                 }
-                let start = if forward {
-                    parent
-                } else {
-                    parent.last_descendant(map)
-                };
-                self.groups.windows_from(parent, Some(start), forward).next()
-            })
+                neighbor().or(stack_target).or_else(|| {
+                    let start = if forward {
+                        stack
+                    } else {
+                        stack.last_descendant(map)
+                    };
+                    self.groups.windows_from(stack, Some(start), forward).next()
+                })
+            }
+        }
     }
 
     fn default_frame(screen: CGRect, limits: WindowLayoutConstraints) -> CGRect {
@@ -372,10 +369,7 @@ impl FloatingLayoutSystem {
         for info in occurrences {
             let node = info.node;
             // The outermost stack contains all members that share this frame.
-            let stack = node
-                .ancestors(self.groups.map())
-                .filter(|parent| self.groups.layout(*parent).is_stacked())
-                .last();
+            let stack = self.groups.enclosing_stacks(node).last();
             if let Some(stack) = stack {
                 for member in self.groups.windows_from(stack, Some(stack), true) {
                     self.geometry.entry(member).or_default().frame = Some(frame);
@@ -661,10 +655,7 @@ impl FloatingLayoutSystem {
     ) -> Vec<WindowId> {
         let focused = self.groups.selected_window(layout);
         let selection = self.groups.selection(layout);
-        let container = selection
-            .ancestors(self.groups.map())
-            .find(|node| self.groups.layout(*node).is_stacked());
-        let Some(container) = container else {
+        let Some(container) = self.groups.own_or_enclosing_stack(selection) else {
             return Vec::new();
         };
         let visible = self.groups.unstack_parent_of_selection(layout, default_orientation);

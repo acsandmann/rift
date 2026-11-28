@@ -135,6 +135,43 @@ pub(super) fn deserialize_tile_tree<'de, D: serde::Deserializer<'de>>(
     })
 }
 
+/// Where a node sits in the tree: the one place that reads a node's parent to decide whether it
+/// is a tab of a stack or a pane of a split.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) enum Seat {
+    /// The node has no parent: it is a layout root.
+    Root,
+    /// One tab of `stack`, shown only while it is the stack's selected child. The stack offsets
+    /// its tabs along `orientation`.
+    Tab {
+        stack: NodeId,
+        orientation: Orientation,
+    },
+    /// One pane of `split`, laid out beside its siblings along `orientation`.
+    Pane {
+        split: NodeId,
+        orientation: Orientation,
+    },
+}
+
+impl Seat {
+    /// The stack this node is a tab of.
+    pub(super) fn stack(self) -> Option<NodeId> {
+        match self {
+            Seat::Tab { stack, .. } => Some(stack),
+            Seat::Pane { .. } | Seat::Root => None,
+        }
+    }
+
+    /// The axis this node and its siblings line up along, a stack's or a split's alike.
+    pub(super) fn axis(self) -> Option<Orientation> {
+        match self {
+            Seat::Tab { orientation, .. } | Seat::Pane { orientation, .. } => Some(orientation),
+            Seat::Root => None,
+        }
+    }
+}
+
 #[derive(Clone, Copy)]
 enum BranchLimit {
     All,
@@ -286,27 +323,19 @@ impl GroupLayouts {
         if !self.inactive.is_empty() && self.find_best_focus_target(self.root(layout)).is_none() {
             return EditResult::Unchanged;
         }
-        use crate::layout_engine::LayoutKind;
-
-        let map = self.map();
-        let selection_node = self.selection(layout);
-
-        let target_node = match selection_node.parent(map) {
-            Some(p) => p,
-            None => self.root(layout),
+        let (target_node, orientation) = match self.seat(self.selection(layout)) {
+            Seat::Pane { split, orientation } => (split, orientation),
+            Seat::Tab { .. } => return EditResult::Unchanged,
+            Seat::Root => {
+                let root = self.root(layout);
+                let kind = self.layout(root);
+                if kind.is_stacked() {
+                    return EditResult::Unchanged;
+                }
+                (root, kind.orientation())
+            }
         };
-
-        let current_kind = self.layout(target_node);
-
-        if current_kind.is_group() {
-            return EditResult::Unchanged;
-        }
-
-        let new_kind = match current_kind {
-            LayoutKind::Horizontal => LayoutKind::Vertical,
-            LayoutKind::Vertical => LayoutKind::Horizontal,
-            other => other,
-        };
+        let new_kind = LayoutKind::from(perpendicular(orientation));
 
         // Split weights are axis-independent. Rotating a container should preserve the
         // user's ratios; `rebalance` is the explicit operation that resets them.
@@ -530,10 +559,8 @@ impl GroupLayouts {
     }
 
     pub(super) fn move_over(&self, from: NodeId, direction: Direction) -> Option<NodeId> {
-        let Some(parent) = from.parent(&self.tree.map) else {
-            return None;
-        };
-        if self.tree.map.kind(parent).orientation() != direction.orientation() {
+        // A stack is crossed tab by tab along its own axis, like a split.
+        if self.seat(from).axis() != Some(direction.orientation()) {
             return None;
         }
         let sibling = |node: NodeId| match direction {
@@ -618,15 +645,13 @@ impl GroupLayouts {
     }
 
     fn stack_members(&self, layout: LayoutId, window: WindowId) -> Vec<WindowId> {
-        let Some(parent) =
-            self.window_node(layout, window).and_then(|node| node.parent(self.map()))
-        else {
+        let Some(node) = self.window_node(layout, window) else {
             return Vec::new();
         };
-        if !self.layout(parent).is_group() {
+        let Some(stack) = self.seat(node).stack() else {
             return Vec::new();
-        }
-        parent.children(self.map()).filter_map(|node| self.window_at(node)).collect()
+        };
+        stack.children(self.map()).filter_map(|node| self.window_at(node)).collect()
     }
 
     pub(super) fn descend_selection(&mut self, layout: LayoutId) -> bool {
@@ -654,8 +679,8 @@ impl GroupLayouts {
             let mut highest_revealed = focus_node;
             let mut node = focus_node;
             while let Some(parent) = node.parent(&self.tree.map) {
-                let is_group = self.layout(parent).is_group();
-                if self.tree.map.select_locally(node) && is_group {
+                let is_tab = matches!(self.seat_under(Some(parent)), Seat::Tab { .. });
+                if self.tree.map.select_locally(node) && is_tab {
                     highest_revealed = node;
                 }
                 node = parent;
@@ -698,16 +723,52 @@ impl GroupLayouts {
         self.visible_windows_under_internal(container)
     }
 
+    /// Where `node` sits: a tab of a stack, a pane of a split, or a layout root.
+    pub(super) fn seat(&self, node: NodeId) -> Seat { self.seat_under(node.parent(self.map())) }
+
+    /// Where a child of `parent` sits, for walks that already hold each node's parent.
+    pub(super) fn seat_under(&self, parent: Option<NodeId>) -> Seat {
+        let Some(parent) = parent else {
+            return Seat::Root;
+        };
+        let kind = self.layout(parent);
+        let orientation = kind.orientation();
+        if kind.is_stacked() {
+            Seat::Tab { stack: parent, orientation }
+        } else {
+            Seat::Pane { split: parent, orientation }
+        }
+    }
+
+    /// The stacks around `node`, nearest first: each stack that `node` or one of its ancestors
+    /// is a tab of.
+    pub(super) fn enclosing_stacks(&self, node: NodeId) -> impl Iterator<Item = NodeId> + '_ {
+        node.ancestors_with_parent(self.map())
+            .filter_map(|(_, parent)| self.seat_under(parent).stack())
+    }
+
+    /// Whether `node` is a stack. Every node stores a layout kind, but only a container's means
+    /// anything.
+    pub(super) fn is_stack(&self, node: NodeId) -> bool {
+        self.window_at(node).is_none() && self.layout(node).is_stacked()
+    }
+
+    /// `node` itself if it is a stack, else the nearest stack around it.
+    pub(super) fn own_or_enclosing_stack(&self, node: NodeId) -> Option<NodeId> {
+        if self.is_stack(node) {
+            Some(node)
+        } else {
+            self.enclosing_stacks(node).next()
+        }
+    }
+
     fn stacked_selection_container(&self, layout: LayoutId) -> Option<NodeId> {
         let selection = self.selection(layout);
-        let stacked = |&node: &NodeId| self.layout(node).is_stacked();
-        if self.window_at(selection).is_some() {
-            selection.ancestors(self.map()).skip(1).find(stacked)
-        } else if stacked(&selection) {
-            Some(selection)
-        } else {
-            selection.children(self.map()).find(stacked)
+        if self.window_at(selection).is_none() && !self.is_stack(selection) {
+            // A selected split stands for its stacked child.
+            return selection.children(self.map()).find(|&child| self.is_stack(child));
         }
+        self.own_or_enclosing_stack(selection)
     }
 
     pub(super) fn unstack_parent_of_selection(
@@ -1056,11 +1117,11 @@ impl GroupLayouts {
 
     pub(super) fn node_is_visible(&self, node: NodeId) -> bool {
         self.window_at(node).is_some_and(|window| self.window_participates(window))
-            && node.ancestors_with_parent(self.map()).all(|(child, parent)| {
-                parent.is_none_or(|parent| {
-                    !self.layout(parent).is_stacked()
-                        || self.visible_stack_child(parent) == Some(child)
-                })
+            && node.ancestors_with_parent(self.map()).all(|(node, parent)| {
+                match self.seat_under(parent) {
+                    Seat::Tab { stack, .. } => self.visible_stack_child(stack) == Some(node),
+                    Seat::Pane { .. } | Seat::Root => true,
+                }
             })
     }
 
