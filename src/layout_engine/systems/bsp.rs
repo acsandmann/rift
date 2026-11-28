@@ -1795,11 +1795,8 @@ impl BspLayoutSystem {
         };
         self.select(next_leaf);
         let focus = self.participating_window(next_leaf);
-        // Tiled BSP windows never overlap, so only the focus target needs to be
-        // raised. Raising every visible window makes the raise manager front
-        // each app in turn (via make_key_window) before the target, which
-        // flickers the menu bar and any focus border on every focus move. The
-        // traditional engine already raises only the revealed group.
+        // The target is the participating window of its leaf. Other visible
+        // BSP leaves do not need to be brought forward during navigation.
         (focus, focus.into_iter().collect())
     }
 

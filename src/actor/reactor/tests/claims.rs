@@ -47,7 +47,7 @@ fn focus(
         .handle_event(&Event::ApplicationGloballyActivated(window.pid));
     let _ = reactor
         .main_window_tracker
-        .handle_event(&Event::WindowServerFocusChanged(window, space));
+        .handle_event(&Event::WindowServerFocusChanged(window, space, None));
     assert_eq!(reactor.main_window(), Some(window));
     input_rx
 }
@@ -449,10 +449,10 @@ fn suppression_applies_only_while_the_flagged_claim_is_focused() {
 
     // Focus moving to another window re-enables it; returning suppresses again.
     reactor.release_window(other, OWNER).unwrap();
-    reactor.handle_event(Event::WindowServerFocusChanged(other, space));
+    reactor.handle_event(Event::WindowServerFocusChanged(other, space, None));
     assert_eq!(reactor.main_window(), Some(other));
     assert!(ffm_updates(&mut rx).contains(&true));
-    reactor.handle_event(Event::WindowServerFocusChanged(window, space));
+    reactor.handle_event(Event::WindowServerFocusChanged(window, space, None));
     assert!(ffm_updates(&mut rx).contains(&false));
 
     reactor.release_claims(OWNER);
@@ -501,8 +501,8 @@ fn unclaimed_windows_do_not_refresh_focus_policy_on_focus_changes() {
     let other = WindowId::new(window.pid, 2);
     reactor.add_test_window(other, WindowServerId::new(102), Some(space), frame);
     let mut rx = focus(&mut reactor, window, space);
-    reactor.handle_event(Event::WindowServerFocusChanged(other, space));
-    reactor.handle_event(Event::WindowServerFocusChanged(window, space));
+    reactor.handle_event(Event::WindowServerFocusChanged(other, space, None));
+    reactor.handle_event(Event::WindowServerFocusChanged(window, space, None));
     assert!(ffm_updates(&mut rx).is_empty());
 }
 

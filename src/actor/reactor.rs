@@ -8,8 +8,8 @@ mod animation;
 mod changes;
 mod claims;
 mod events;
+pub(crate) mod focus;
 mod gesture;
-pub(crate) use crate::layout_engine::WorkspaceDropRequest as OverviewDrop;
 mod main_window;
 mod managers;
 mod native_tabs;
@@ -31,7 +31,9 @@ use std::cell::RefCell;
 use std::rc::Rc;
 use std::sync::Arc;
 use std::thread;
-use std::time::{Duration, Instant};
+#[cfg(test)]
+use std::time::Duration;
+use std::time::Instant;
 
 use animation::AnimationSender;
 use changes::{Changes, Presentation, SpaceChange};
@@ -39,6 +41,7 @@ use events::{
     drag as interaction_workflow, space as topology_workflow, system as system_workflow,
     window as window_workflow,
 };
+use focus::{FocusPlan, FocusState};
 use main_window::MainWindowTracker;
 use managers::LayoutManager;
 use objc2_core_foundation::{CGPoint, CGRect};
@@ -54,13 +57,13 @@ use super::input;
 use crate::actor::app::{
     AppInfo, AppThreadHandle, Quiet, Request, WindowId, WindowInfo, WindowInventoryToken, pid_t,
 };
-use crate::actor::raise_manager::{self, RaiseManager, RaiseRequest};
 use crate::actor::reactor::events::window_discovery;
 use crate::actor::spaces::ForwardedSpaceState;
 use crate::actor::wm_controller::WmEvent;
 use crate::actor::{self, menu_bar, stack_line};
 use crate::common::collections::{HashMap, HashSet};
 use crate::common::config::Config;
+pub(crate) use crate::layout_engine::WorkspaceDropRequest as OverviewDrop;
 use crate::layout_engine::{self as layout, Direction, LayoutEngine, LayoutEvent};
 use crate::model::RiftState;
 use crate::model::app_rules::{AppRuleFrame, AppRulePlacement, AppRuleResize};
@@ -115,7 +118,7 @@ impl MouseFocusPublisher {
         })
     }
 
-    fn take_latest(&self) -> Option<CGPoint> { self.0.latest.lock().take() }
+    pub(super) fn take_latest(&self) -> Option<CGPoint> { self.0.latest.lock().take() }
 }
 
 #[cfg(test)]
@@ -242,7 +245,7 @@ pub enum Event {
     /// Authoritative focus resolved from WindowServer's key-focus process and
     /// the z-ordered windows on the active native space.
     #[serde(skip)]
-    WindowServerFocusChanged(WindowId, SpaceId),
+    WindowServerFocusChanged(WindowId, SpaceId, Option<Instant>),
 
     WindowsDiscovered {
         pid: pid_t,
@@ -254,10 +257,13 @@ pub enum Event {
     #[serde(skip)]
     WindowInventoryRefreshRequested(pid_t),
     #[serde(skip)]
-    RaiseTargetsMissing {
-        windows: Vec<WindowId>,
-        sequence_id: u64,
-    },
+    FocusFailed(WindowId, u64, bool),
+    #[serde(skip)]
+    FocusAlreadyObserved(WindowId, u64),
+    #[serde(skip)]
+    StackFinished(u64),
+    #[serde(skip)]
+    FocusInput,
     WindowCreated(
         WindowId,
         WindowInfo,
@@ -343,19 +349,6 @@ pub enum Event {
     #[serde(skip)]
     MissionControlNativeExited,
 
-    /// A raise request completed. Used by the raise manager to track when
-    /// all raise requests in a sequence have finished.
-    RaiseCompleted {
-        window_id: WindowId,
-        sequence_id: u64,
-    },
-
-    /// A raise sequence timed out. Used by the raise manager to clean up
-    /// pending raises that took too long.
-    RaiseTimeout {
-        sequence_id: u64,
-    },
-
     #[serde(skip)]
     Query(query::QueryRequest),
 
@@ -404,7 +397,9 @@ pub struct Reactor {
     spaces_tx: Option<crate::actor::spaces::Sender>,
     topology_guard: crate::actor::spaces::TopologyGuard,
     main_window_tracker: MainWindowTracker,
-    pending_mouse_focus: Option<(WindowId, Instant)>,
+    focus: FocusState,
+    #[cfg(test)]
+    focus_plans: Option<actor::Sender<FocusPlan>>,
     overview_focus: Option<(SpaceId, WindowId, Instant)>,
     mouse_inventory_hit: Option<WindowServerId>,
     drag_manager: managers::DragManager,
@@ -420,7 +415,6 @@ pub struct Reactor {
     suppress_auto_workspace_switch_until_input: bool,
     pending_space_change_manager: managers::PendingSpaceChangeManager,
     transient_focus: transient_focus::TransientFocusGuard,
-    mouse_raise_token: tokio_util::sync::CancellationToken,
     active_spaces: HashSet<SpaceId>,
     startup_ready: Option<oneshot::Sender<()>>,
     pub animation_tx: Option<AnimationSender>,
@@ -468,7 +462,7 @@ impl Reactor {
         thread::Builder::new()
             .name("reactor".to_string())
             .spawn(move || {
-                Executor::run(Reactor::run(reactor, events, events_tx_clone));
+                Executor::run(Reactor::run(reactor, events));
             })
             .unwrap();
         (ReactorHandle::new(events_tx, query_handle), ready_rx)
@@ -484,7 +478,6 @@ impl Reactor {
     ) -> Reactor {
         // FIXME: Remove apps that are no longer running from restored state.
         record.start(&config, &layout_engine);
-        let (raise_manager_tx, _rx) = actor::channel();
         let (window_notify_tx, window_tx_store) = match window_notify {
             Some((tx, store)) => (Some(tx), store),
             None => (None, WindowTxStore::new()),
@@ -503,7 +496,9 @@ impl Reactor {
             last_screen_frames: HashMap::default(),
             space_activation_policy: SpaceActivationPolicy::new(),
             main_window_tracker: MainWindowTracker::default(),
-            pending_mouse_focus: None,
+            focus: FocusState::default(),
+            #[cfg(test)]
+            focus_plans: None,
             overview_focus: None,
             mouse_inventory_hit: None,
             drag_manager: managers::DragManager {
@@ -523,7 +518,6 @@ impl Reactor {
             communication_manager: managers::CommunicationManager {
                 input_tx: None,
                 stack_line_tx: None,
-                raise_manager_tx,
                 event_broadcaster: broadcast_tx,
                 wm_sender: None,
                 events_tx: None,
@@ -546,7 +540,6 @@ impl Reactor {
                 next_request_id: 0,
                 in_flight: HashMap::default(),
                 pending: HashSet::default(),
-                refocus_after_refresh: HashMap::default(),
             },
             refocus_manager: managers::RefocusManager {
                 stale_cleanup_state: StaleCleanupState::Enabled,
@@ -559,7 +552,6 @@ impl Reactor {
             spaces_tx: None,
             topology_guard: Default::default(),
             transient_focus: Default::default(),
-            mouse_raise_token: Default::default(),
             active_spaces: HashSet::default(),
             startup_ready: None,
             animation_tx: None,
@@ -671,7 +663,6 @@ impl Reactor {
     fn forget_window_inventory(&mut self, pid: pid_t) {
         self.window_inventory_manager.in_flight.remove(&pid);
         self.window_inventory_manager.pending.remove(&pid);
-        self.window_inventory_manager.refocus_after_refresh.remove(&pid);
     }
 
     fn finish_window_inventory(
@@ -1072,30 +1063,47 @@ impl Reactor {
         )
     }
 
-    async fn run(reactor: Reactor, events: Receiver, events_tx: Sender) {
-        let (raise_manager_tx, raise_manager_rx) = actor::channel();
+    async fn run(mut reactor: Reactor, events: Receiver) {
         let (animation_tx, animation_rx) = AnimationSender::channel();
+        reactor.animation_tx = Some(animation_tx);
         let reactor = Rc::new(RefCell::new(reactor));
-        let input_tx = {
-            let mut reactor = reactor.borrow_mut();
-            reactor.communication_manager.raise_manager_tx = raise_manager_tx.clone();
-            reactor.animation_tx = Some(animation_tx);
-            reactor.communication_manager.input_tx.clone()
-        };
-        let reactor_task = Self::run_reactor_loop(reactor, events);
-        let raise_manager_task = RaiseManager::run(raise_manager_rx, events_tx, input_tx);
         let presenter = std::thread::Builder::new()
             .name("rift-presenter".into())
             .spawn(move || animation::AnimationManager::run(animation_rx))
             .expect("presentation thread");
-        let _ = tokio::join!(reactor_task, raise_manager_task);
+        Self::run_reactor_loop(reactor, events).await;
         let _ = presenter.join();
     }
 
     async fn run_reactor_loop(reactor: Rc<RefCell<Reactor>>, mut events: Receiver) {
         const MAX_EVENT_BATCH: usize = 64;
 
-        while let Some((span, event)) = events.recv().await {
+        let mut stack_timer = None;
+        loop {
+            let deadline = reactor.borrow().focus.deadline();
+            let next = if let Some((generation, at)) = deadline {
+                let delay = at.saturating_duration_since(Instant::now());
+                if delay.is_zero() {
+                    reactor.borrow_mut().advance_stacking(generation, true);
+                    continue;
+                }
+                if !matches!(&stack_timer, Some((id, _)) if *id == generation) {
+                    stack_timer = Some((generation, crate::sys::timer::Timer::sleep(delay)));
+                }
+                let (_, timer) = stack_timer.as_mut().unwrap();
+                tokio::select! {
+                    biased;
+                    _ = timer => {
+                        reactor.borrow_mut().advance_stacking(generation, true);
+                        continue;
+                    }
+                    event = events.recv() => event,
+                }
+            } else {
+                stack_timer = None;
+                events.recv().await
+            };
+            let Some((span, event)) = next else { break };
             let _guard = span.enter();
             Self::handle_thread_event(&reactor, event);
             for _ in 1..MAX_EVENT_BATCH {
@@ -1360,6 +1368,13 @@ impl Reactor {
     fn handle_event(&mut self, event: Event) {
         // This signal only releases the lifecycle guard. Ordinary typing must
         // not commit camera presentations or trigger layout/focus side effects.
+        if matches!(event, Event::FocusInput) {
+            self.focus.external_input();
+            self.overview_focus = None;
+            self.suppress_auto_workspace_switch_until_input = false;
+            return;
+        }
+        self.focus.expire();
         if matches!(event, Event::KeyboardInput) {
             self.suppress_auto_workspace_switch_until_input = false;
             self.recording_manager.record.on_event(&event);
@@ -1435,6 +1450,7 @@ impl Reactor {
             | Event::TopologyInvalidated(_)
             | Event::SpaceStateChanged(_)
             | Event::SystemWoke => {
+                self.focus.external_input();
                 let windows = self.state.windows.iter_windows().map(|(wid, _)| wid).collect();
                 self.cancel_window_presentations(windows);
             }
@@ -1449,8 +1465,9 @@ impl Reactor {
                 | Event::MenuOpened(_)
                 | Event::MenuClosed(_)
                 | Event::WindowInventoryRefreshRequested(_)
-                | Event::RaiseCompleted { .. }
-                | Event::RaiseTimeout { .. }
+                | Event::FocusAlreadyObserved(..)
+                | Event::FocusFailed(..)
+                | Event::StackFinished(..)
                 | Event::ApplicationDeactivated(_)
                 | Event::ApplicationGloballyDeactivated(_)
                 | Event::SessionDidBecomeActive
@@ -1474,6 +1491,7 @@ impl Reactor {
 
         match event {
             Event::TopologyInvalidated(revision) => {
+                self.focus.external_input();
                 self.invalidate_native_topology(revision);
                 return Ok(());
             }
@@ -1484,6 +1502,7 @@ impl Reactor {
                 return Ok(());
             }
             Event::SessionDidBecomeActive => {
+                self.focus.external_input();
                 self.suppress_auto_workspace_switch_until_input = true;
                 return Ok(());
             }
@@ -1555,8 +1574,11 @@ impl Reactor {
                 return Ok(());
             }
             Event::ApplicationActivated(pid, quiet) => {
-                self.clear_menu_state_for_non_owner(pid);
-                if quiet == Quiet::No && self.main_window_tracker.is_globally_frontmost(pid) {
+                let globally_frontmost = self.main_window_tracker.is_globally_frontmost(pid);
+                if globally_frontmost {
+                    self.clear_menu_state_for_non_owner(pid);
+                }
+                if quiet == Quiet::No && globally_frontmost {
                     // Prefer the app thread's resolved main window; pending
                     // AX admission can leave the previous main window cached.
                     // AXMainWindow can be missing or point to an unmanaged overlay.
@@ -1569,8 +1591,10 @@ impl Reactor {
                             .filter(|wid| self.state.windows.is_admitted(*wid))
                             .or_else(|| self.sole_admitted_window(pid))
                     };
-                    self.auto_switch_to_window_workspace(changes, activation_window);
-                    self.reconcile_observed_focus(changes, activation_window);
+                    if self.accept_resolved_activation(changes, pid, activation_window) {
+                        self.auto_switch_to_window_workspace(changes, activation_window);
+                        self.reconcile_observed_focus(changes, activation_window);
+                    }
                 } else {
                     self.reconcile_observed_focus(changes, raised_window);
                 }
@@ -1601,7 +1625,8 @@ impl Reactor {
                 changes.refresh_notifications |= should_update_notifications;
                 return Ok(());
             }
-            Event::WindowServerFocusChanged(window, reported_space) => {
+            Event::WindowServerFocusChanged(window, reported_space, sampled_at) => {
+                let selection = self.observe_focus(changes, window, sampled_at);
                 if self.window_needs_inventory(window) {
                     // Recover stale admission before the cached-layout-focus
                     // fast path as well, without rescanning excluded windows.
@@ -1611,7 +1636,13 @@ impl Reactor {
                     && self.is_space_active(reported_space)
                     && self.space_state.screen_by_space(reported_space).is_some()
                 {
-                    self.space_state.command_space = Some(reported_space);
+                    if selection.is_some() {
+                        self.space_state.command_space = Some(reported_space);
+                    }
+                    if selection != Some(Quiet::No) {
+                        changes.space(reported_space).tabs_changed = true;
+                        return Ok(());
+                    }
                     // Same-app focus changes have no activation edge. Cross-app
                     // changes still wait for the app thread's resolved activation.
                     if previous_native_focus
@@ -1629,7 +1660,7 @@ impl Reactor {
                     }
                     return Ok(());
                 }
-                if !self.state.windows.contains_window(window) {
+                if selection != Some(Quiet::No) || !self.state.windows.contains_window(window) {
                     return Ok(());
                 }
                 if self.is_space_active(reported_space) {
@@ -1658,20 +1689,6 @@ impl Reactor {
                 self.request_window_inventory(pid);
                 return Ok(());
             }
-            Event::RaiseTargetsMissing { windows, sequence_id } => {
-                let Some(first) = windows.first() else {
-                    return Ok(());
-                };
-                self.window_inventory_manager.refocus_after_refresh.insert(first.pid, *first);
-                self.request_window_inventory(first.pid);
-                for window_id in windows {
-                    self.submit_raise(raise_manager::Event::RaiseCompleted {
-                        window_id,
-                        sequence_id,
-                    });
-                }
-                return Ok(());
-            }
             Event::WindowsDiscovered {
                 pid,
                 token,
@@ -1683,17 +1700,7 @@ impl Reactor {
                     debug!(pid, ?token, successful, "Discarding stale AX window inventory");
                     return Ok(());
                 }
-                let refocus = self
-                    .window_inventory_manager
-                    .refocus_after_refresh
-                    .remove(&pid)
-                    .filter(|target| new.iter().any(|(wid, _)| wid == target));
                 self.on_windows_discovered_with_app_info(changes, pid, new, known_visible, None);
-                if let Some(space) =
-                    refocus.and_then(|window| self.assigned_space_for_window_id(window))
-                {
-                    changes.arrange(Some(space), Presentation::Animated);
-                }
                 self.reconcile_observed_focus(changes, raised_window);
                 return Ok(());
             }
@@ -1990,7 +1997,9 @@ impl Reactor {
             }
             Event::ActiveDisplayChanged { menu_bar_space, command_space } => {
                 self.space_state.menu_bar_space = menu_bar_space;
-                self.space_state.command_space = command_space;
+                if self.focus.pending().is_none() {
+                    self.space_state.command_space = command_space;
+                }
                 return Ok(());
             }
             Event::DragMotion(motion) => {
@@ -2222,11 +2231,11 @@ impl Reactor {
                     return Ok(());
                 }
                 let window = self.state.windows.tracked_window_id(wsid);
-                if window.is_some_and(|window| {
-                    self.pending_mouse_focus.is_some_and(|(pending, started)| {
-                        pending == window && started.elapsed() < Duration::from_secs(1)
-                    })
-                }) {
+                if self
+                    .focus
+                    .pending()
+                    .is_some_and(|intent| !intent.pointer || Some(intent.window) == window)
+                {
                     return Ok(());
                 }
                 if window.is_none() {
@@ -2275,25 +2284,15 @@ impl Reactor {
                     self.reconcile_layout_event(changes, LayoutEvent::WindowFocused(space, window));
                 }
                 if !is_main {
-                    if self.mouse_raise_token.is_cancelled() {
-                        self.mouse_raise_token = Default::default();
+                    self.stage_focus(changes, window);
+                    if let Some(plan) = &mut changes.focus {
+                        plan.pointer = true;
                     }
-                    let mut app_handles = HashMap::default();
-                    self.insert_app_handle_for_window(&mut app_handles, window);
-                    changes.focus = Some(raise_manager::Event::MouseRaiseRequest(
-                        RaiseRequest {
-                            raise_windows: vec![vec![window]],
-                            focus_window: Some((window, None)),
-                            app_handles,
-                            focus_quiet: Quiet::Yes,
-                        },
-                        self.mouse_raise_token.clone(),
-                    ));
-                    self.pending_mouse_focus = Some((window, Instant::now()));
                 }
                 return Ok(());
             }
             Event::MissionControlNativeEntered => {
+                self.focus.external_input();
                 self.drag_manager.reset();
                 self.set_mission_control_active(true);
                 return Ok(());
@@ -2304,31 +2303,19 @@ impl Reactor {
                 self.refresh_windows_after_mission_control(changes);
                 return Ok(());
             }
-            Event::RaiseCompleted { window_id, sequence_id } => {
-                if self.pending_mouse_focus.is_some_and(|(window, _)| window == window_id) {
-                    self.pending_mouse_focus = None;
-                }
-                self.submit_raise(raise_manager::Event::RaiseCompleted { window_id, sequence_id });
-                if let Some((space, selected, _)) =
-                    self.overview_focus.filter(|(_, selected, _)| *selected == window_id)
-                {
-                    self.overview_focus = None;
-                    // The native key-focus query can still report the outgoing
-                    // app at raise completion. Keep the explicit overview pick
-                    // authoritative; the cover separately verifies native focus.
-                    self.stop_camera(space);
-                    self.reconcile_layout_event(
-                        changes,
-                        LayoutEvent::WindowFocused(space, selected),
-                    );
-                    changes.arrange(Some(space), Presentation::Instant);
-                }
+            Event::FocusAlreadyObserved(window, generation) => {
+                self.focus_result(changes, window, generation, None);
                 return Ok(());
             }
-            Event::RaiseTimeout { sequence_id } => {
-                self.submit_raise(raise_manager::Event::RaiseTimeout { sequence_id });
+            Event::FocusFailed(window, generation, missing) => {
+                self.focus_result(changes, window, generation, Some(missing));
                 return Ok(());
             }
+            Event::StackFinished(generation) => {
+                self.advance_stacking(generation, false);
+                return Ok(());
+            }
+            Event::FocusInput => return Ok(()),
             Event::ConfigUpdated(new_cfg) => {
                 if new_cfg.virtual_workspaces.mode == crate::common::config::WorkspaceMode::Global
                     && !crate::sys::screen::displays_have_separate_spaces()
@@ -2742,6 +2729,9 @@ impl Reactor {
             return;
         }
         let recovering = self.refreshes_blocked();
+        if recovering || snapshot.presentation_changed(&self.space_state) {
+            self.focus.external_input();
+        }
         if recovering {
             self.abandon_window_inventories_from_instability();
         } else if snapshot.revision != self.space_state.revision {
@@ -2758,6 +2748,11 @@ impl Reactor {
 
     fn reconcile_observed_focus(&mut self, changes: &mut Changes, window: Option<WindowId>) {
         if let Some(window) = window
+            && !self.focus.shadows_activation(
+                window.pid,
+                self.main_window_tracker.window_server_focus(),
+                Some(window),
+            )
             && let Some(space) = self
                 .best_space_for_window_id(window)
                 .filter(|space| self.is_space_active(*space))
@@ -2819,13 +2814,6 @@ impl Reactor {
         true
     }
 
-    fn submit_raise(&self, request: raise_manager::Event) {
-        trace!(?request, "Submitting native raise or focus");
-        if let Err(error) = self.communication_manager.raise_manager_tx.try_send(request) {
-            warn!(%error, "failed to send raise request");
-        }
-    }
-
     fn send_app_request(&self, pid: pid_t, request: Request) {
         if let Some(app) = self.app_manager.apps.get(&pid)
             && let Err(error) = app.handle.send(request)
@@ -2858,12 +2846,15 @@ impl Reactor {
         focused_window: Option<WindowId>,
         error: Option<anyhow::Error>,
     ) {
-        if !self.mouse_raise_token.is_cancelled() && self.transient_blocks_mouse_focus() {
-            self.mouse_raise_token.cancel();
-            let _ = self
-                .communication_manager
-                .raise_manager_tx
-                .try_send(raise_manager::Event::MouseRaisesCancelled);
+        if self.focus.pending().is_some_and(|intent| {
+            (intent.pointer && self.transient_blocks_mouse_focus())
+                || !self.state.windows.contains_window(intent.window)
+                || self.state.windows.is_temporarily_unavailable(intent.window)
+        }) {
+            self.focus.cancel();
+        }
+        if changes.fallback_focus.is_some() {
+            self.focus.cancel();
         }
 
         self.retire_presentations();
@@ -2872,6 +2863,9 @@ impl Reactor {
             && let Some(space) = changes.desktop_focus
         {
             self.focus_desktop_if_active_workspace_empty(space);
+        }
+        if changes.focus.as_ref().is_some_and(|plan| plan.focus_window.is_some()) {
+            self.focus.cancel();
         }
         let dragging = self.is_in_drag();
         let layout_modes_may_have_changed = changes.has_layouts();
@@ -2925,11 +2919,20 @@ impl Reactor {
         {
             self.warp_mouse(center);
         }
-        if let Some(focus) = changes.focus.take() {
-            self.submit_raise(focus);
+        let mut warp_authority = None;
+        if let Some(mut focus) = changes.focus.take() {
+            if let Some((_, selected, stamp)) = changes.overview_activation
+                && selected == focus.focus_window.map(|(window, _)| window)
+            {
+                focus.overview = Some(stamp);
+            } else if focus.focus_window.is_some() {
+                self.overview_focus = None;
+            }
+            self.submit_focus(focus);
+            warp_authority = self.focus.warp_authority();
         }
         if let Some(point) = changes.mouse_warp {
-            self.warp_mouse(point);
+            self.queue_warp(point, warp_authority.clone());
         }
 
         if let Some((workspace, window, stamp)) = changes.overview_activation
@@ -2985,11 +2988,15 @@ impl Reactor {
             if let Some(to) = to
                 && let Some(input_tx) = &self.communication_manager.input_tx
             {
-                _ = input_tx.send(crate::actor::input::Request::WarpRelative { from, to });
+                _ = input_tx.send(crate::actor::input::Request::WarpRelative {
+                    from,
+                    to,
+                    authority: warp_authority,
+                });
             }
         } else if let Some(center) = focused.and_then(|wid| self.window_center_on_known_screen(wid))
         {
-            self.warp_mouse(center);
+            self.queue_warp(center, warp_authority);
         }
 
         if changes.refresh_notifications {
@@ -3534,7 +3541,9 @@ impl Reactor {
         self.space_state.active_spaces = active_spaces;
         if command_space_only_update {
             self.space_state.menu_bar_space = menu_bar_space;
-            self.space_state.command_space = command_space;
+            if self.focus.pending().is_none() {
+                self.space_state.command_space = command_space;
+            }
             self.advance_workspace_transfers(changes);
             changes.refresh_menu = true;
             return;
@@ -4726,20 +4735,11 @@ impl Reactor {
         self.window_frame_on_known_screen(wid).map(|frame| frame.mid())
     }
 
-    pub fn warp_mouse(&mut self, point: CGPoint) {
-        let Some(input_tx) = self.communication_manager.input_tx.clone() else {
-            return;
-        };
-        _ = input_tx.send(crate::actor::input::Request::Warp(point));
-    }
+    pub fn warp_mouse(&mut self, point: CGPoint) { self.queue_warp(point, None); }
 
-    fn insert_app_handle_for_window(
-        &self,
-        app_handles: &mut HashMap<pid_t, AppThreadHandle>,
-        wid: WindowId,
-    ) {
-        if let Some(app) = self.app_manager.apps.get(&wid.pid) {
-            app_handles.entry(wid.pid).or_insert_with(|| app.handle.clone());
+    fn queue_warp(&self, point: CGPoint, authority: Option<focus::FocusAuthority>) {
+        if let Some(input_tx) = &self.communication_manager.input_tx {
+            _ = input_tx.send(crate::actor::input::Request::Warp(point, authority));
         }
     }
 
@@ -5448,11 +5448,9 @@ impl Reactor {
         if self.is_in_drag() {
             return;
         }
-        if changes.focus.as_ref().is_some_and(|request| match request {
-            raise_manager::Event::RaiseRequest(request) => request.focus_window.is_some(),
-            raise_manager::Event::MouseRaiseRequest(..) => true,
-            _ => false,
-        }) {
+        if changes.focus.as_ref().is_some_and(|plan| plan.focus_window.is_some())
+            || (changes.fallback_focus.is_none() && self.focus.pending().is_some())
+        {
             self.refocus_manager.refocus_state = RefocusState::None;
             return;
         }
@@ -5550,16 +5548,9 @@ impl Reactor {
         if focus.is_none() && windows.is_empty() {
             return;
         }
-        let mut request = match changes.focus.take() {
-            Some(raise_manager::Event::RaiseRequest(request)) => request,
-            _ => RaiseRequest {
-                raise_windows: Vec::new(),
-                focus_window: None,
-                app_handles: HashMap::default(),
-                focus_quiet: quiet,
-            },
-        };
-        for window in windows {
+        let request = changes.focus.get_or_insert_with(FocusPlan::default);
+        let only_target = focus.is_some_and(|(target, _)| windows.as_slice() == [target]);
+        for window in windows.into_iter().filter(|_| !only_target) {
             let Some(space) = self.layout_focus_space(window) else {
                 continue;
             };
@@ -5571,17 +5562,15 @@ impl Reactor {
                     group.push(window);
                 }
             } else {
-                self.insert_app_handle_for_window(&mut request.app_handles, window);
                 request.raise_windows.push(vec![window]);
             }
         }
-        if let Some((window, _)) = focus {
-            self.insert_app_handle_for_window(&mut request.app_handles, window);
+        if focus.is_some() {
             request.focus_window = focus;
             request.focus_quiet = quiet;
         }
-        if request.focus_window.is_some() || !request.raise_windows.is_empty() {
-            changes.focus = Some(raise_manager::Event::RaiseRequest(request));
+        if request.focus_window.is_none() && request.raise_windows.is_empty() {
+            changes.focus = None;
         }
     }
 
@@ -5632,6 +5621,7 @@ impl Reactor {
             );
             return false;
         }
+        self.focus.external_input();
         window_server::make_key_window(info.pid, wsid).is_ok()
     }
 
@@ -5649,6 +5639,7 @@ impl Reactor {
         let Some(screen) = self.space_state.screen_by_space(space) else {
             return false;
         };
+        self.focus.external_input();
         if !window_server::focus_desktop_window(screen) {
             return false;
         }
@@ -5947,6 +5938,7 @@ impl Reactor {
     }
 
     fn request_close_window(&mut self, pid: pid_t, window_server_id: Option<WindowServerId>) {
+        self.focus.external_input();
         if let Some(app) = self.app_manager.apps.get(&pid) {
             if let Err(err) = app.handle.send(Request::CloseWindow(window_server_id)) {
                 warn!(

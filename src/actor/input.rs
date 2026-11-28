@@ -39,11 +39,12 @@ const MOUSE_MOVE_MIN_INTERVAL_NS_LOW_POWER: u64 = 32_000_000; // 32ms ~= 31 Hz
 
 #[derive(Debug)]
 pub enum Request {
-    Warp(CGPoint),
+    Warp(CGPoint, Option<reactor::focus::FocusAuthority>),
     /// Carry the cursor's position within `from` to the same spot in `to`.
     WarpRelative {
         from: Option<CGRect>,
         to: CGRect,
+        authority: Option<reactor::focus::FocusAuthority>,
     },
     HideOnFocus,
     EnforceHidden,
@@ -214,6 +215,7 @@ impl Input {
             state.event_processing_enabled && state.mouse_hides_on_focus,
             keyed_disable || (self.activate_on_hotkey_release.get() && hotkeys_enabled),
         );
+        mask |= 1u64 << CGEventType::LeftMouseDown.0;
         // AX can acquire a drag before optional input processing is enabled.
         if state.mouse_features_enabled {
             mask |= 1u64 << CGEventType::LeftMouseDragged.0;
@@ -511,14 +513,19 @@ impl Input {
                 }
                 should_rebuild_mask = true;
             }
-            Request::Warp(_) | Request::WarpRelative { .. } => {
-                let point = match request {
-                    Request::WarpRelative { from, to } => {
-                        relative_point(event::current_cursor_location().ok(), from, to)
-                    }
-                    Request::Warp(point) => point,
+            Request::Warp(..) | Request::WarpRelative { .. } => {
+                let (point, authority) = match request {
+                    Request::WarpRelative { from, to, authority } => (
+                        relative_point(event::current_cursor_location().ok(), from, to),
+                        authority,
+                    ),
+                    Request::Warp(point, authority) => (point, authority),
                     _ => unreachable!(),
                 };
+                if authority.is_some_and(|authority| !authority.allows_warp()) {
+                    return;
+                }
+                self.mouse_focus_publisher.take_latest();
                 if let Err(e) = event::warp_mouse(point) {
                     warn!("Failed to warp mouse: {e:?}");
                 }
@@ -825,7 +832,16 @@ impl Input {
                         .reconcile_after_event_tap_reenabled(CGEvent::flags(Some(event)));
                     return true;
                 }
-                self.handle_keyboard_event(event_type, event, &mut self.state.borrow_mut())
+                let forward =
+                    self.handle_keyboard_event(event_type, event, &mut self.state.borrow_mut());
+                if forward
+                    && event_type == CGEventType::KeyDown
+                    && CGEvent::flags(Some(event)).contains(CGEventFlags::MaskCommand)
+                    && matches!(key_code_from_event(event), Some(KeyCode::Tab | KeyCode::Space))
+                {
+                    self.events_tx.send(Event::FocusInput);
+                }
+                forward
             }
             CGEventType::ScrollWheel if self.mission_control_active.get() => {
                 let continuous = CGEvent::integer_value_field(
@@ -944,6 +960,11 @@ impl Input {
                         action,
                     });
                     return false;
+                }
+                if event_type == CGEventType::LeftMouseDown
+                    && !event::is_rift_synthetic_event(event)
+                {
+                    self.events_tx.send(Event::FocusInput);
                 }
                 true
             }
@@ -1347,6 +1368,9 @@ unsafe extern "C-unwind" fn input_callback(
     // movement cannot stall at the edge.
     let this = unsafe { &*ctx.this };
     let mouse_point = if event_type == CGEventType::MouseMoved {
+        if event::is_rift_synthetic_event(event) {
+            return event_ref.as_ptr();
+        }
         let warped = if this.mission_control_active.get() {
             None
         } else {
@@ -2089,8 +2113,9 @@ mod tests {
         let (input, _, _) = input();
         assert!(input.hotkeys.borrow().is_empty());
         let keyboard_mask = 1u64 << CGEventType::KeyDown.0;
-        let stable_release_mask =
-            (1u64 << CGEventType::LeftMouseUp.0) | (1u64 << CGEventType::RightMouseUp.0);
+        let stable_release_mask = (1u64 << CGEventType::LeftMouseDown.0)
+            | (1u64 << CGEventType::LeftMouseUp.0)
+            | (1u64 << CGEventType::RightMouseUp.0);
         let native_drag_mask = 1u64 << CGEventType::LeftMouseDragged.0;
         assert_eq!(
             input.desired_event_mask(),

@@ -1050,6 +1050,14 @@ pub fn space_is_fullscreen(sid: u64) -> bool { unsafe { SLSSpaceGetType(*G_CONNE
 
 // credit: https://github.com/Hammerspoon/hammerspoon/issues/370#issuecomment-545545468
 pub fn make_key_window(pid: pid_t, wsid: WindowServerId) -> Result<(), CGError> {
+    make_key_window_while(pid, wsid, || true)
+}
+
+pub(crate) fn make_key_window_while(
+    pid: pid_t,
+    wsid: WindowServerId,
+    authorized: impl Fn() -> bool,
+) -> Result<(), CGError> {
     #[allow(non_upper_case_globals)]
     const kCPSUserGenerated: u32 = 0x200;
 
@@ -1066,9 +1074,15 @@ pub fn make_key_window(pid: pid_t, wsid: WindowServerId) -> Result<(), CGError> 
     let psn = ProcessSerialNumber::for_pid(pid)?;
 
     unsafe {
-        cg_ok(_SLPSSetFrontProcessWithOptions(&psn, wsid.0, kCPSUserGenerated))?;
-        cg_ok(SLPSPostEventRecordTo(&psn, event1.as_ptr()))?;
-        cg_ok(SLPSPostEventRecordTo(&psn, event2.as_ptr()))?;
+        if authorized() {
+            cg_ok(_SLPSSetFrontProcessWithOptions(&psn, wsid.0, kCPSUserGenerated))?;
+        }
+        if authorized() {
+            cg_ok(SLPSPostEventRecordTo(&psn, event1.as_ptr()))?;
+        }
+        if authorized() {
+            cg_ok(SLPSPostEventRecordTo(&psn, event2.as_ptr()))?;
+        }
     }
     Ok(())
 }

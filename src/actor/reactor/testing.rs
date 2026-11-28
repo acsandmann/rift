@@ -702,7 +702,10 @@ impl Apps {
                         None,
                     ));
                 }
-                Request::Raise(..) => todo!(),
+                Request::Stack(_, authority) if authority.is_current() => {
+                    events.push(Event::StackFinished(authority.generation));
+                }
+                Request::Focus(..) | Request::Stack(..) => {}
                 Request::CloseWindow(..) => todo!(),
             }
         }

@@ -3,10 +3,9 @@
 //!
 //! These APIs support reading and writing window states like position and size.
 
-use std::cell::RefCell;
 use std::fmt::Debug;
 use std::num::NonZeroU32;
-use std::sync::{Arc, LazyLock, Mutex};
+use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -16,11 +15,10 @@ use objc2_application_services::AXError;
 use objc2_core_foundation::{CGPoint, CGRect, CGSize};
 use serde::{Deserialize, Serialize};
 use tokio::select;
-use tokio::sync::oneshot;
-use tokio_util::sync::CancellationToken;
-use tracing::{Instrument, Span, debug, info, instrument, trace, warn};
+use tracing::{Span, debug, info, instrument, trace, warn};
 
 use crate::actor;
+use crate::actor::reactor::focus::FocusAuthority;
 use crate::actor::reactor::transaction_manager::TransactionId;
 use crate::actor::reactor::{self, Event, Requested};
 use crate::actor::wm_controller::{self, WmEvent};
@@ -29,14 +27,13 @@ use crate::model::hidden_window_placement::ScrollingDisplayBounds;
 use crate::model::tx_store::WindowTxStore;
 pub use crate::sys::app::{AppInfo, WindowInfo, pid_t};
 use crate::sys::app::{NSRunningApplicationExt, NativeWindowIdentity};
-use crate::sys::axuielement::{AX_STANDARD_WINDOW_SUBROLE, AXUIElement, Error as AxError};
+use crate::sys::axuielement::{AXUIElement, Error as AxError};
 use crate::sys::enhanced_ui::EnhancedUi;
 use crate::sys::event;
 use crate::sys::executor::Executor;
 use crate::sys::geometry::SameAs;
 use crate::sys::observer::Observer;
 use crate::sys::process::ProcessInfo;
-use crate::sys::timer::Timer;
 use crate::sys::window_server::{self, WindowServerId, WindowServerInfo};
 
 const kAXApplicationActivatedNotification: &str = "AXApplicationActivated";
@@ -636,13 +633,8 @@ pub enum Request {
     EndWindowAnimation(WindowId, FrameAuthority),
     CancelWindowAnimation(WindowId, u64, FrameAuthority),
 
-    /// Raise the windows within a single space, in the given order. All windows must be
-    /// in the same space, or they will not be raised correctly.
-    ///
-    /// Events attributed to this request will use the provided [`Quiet`]
-    /// parameter for the last window only. Events for other windows will be
-    /// marked `Quiet::Yes` automatically.
-    Raise(Vec<WindowId>, CancellationToken, u64, Quiet),
+    Focus(WindowId, FocusAuthority, bool),
+    Stack(Vec<WindowId>, FocusAuthority),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -687,8 +679,6 @@ impl Request {
     }
 }
 
-struct RaiseRequest(Vec<WindowId>, CancellationToken, u64, Quiet);
-
 #[derive(Debug, Copy, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub enum Quiet {
     Yes,
@@ -722,59 +712,6 @@ pub fn spawn_app_thread(
     }
 }
 
-// AX activation can precede Carbon; Carbon activation can precede AX unhide.
-// Keep the quiet context until the corresponding authoritative edge is ready.
-#[derive(Default)]
-enum PendingActivation {
-    #[default]
-    None,
-    Ax(Instant, Quiet),
-    Hidden(Quiet, Option<WindowId>),
-}
-
-impl PendingActivation {
-    fn ax_activated(&mut self, quiet: Quiet) {
-        if !matches!(self, Self::Hidden(..)) {
-            *self = Self::Ax(Instant::now(), quiet);
-        }
-    }
-
-    fn ax_deactivated(&mut self) {
-        // AX frontmost can lag the authoritative global activation edge.
-        if matches!(self, Self::Ax(..)) {
-            *self = Self::None;
-        }
-    }
-
-    fn globally_activated(
-        &mut self,
-        hidden: bool,
-        initiated: Option<(Quiet, Option<WindowId>)>,
-    ) -> Option<(Quiet, Option<WindowId>)> {
-        let pending = std::mem::take(self);
-        let context = initiated.unwrap_or_else(|| match pending {
-            Self::Ax(at, quiet) if at.elapsed() < Duration::from_millis(1000) => (quiet, None),
-            _ => (Quiet::No, None),
-        });
-        if hidden {
-            *self = Self::Hidden(context.0, context.1);
-            None
-        } else {
-            Some(context)
-        }
-    }
-
-    fn shown(&mut self) -> Option<(Quiet, Option<WindowId>)> {
-        if let Self::Hidden(quiet, window) = self {
-            let context = (*quiet, *window);
-            *self = Self::None;
-            Some(context)
-        } else {
-            None
-        }
-    }
-}
-
 struct State {
     pid: pid_t,
     bundle_id: Option<String>,
@@ -785,12 +722,10 @@ struct State {
     windows: HashMap<WindowId, AppWindowState>,
     elem_to_wid: HashMap<AXUIElement, WindowId>,
     main_window: Option<WindowId>,
-    last_activated: Option<(Instant, Quiet, Option<WindowId>, oneshot::Sender<()>)>,
-    pending_activation: PendingActivation,
+    activate_on_show: bool,
     is_hidden: bool,
     is_frontmost: bool,
     enhanced_ui: EnhancedUi,
-    raises_tx: actor::Sender<RaiseRequest>,
     tx_store: Option<WindowTxStore>,
 }
 
@@ -1189,23 +1124,16 @@ impl State {
         handle: AppThreadHandle,
         requests_rx: actor::Receiver<Request>,
         notifications_rx: actor::Receiver<(AXUIElement, AxNotificationKind, Option<WindowId>)>,
-        raises_rx: actor::Receiver<RaiseRequest>,
     ) {
         if !self.init(handle.clone(), info) {
             return;
         }
 
-        let this = RefCell::new(self);
-        // The raises channel is owned by State, so joining both tasks would keep
-        // the actor (and its observer) alive after the incoming task terminates.
-        select! {
-            _ = Self::handle_incoming(&this, requests_rx, notifications_rx) => {},
-            _ = Self::handle_raises(&this, raises_rx) => {},
-        }
+        self.handle_incoming(requests_rx, notifications_rx).await;
     }
 
     async fn handle_incoming(
-        this: &RefCell<Self>,
+        &mut self,
         mut requests_rx: actor::Receiver<Request>,
         mut notifications_rx: actor::Receiver<(AXUIElement, AxNotificationKind, Option<WindowId>)>,
     ) {
@@ -1222,17 +1150,17 @@ impl State {
                 }
                 notif = notifications_rx.recv() => {
                     let Some((_, (elem, notif, hinted_wid))) = notif else { break };
-                    autoreleasepool(|_| this.borrow_mut().handle_notification(elem, notif, hinted_wid));
+                    autoreleasepool(|_| self.handle_notification(elem, notif, hinted_wid));
                     continue;
                 }
             };
-            if autoreleasepool(|_| Self::handle_request_batch(this, &mut batch)) {
+            if autoreleasepool(|_| self.handle_request_batch(&mut batch)) {
                 break;
             }
         }
     }
 
-    fn handle_request_batch(this: &RefCell<Self>, batch: &mut Vec<(Span, Request)>) -> bool {
+    fn handle_request_batch(&mut self, batch: &mut Vec<(Span, Request)>) -> bool {
         // All requests in this actor target the same application. Coalesce EUI
         // suppression across the entire drained burst instead of toggling the
         // app-level attribute once per window/request, and only once a write is
@@ -1243,43 +1171,46 @@ impl State {
         let mut pending_frames = HashMap::default();
         let mut should_terminate = false;
         for (span, request) in batch.drain(..) {
-            let mut state = this.borrow_mut();
+            if matches!(&request,
+                Request::Focus(_, authority, _) | Request::Stack(_, authority)
+                    if !authority.is_current()
+            ) {
+                continue;
+            }
             let _guard = span.enter();
             if !matches!(&request, Request::InteractiveFramesPending(_)) {
-                debug!(?state.bundle_id, ?state.pid, ?request, "Got request");
+                debug!(?self.bundle_id, ?self.pid, ?request, "Got request");
             }
             let request_kind: &'static str = (&request).into();
-            match state.handle_request(request, &mut pending_frames, &mut eui) {
+            match self.handle_request(request, &mut pending_frames, &mut eui) {
                 Ok(true) => {
                     should_terminate = true;
                     break;
                 }
                 Ok(false) => (),
                 #[allow(non_upper_case_globals)]
-                Err(AxError::Ax(AXError::CannotComplete)) if state.running_app.isTerminated() => {
-                    warn!(?state.bundle_id, ?state.pid, "Application terminated without notification");
+                Err(AxError::Ax(AXError::CannotComplete)) if self.running_app.isTerminated() => {
+                    warn!(?self.bundle_id, ?self.pid, "Application terminated without notification");
                     should_terminate = true;
                     break;
                 }
                 Err(err) => {
-                    warn!(?state.bundle_id, ?state.pid, request = request_kind, "Error handling request: {:?}", err);
+                    warn!(?self.bundle_id, ?self.pid, request = request_kind, "Error handling request: {:?}", err);
                 }
             }
         }
 
         if !should_terminate && !pending_frames.is_empty() {
-            let mut state = this.borrow_mut();
             for (wid, frame) in pending_frames {
-                if let Err(err) = state.apply_interactive_frame(wid, frame, &mut eui) {
+                if let Err(err) = self.apply_interactive_frame(wid, frame, &mut eui) {
                     warn!(?wid, ?err, "Failed to apply animation frame");
                 }
             }
         }
 
         if eui == BatchEui::Held {
-            let mut state = this.borrow_mut();
-            let app = state.app.clone();
-            state.enhanced_ui.release(&app);
+            let app = self.app.clone();
+            self.enhanced_ui.release(&app);
         }
 
         should_terminate
@@ -1343,26 +1274,6 @@ impl State {
             source,
         );
         Ok(())
-    }
-
-    async fn handle_raises(this: &RefCell<Self>, mut rx: actor::Receiver<RaiseRequest>) {
-        while let Some((span, raise)) = rx.recv().await {
-            let RaiseRequest(wids, token, sequence_id, quiet) = raise;
-            if let Err(e) = Self::handle_raise_request(this, &wids, &token, sequence_id, quiet)
-                .instrument(span)
-                .await
-            {
-                debug!("Raise request failed: {e:?}");
-                if matches!(
-                    e,
-                    RaiseError::AXError(AxError::NotFound)
-                        | RaiseError::AXError(AxError::Ax(AXError::InvalidUIElement))
-                ) {
-                    this.borrow()
-                        .send_event(Event::RaiseTargetsMissing { windows: wids, sequence_id });
-                }
-            }
-        }
     }
 
     #[instrument(skip_all, fields(?info))]
@@ -1706,8 +1617,25 @@ impl State {
                     None,
                 ));
             }
-            Request::Raise(wids, token, sequence_id, quiet) => {
-                self.raises_tx.send(RaiseRequest(wids, token, sequence_id, quiet));
+            Request::Focus(window, authority, force_raise) => {
+                if authority.is_current() {
+                    self.flush_focus_frames(pending_frames, eui, &authority, &[window]);
+                    self.focus_window(window, &authority, force_raise);
+                }
+            }
+            Request::Stack(windows, authority) => {
+                self.flush_focus_frames(pending_frames, eui, &authority, &windows);
+                for window in windows {
+                    if !authority.try_issue() {
+                        break;
+                    }
+                    if let Err(error) = self.window(window).and_then(|w| w.elem.raise()) {
+                        debug!(?window, ?error, "AX stacking failed");
+                    }
+                }
+                if authority.is_current() {
+                    self.send_event(Event::StackFinished(authority.generation));
+                }
             }
         }
         Ok(false)
@@ -1908,162 +1836,88 @@ impl State {
     }
 }
 
-#[derive(Debug)]
-#[allow(dead_code, reason = "uesed by Debug impls")]
-enum RaiseError {
-    RaiseCancelled,
-    AXError(AxError),
-}
-
-impl From<AxError> for RaiseError {
-    fn from(value: AxError) -> Self { Self::AXError(value) }
-}
-
 impl State {
-    async fn handle_raise_request(
-        this_ref: &RefCell<Self>,
-        wids: &[WindowId],
-        token: &CancellationToken,
-        sequence_id: u64,
-        quiet: Quiet,
-    ) -> Result<(), RaiseError> {
-        let check_cancel = || {
-            if token.is_cancelled() {
-                return Err(RaiseError::RaiseCancelled);
+    fn flush_focus_frames(
+        &mut self,
+        frames: &mut HashMap<WindowId, PendingFrame>,
+        eui: &mut BatchEui,
+        authority: &FocusAuthority,
+        windows: &[WindowId],
+    ) {
+        for &window in windows {
+            if !authority.is_current() {
+                break;
             }
-            Ok(())
-        };
-        check_cancel()?;
-
-        let Some(&first) = wids.first() else {
-            warn!("Got empty list of wids to raise; this might misbehave");
-            return Ok(());
-        };
-        let is_standard = {
-            let this = this_ref.borrow();
-            let window = this.window(first)?;
-            window.elem.subrole().map(|s| s == AX_STANDARD_WINDOW_SUBROLE).unwrap_or(false)
-        };
-
-        check_cancel()?;
-
-        static MUTEX: LazyLock<parking_lot::Mutex<()>> =
-            LazyLock::new(|| parking_lot::Mutex::new(()));
-        let mut mutex_guard = Some(MUTEX.lock());
-        check_cancel()?;
-        let mut this = this_ref.borrow_mut();
-
-        let is_frontmost = trace("is_frontmost", &this.app, || this.app.frontmost())?;
-
-        // Focus-follows-mouse can enqueue a final hover transition while the
-        // pointer is moving off a window (for example, into the menu bar).
-        // Reissuing make-key/raise for the window that is already focused is
-        // not only redundant: it can visibly pulse focus and pull it back from
-        // transient system UI. Complete the request without touching focus.
-        //
-        // Only elide a single-window request. Multi-window batches still need
-        // their raises to establish the requested stacking order.
-        if is_frontmost && this.main_window == Some(first) && wids.len() == 1 {
-            trace!(?first, "Skipping raise for already focused window");
-            this.send_event(Event::RaiseCompleted { window_id: first, sequence_id });
-            return Ok(());
-        }
-
-        let window_server_id = match WindowServerId::try_from(&this.window(first)?.elem) {
-            Ok(wsid) => Some(wsid),
-            Err(AxError::NotFound) => {
-                debug!(
-                    ?first,
-                    "Skipping make-key request because window has no server id yet"
-                );
-                None
+            if let Some(frame) = frames.remove(&window)
+                && let Err(error) = self.apply_interactive_frame(window, frame, eui)
+            {
+                warn!(?window, ?error, "Failed to apply frame before focus");
             }
-            Err(err) => return Err(err.into()),
-        };
-        check_cancel()?;
-        // Select the target main window before activating the process. Otherwise
-        // apps with windows on several workspaces can restore their previous
-        // main window during activation, even though make-key targets `first`.
-        // AXMain is not writable in every app; retain the make-key/raise fallback.
-        if let Err(err) = this.window(first)?.elem.set_bool_attribute("AXMain", true) {
-            debug!(?first, ?err, "Failed to select main window before activation");
         }
-        let make_key_result =
-            window_server_id.map(|wsid| window_server::make_key_window(this.pid, wsid));
-        if let Some(Err(err)) = &make_key_result {
-            warn!(?this.pid, ?err, "Failed to activate app");
-        }
+    }
 
-        let waits_for_activation =
-            !is_frontmost && make_key_result.as_ref().is_some_and(Result::is_ok) && is_standard;
-        if waits_for_activation {
-            // Keep the WindowServer make-key request and AX raise adjacent, matching
-            // yabai's focus ordering. If we wait for process activation first, macOS
-            // can temporarily make the application's previous key window authoritative.
-            // For apps with windows on multiple displays that produces a spurious
-            // active-display hop before the requested window is finally raised.
-            //
-            // This deliberately starts the focus operation before the cancellable
-            // activation wait. Cancellation can stop follow-up batch raises, but it
-            // must not leave process activation detached from its target window.
-            let window = this.window(first)?;
-            check_cancel()?;
-            trace("raise before activation wait", &window.elem, || {
-                window.elem.raise()
-            })?;
-
-            if wids.len() == 1 {
-                // `quiet` only applies if the first window is also the last.
-                let quiet_window_change = (quiet == Quiet::Yes).then_some(first);
-                Self::wait_for_activation(this, quiet, quiet_window_change, &token).await?;
-            } else {
-                // Windows before the last are always quiet.
-                Self::wait_for_activation(this, Quiet::Yes, Some(first), &token).await?;
+    fn focus_window(&mut self, wid: WindowId, authority: &FocusAuthority, force_raise: bool) {
+        let result = (|| {
+            if !authority.is_current() {
+                return Ok(false);
             }
-            this = this_ref.borrow_mut();
-        } else {
-            trace!(
-                "Not awaiting activation event. is_frontmost={is_frontmost:?} \
-                make_key_result={make_key_result:?} is_standard={is_standard:?}"
-            )
-        }
-
-        for (i, &wid) in wids.iter().enumerate() {
-            check_cancel()?;
-            debug_assert_eq!(wid.pid, this.pid);
-            let window = this.window(wid)?;
-            // Activation may restore a different main window after the initial
-            // raise. Reassert the target after the wait, before reporting focus.
-            trace("raise", &window.elem, || window.elem.raise())?;
-            if let Err(err) = window.elem.set_bool_attribute("AXMain", true) {
-                debug!(?wid, ?err, "Failed to select main window after raise");
+            let window = self.window(wid)?;
+            // Only query AXFrontmost when it could avoid the entire mutation.
+            if !force_raise
+                && self.main_window == Some(wid)
+                && self.app.frontmost().unwrap_or(false)
+            {
+                return Ok(true);
             }
-
-            // TODO: Check the frontmost (layer 0) window of the window server and retry if necessary.
-
-            trace!("Sending completion");
-            this.send_event(Event::RaiseCompleted { window_id: wid, sequence_id });
-
-            let is_last = i + 1 == wids.len();
-            let quiet_if = if is_last {
-                mutex_guard.take();
-                (quiet == Quiet::Yes).then_some(wid)
-            } else {
-                None
-            };
-
-            if is_last {
-                let main_window = this.on_main_window_changed(quiet_if, true);
-                if main_window != Some(wid) {
-                    warn!(
-                        "Raise request failed to raise {desired:?}; instead got main_window={main_window:?}",
-                        desired = this.window(wid).map(|w| &w.elem).ok(),
-                    );
+            let server =
+                window.window_server_id.or_else(|| WindowServerId::try_from(&window.elem).ok());
+            if !authority.try_issue() {
+                return Ok(false);
+            }
+            // Select AXMain before make-key and raise immediately afterwards.
+            // Otherwise apps can restore a different window on another display.
+            if let Err(error) = window.elem.set_bool_attribute("AXMain", true) {
+                debug!(?wid, ?error, "Failed to select AX main window");
+            }
+            if !authority.is_current() {
+                return Ok(false);
+            }
+            let made_key = server.is_some_and(|server| {
+                trace!(?wid, age = ?authority.focus_age(), "Invoking native make-key");
+                let start = Instant::now();
+                let result = window_server::make_key_window_while(self.pid, server, || {
+                    authority.is_current()
+                });
+                trace!(?wid, elapsed = ?start.elapsed(), ?result, "Focus make-key returned");
+                result.is_ok()
+            });
+            if !authority.is_current() {
+                return Ok(false);
+            }
+            if let Err(error) = window.elem.raise() {
+                if !made_key || matches!(error, AxError::Ax(AXError::InvalidUIElement)) {
+                    return Err(error);
                 }
+                debug!(?wid, ?error, "AXRaise failed after make-key");
+            }
+            // AX is a fallback for windows without a usable native make-key path.
+            Ok(!made_key
+                && self.app.frontmost().unwrap_or(false)
+                && self.on_main_window_changed(None, true) == Some(wid))
+        })();
+        if !authority.is_current() {
+            return;
+        }
+        match result {
+            Ok(true) => self.send_event(Event::FocusAlreadyObserved(wid, authority.generation)),
+            Ok(false) => {}
+            Err(error) => {
+                debug!(?wid, ?error, "Focus mutation failed");
+                let missing =
+                    matches!(error, AxError::NotFound | AxError::Ax(AXError::InvalidUIElement));
+                self.send_event(Event::FocusFailed(wid, authority.generation, missing));
             }
         }
-
-        Ok(())
     }
 
     fn on_main_window_changed(
@@ -2125,105 +1979,32 @@ impl State {
         Some(wid)
     }
 
-    fn take_activation_context(&mut self) -> (Quiet, Option<WindowId>) {
-        match self.last_activated.take() {
-            Some((ts, quiet_activation, quiet_window_change, tx)) => {
-                _ = tx.send(());
-                if ts.elapsed() < Duration::from_millis(1000) {
-                    trace!("by us");
-                    (quiet_activation, quiet_window_change)
-                } else {
-                    trace!("by user");
-                    (Quiet::No, None)
-                }
-            }
-            None => {
-                trace!("by user");
-                (Quiet::No, None)
-            }
-        }
-    }
-
     fn on_ax_activation_changed(&mut self) -> Result<(), AxError> {
         let is_frontmost = trace("is_frontmost", &self.app, || self.app.frontmost())?;
         let old_frontmost = std::mem::replace(&mut self.is_frontmost, is_frontmost);
-        debug!(
-            "on_ax_activation_changed, pid={:?}, is_frontmost={:?}, old_frontmost={:?}",
-            self.pid, is_frontmost, old_frontmost
-        );
-
-        if !is_frontmost {
-            self.pending_activation.ax_deactivated();
-            if old_frontmost {
-                self.send_event(Event::ApplicationDeactivated(self.pid));
-            }
-        } else if !old_frontmost && !self.is_hidden {
-            let (quiet, quiet_window_change) = self.take_activation_context();
-            self.on_main_window_changed(quiet_window_change, true);
-            self.pending_activation.ax_activated(quiet);
+        if !is_frontmost && old_frontmost {
+            self.send_event(Event::ApplicationDeactivated(self.pid));
+        } else if is_frontmost && !old_frontmost && !self.is_hidden {
+            self.on_main_window_changed(None, true);
         }
         Ok(())
     }
 
     fn on_global_activation(&mut self) -> Result<(), AxError> {
-        let initiated = self.last_activated.is_some().then(|| self.take_activation_context());
-        // Carbon owns the activation edge; AX unhide must finish before its
-        // resolved activation is delivered to the reactor.
+        // Carbon owns the activation edge. Resolve it after AX unhide.
         self.is_frontmost = true;
-        if let Some((quiet, window)) =
-            self.pending_activation.globally_activated(self.is_hidden, initiated)
-        {
-            self.finish_activation(quiet, window);
+        self.activate_on_show = self.is_hidden;
+        if !self.is_hidden {
+            self.finish_activation();
         }
         Ok(())
     }
 
-    fn finish_activation(&mut self, quiet: Quiet, quiet_window_change: Option<WindowId>) {
-        if self.on_main_window_changed(quiet_window_change, true).is_none()
-            && self.main_window.take().is_some()
-        {
-            // Do not let the reactor reuse a previous window as the target for
-            // this authoritative activation when AX cannot resolve the current
-            // main window. This event is queued before ApplicationActivated.
+    fn finish_activation(&mut self) {
+        if self.on_main_window_changed(None, true).is_none() && self.main_window.take().is_some() {
             self.send_event(Event::ApplicationMainWindowChanged(self.pid, None, Quiet::No));
         }
-        self.send_event(Event::ApplicationActivated(self.pid, quiet));
-    }
-
-    async fn wait_for_activation(
-        mut this: std::cell::RefMut<'_, Self>,
-        quiet_activation: Quiet,
-        quiet_window_change: Option<WindowId>,
-        token: &CancellationToken,
-    ) -> Result<(), RaiseError> {
-        let app = this.app.clone();
-        let (tx, rx) = oneshot::channel();
-        if let Some((_, _, _, prev_tx)) =
-            this.last_activated
-                .replace((Instant::now(), quiet_activation, quiet_window_change, tx))
-        {
-            let _ = prev_tx.send(());
-        }
-        drop(this);
-        trace!("Awaiting activation");
-        tokio::pin!(rx);
-        loop {
-            select! {
-                _ = &mut rx => break,
-                _ = token.cancelled() => {
-                    debug!("Raise cancelled while awaiting activation event");
-                    return Err(RaiseError::RaiseCancelled);
-                }
-                _ = Timer::sleep(Duration::from_millis(10)) => {
-                    if app.frontmost().unwrap_or(false) {
-                        trace!("Activation observed via frontmost polling");
-                        break;
-                    }
-                }
-            }
-        }
-        trace!("Activation complete");
-        Ok(())
+        self.send_event(Event::ApplicationActivated(self.pid, Quiet::No));
     }
 
     fn on_application_hidden(&mut self) {
@@ -2232,7 +2013,6 @@ impl State {
         }
 
         self.is_hidden = true;
-        self.pending_activation.ax_deactivated();
         for &wid in self.windows.keys() {
             self.send_event(Event::WindowMinimized(wid));
         }
@@ -2256,8 +2036,8 @@ impl State {
         if refresh_inventory {
             self.send_event(Event::WindowInventoryRefreshRequested(self.pid));
         }
-        if let Some((quiet, window)) = self.pending_activation.shown() {
-            self.finish_activation(quiet, window);
+        if std::mem::take(&mut self.activate_on_show) {
+            self.finish_activation();
         }
     }
 
@@ -2743,12 +2523,7 @@ fn collect_visible_window_server_info(
 }
 
 impl Drop for State {
-    fn drop(&mut self) {
-        if let Some((_, _, _, tx)) = self.last_activated.take() {
-            let _ = tx.send(());
-        }
-        self.enhanced_ui.restore_if_needed(&self.app);
-    }
+    fn drop(&mut self) { self.enhanced_ui.restore_if_needed(&self.app); }
 }
 
 pub(crate) async fn run_app(
@@ -2791,7 +2566,6 @@ pub(crate) async fn run_app(
         }
     });
 
-    let (raises_tx, raises_rx) = actor::channel();
     let mut info = info;
     if info.bundle_id.is_none() {
         info.bundle_id = bundle_id.as_deref().map(ToString::to_string);
@@ -2810,16 +2584,14 @@ pub(crate) async fn run_app(
         windows: HashMap::default(),
         elem_to_wid: HashMap::default(),
         main_window: None,
-        last_activated: None,
-        pending_activation: PendingActivation::None,
+        activate_on_show: false,
         is_hidden: false,
         is_frontmost: false,
         enhanced_ui: EnhancedUi::default(),
-        raises_tx,
         tx_store,
     };
 
-    state.run(info, handle, requests_rx, notifications_rx, raises_rx).await;
+    state.run(info, handle, requests_rx, notifications_rx).await;
 }
 
 fn trace<T>(
@@ -2854,44 +2626,6 @@ fn trace<T>(
         }
     }
     out
-}
-
-#[cfg(test)]
-mod activation_tests {
-    use super::*;
-
-    #[test]
-    fn hidden_activation_waits_for_show_and_preserves_user_or_quiet_intent() {
-        for quiet in [Quiet::No, Quiet::Yes] {
-            let mut pending = PendingActivation::default();
-            let window = Some(WindowId::new(7, 1));
-            assert_eq!(pending.globally_activated(true, Some((quiet, window))), None);
-            // Lagging AX notifications cannot replace or cancel a Carbon edge.
-            pending.ax_activated(Quiet::No);
-            pending.ax_deactivated();
-            assert_eq!(pending.shown(), Some((quiet, window)));
-            assert_eq!(pending.shown(), None);
-        }
-    }
-
-    #[test]
-    fn showing_without_global_activation_does_not_activate() {
-        let mut pending = PendingActivation::default();
-        pending.ax_activated(Quiet::Yes);
-        assert_eq!(pending.shown(), None);
-        assert_eq!(pending.globally_activated(false, None), Some((Quiet::Yes, None)));
-        pending.ax_activated(Quiet::Yes);
-        pending.ax_deactivated();
-        assert_eq!(pending.globally_activated(false, None), Some((Quiet::No, None)));
-    }
-
-    #[test]
-    fn new_global_activation_replaces_old_deferred_quiet_context() {
-        let mut pending = PendingActivation::default();
-        assert_eq!(pending.globally_activated(true, Some((Quiet::Yes, None))), None);
-        assert_eq!(pending.globally_activated(true, None), None);
-        assert_eq!(pending.shown(), Some((Quiet::No, None)));
-    }
 }
 
 #[cfg(test)]

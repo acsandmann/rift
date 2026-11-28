@@ -70,7 +70,7 @@ impl MainWindowTracker {
                 app.main_window = wid;
                 (pid, quiet)
             }
-            &Event::WindowServerFocusChanged(wid, _) => {
+            &Event::WindowServerFocusChanged(wid, _, _) => {
                 self.window_server_focus_authoritative = true;
                 self.window_server_focus = Some(wid);
                 return None;
@@ -154,7 +154,11 @@ mod tests {
 
         assert_eq!(tracker.main_window(), Some(ax_window));
         assert_eq!(
-            tracker.handle_event(&Event::WindowServerFocusChanged(server_window, SpaceId::new(1),)),
+            tracker.handle_event(&Event::WindowServerFocusChanged(
+                server_window,
+                SpaceId::new(1),
+                None
+            )),
             None
         );
         assert_eq!(tracker.main_window(), Some(server_window));

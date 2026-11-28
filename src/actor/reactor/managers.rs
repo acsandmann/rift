@@ -14,7 +14,7 @@ use crate::actor::app::{AppThreadHandle, WindowId, WindowInventoryToken, pid_t};
 use crate::actor::reactor::Reactor;
 use crate::actor::reactor::animation::AnimationManager;
 use crate::actor::spaces::ForwardedSpaceState;
-use crate::actor::{input, menu_bar, raise_manager, stack_line, window_notify, wm_controller};
+use crate::actor::{input, menu_bar, stack_line, window_notify, wm_controller};
 use crate::common::collections::{HashMap, HashSet};
 use crate::common::config::{DragDropSettings, LayoutMode};
 use crate::layout_engine::LayoutEngine;
@@ -158,7 +158,6 @@ pub struct WindowInventoryManager {
     pub next_request_id: u64,
     pub in_flight: HashMap<pid_t, WindowInventoryToken>,
     pub pending: HashSet<pid_t>,
-    pub refocus_after_refresh: HashMap<pid_t, WindowId>,
 }
 
 /// Manages workspace switching state
@@ -192,7 +191,6 @@ pub struct RefocusManager {
 pub struct CommunicationManager {
     pub input_tx: Option<input::Sender>,
     pub stack_line_tx: Option<stack_line::Sender>,
-    pub raise_manager_tx: raise_manager::Sender,
     pub event_broadcaster: BroadcastSender,
     pub wm_sender: Option<wm_controller::Sender>,
     pub events_tx: Option<actor::Sender<Event>>,
@@ -582,8 +580,11 @@ impl LayoutManager {
                 && let Some((_, frame)) = layout.iter().find(|(wid, _)| *wid == window)
             {
                 changes.focus_warp = None;
-                if reactor.screen_for_point(frame.mid()).is_some() {
-                    reactor.warp_mouse(frame.mid());
+                if reactor.screen_for_point(frame.mid()).is_some()
+                    && let Some((_, warp)) =
+                        changes.focus.as_mut().and_then(|plan| plan.focus_window.as_mut())
+                {
+                    *warp = Some(frame.mid());
                 }
             }
         }

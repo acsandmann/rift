@@ -224,7 +224,11 @@ impl WindowNotify {
                             "resolved coalesced WindowServer focus"
                         );
                         if let Some(window) = window {
-                            events_tx.send(Event::WindowServerFocusChanged(window, space));
+                            events_tx.send(Event::WindowServerFocusChanged(
+                                window,
+                                space,
+                                Some(query_started),
+                            ));
                         }
                         break;
                     }

@@ -323,10 +323,11 @@ impl Reactor {
             if let Some(space) = space.filter(|space| self.is_space_active(*space)) {
                 self.focus_window_in_space(changes, space, window);
             }
-        } else if let Some(server) = server
-            && let Err(error) = window_server::make_key_window(window.pid, server)
-        {
-            warn!(?error, "failed to make key window");
+        } else if let Some(server) = server {
+            self.focus.external_input();
+            if let Err(error) = window_server::make_key_window(window.pid, server) {
+                warn!(?error, "failed to make key window");
+            }
         }
     }
 
@@ -371,6 +372,7 @@ impl Reactor {
                     .into_iter()
                     .next()
             });
+            self.focus.cancel();
             if let Some(window) = target {
                 if !move_mouse {
                     warp = self

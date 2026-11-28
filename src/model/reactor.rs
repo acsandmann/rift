@@ -144,10 +144,6 @@ pub enum ReactorError {
     StackLineCommunicationFailed(
         #[from] tokio::sync::mpsc::error::TrySendError<crate::actor::stack_line::Event>,
     ),
-    #[error("Raise manager communication failed: {0}")]
-    RaiseManagerCommunicationFailed(
-        #[from] tokio::sync::mpsc::error::SendError<crate::actor::raise_manager::Event>,
-    ),
 }
 
 #[cfg(test)]

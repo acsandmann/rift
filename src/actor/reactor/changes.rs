@@ -2,7 +2,7 @@ use std::time::Instant;
 
 use objc2_core_foundation::{CGPoint, CGRect};
 
-use super::{WindowId, pid_t, raise_manager};
+use super::{FocusPlan, WindowId, pid_t};
 use crate::sys::screen::SpaceId;
 
 // Stronger requests take precedence for the same Space. A workspace switch
@@ -50,7 +50,7 @@ pub(super) struct Changes {
     extra_transfers: Vec<(WindowId, SpaceId, Option<CGRect>)>,
     pub(super) desktop_focus: Option<SpaceId>,
     pub(super) fallback_focus: Option<(SpaceId, Option<WindowId>)>,
-    pub(super) focus: Option<raise_manager::Event>,
+    pub(super) focus: Option<FocusPlan>,
     pub(super) mouse_warp: Option<CGPoint>,
     pub(super) display_warp: Option<SpaceId>,
     pub(super) focus_warp: Option<WindowId>,

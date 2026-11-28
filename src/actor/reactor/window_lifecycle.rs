@@ -134,13 +134,8 @@ impl Reactor {
         {
             self.overview_focus = replacement.map(|window| (space, window, stamp));
         }
-        let pending = &mut self.window_inventory_manager.refocus_after_refresh;
-        if pending.get(&old.pid) == Some(&old) {
-            if let Some(window) = replacement {
-                pending.insert(window.pid, window);
-            } else {
-                pending.remove(&old.pid);
-            }
+        if self.focus.pending().is_some_and(|intent| intent.window == old) {
+            self.focus.cancel();
         }
     }
 
