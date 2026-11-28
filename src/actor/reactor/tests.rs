@@ -4903,6 +4903,7 @@ fn same_app_native_focus_follows_window_to_workspace() {
 fn same_app_native_focus_respects_auto_switch_guards() {
     for guard in [
         "blacklist",
+        "setting_off",
         "wake",
         "manual",
         "auto",
@@ -4928,6 +4929,7 @@ fn same_app_native_focus_respects_auto_switch_guards() {
         assert!(reactor.assign_test_window_to_workspace(space, hidden, workspace));
         match guard {
             "blacklist" => reactor.config.settings.auto_focus_blacklist.push("com.testapp2".into()),
+            "setting_off" => reactor.config.settings.auto_switch_workspace_on_activation = false,
             "wake" => reactor.handle_event(Event::SystemWoke),
             "manual" | "auto" => {
                 reactor.workspace_switch_manager.start_workspace_switch(
@@ -5310,6 +5312,47 @@ fn wake_restored_activation_does_not_switch_workspace_before_user_input() {
             );
         }
     }
+}
+
+#[test]
+fn activation_does_not_switch_workspace_when_auto_switch_is_disabled() {
+    let (mut apps, mut reactor) = test_context();
+    let screen = CGRect::new(CGPoint::new(0., 0.), CGSize::new(1000., 1000.));
+    let space = SpaceId::new(1);
+    let activated = WindowId::new(2, 1);
+
+    reactor.handle_event(space_state_event(vec![screen], vec![Some(space)]));
+    apps.make_app_and_settle(&mut reactor, 2, make_windows(2));
+    reactor.handle_test_layout_event(LayoutEvent::WindowFocused(space, activated));
+    reactor.handle_test_layout_command(LayoutCommand::MoveWindowToWorkspace {
+        workspace: WorkspaceSelector::Index(1),
+        follow: false,
+        window_id: None,
+    });
+    reactor.handle_test_layout_command(LayoutCommand::SwitchToWorkspace(0));
+    apps.simulate_until_quiet(&mut reactor);
+
+    // Same event sequence as wake_restored_activation_does_not_switch_workspace_before_user_input,
+    // whose final activation is known to switch workspaces.
+    reactor.handle_event(Event::SessionDidBecomeActive);
+    reactor.handle_event(Event::ApplicationGloballyActivated(activated.pid));
+    reactor.handle_event(Event::KeyboardInput);
+
+    reactor.config.settings.auto_switch_workspace_on_activation = false;
+    reactor.handle_event(Event::ApplicationActivated(activated.pid, Quiet::No));
+    assert_eq!(
+        reactor.layout_manager.layout_engine.workspaces().active_workspace_idx(space),
+        Some(0),
+        "activation must not switch workspaces while the setting is off"
+    );
+
+    reactor.config.settings.auto_switch_workspace_on_activation = true;
+    reactor.handle_event(Event::ApplicationActivated(activated.pid, Quiet::No));
+    assert_eq!(
+        reactor.layout_manager.layout_engine.workspaces().active_workspace_idx(space),
+        Some(1),
+        "activation switches workspaces once the setting is back on"
+    );
 }
 
 #[test]

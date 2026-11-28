@@ -983,13 +983,25 @@ fn advanced(ui: Ui, model: &Rc<Model>) -> Page {
         |s| s.settings.run_on_start.clone(),
         |s, values| s.settings.run_on_start = values,
     );
+    let switching = f.fields(
+        Section::new(&ui, "Workspace switching"),
+        &["auto_switch_workspace_on_activation"],
+        |s| &s.settings,
+        |s| &mut s.settings,
+    );
     let blacklist = super::editors::strings(
         &mut f,
         "Autofocus blacklist",
         |s| s.settings.auto_focus_blacklist.clone(),
         |s, values| s.settings.auto_focus_blacklist = values,
     );
-    f.finish(SettingsPage::new(&ui, "").section(file).section(startup).section(blacklist))
+    f.finish(
+        SettingsPage::new(&ui, "")
+            .section(file)
+            .section(startup)
+            .section(switching)
+            .section(blacklist),
+    )
 }
 
 pub(super) fn optional_number(value: &str) -> Result<Option<f64>, String> {

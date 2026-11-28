@@ -561,6 +561,16 @@ pub struct Settings {
     #[serde(default)]
     #[setting(ignore)]
     pub focus_follows_mouse_disable_hotkey: Option<HotkeySpec>,
+    /// Switch to the workspace of an app's window when the app is activated
+    /// (Cmd+Tab, the Dock, an app raising itself). When false, only explicit
+    /// commands switch workspaces.
+    #[serde(default = "yes")]
+    #[setting(
+        label = "Switch workspace on app activation",
+        group = "advanced",
+        aliases = "auto switch workspace activation follow focus"
+    )]
+    pub auto_switch_workspace_on_activation: bool,
     /// Apps that should not trigger automatic workspace switching when activated.
     /// List of bundle identifiers (e.g., "com.apple.Spotlight") that often
     /// inappropriately steal focus and shouldn't cause workspace switches.

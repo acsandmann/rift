@@ -5219,6 +5219,10 @@ impl Reactor {
         changes: &mut Changes,
         window: Option<WindowId>,
     ) -> bool {
+        if !self.config.settings.auto_switch_workspace_on_activation {
+            trace!("Skipping auto workspace switch because it is disabled in the config");
+            return false;
+        }
         let Some(window) = window.filter(|wid| self.window_is_standard(*wid)) else {
             return false;
         };
