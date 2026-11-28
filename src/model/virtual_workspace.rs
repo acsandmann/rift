@@ -1321,7 +1321,7 @@ impl WorkspaceStore {
             return None;
         }
         let non_empty =
-            |id| skip_empty != Some(true) || window_store.workspace_window_count(id) != 0;
+            |id| skip_empty != Some(true) || window_store.workspace_has_active_window(id);
         let mut crossed = false;
         let mut wrapped = None;
         let mut remaining = self.order.iter();
@@ -1942,6 +1942,14 @@ mod tests {
             }
             let ids: Vec<_> = store.catalog().collect();
             let mut windows = WindowStore::default();
+            let hidden = WindowId::new(90, 3);
+            let hidden_server_id = crate::sys::window_server::WindowServerId::new(3);
+            windows.assign_window_to_workspace(hidden, ids[1]);
+            windows.track_window_server_id(hidden_server_id, hidden);
+            windows.mark_window_hidden(hidden_server_id);
+            let minimized = WindowId::new(90, 4);
+            windows.assign_window_to_workspace(minimized, ids[2]);
+            windows.set_minimized_visibility(minimized, true);
             windows.assign_window_to_workspace(WindowId::new(90, 1), ids[3]);
             windows.assign_window_to_workspace(WindowId::new(90, 2), ids[4]);
             let context = WorkspaceContext {

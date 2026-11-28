@@ -1324,6 +1324,13 @@ impl WindowStore {
         self.workspace_windows.get(&workspace_id).map_or(0, HashSet::len)
     }
 
+    /// Whether activating this workspace would have a window Rift can place.
+    pub(crate) fn workspace_has_active_window(&self, workspace_id: VirtualWorkspaceId) -> bool {
+        self.workspace_windows
+            .get(&workspace_id)
+            .is_some_and(|windows| windows.iter().any(|&wid| self.can_place_window(wid)))
+    }
+
     pub fn remove_window_assignment(&mut self, window_id: WindowId) -> Option<VirtualWorkspaceId> {
         // A claim keeps its saved workspace until release; only workspace removal clears it.
         let old = self.windows.get_mut(&window_id).and_then(|record| {
