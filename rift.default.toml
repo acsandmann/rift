@@ -38,6 +38,10 @@ mouse_hides_on_focus = true
 # e.g. "Fn"; omit or set to null to keep focus-follows-mouse always active
 #focus_follows_mouse_disable_hotkey = "Fn"
 
+# Switch to an app's workspace when the app is activated (Cmd+Tab, the Dock,
+# an app raising itself). When false, only explicit commands switch workspaces.
+auto_switch_workspace_on_activation = true
+
 # Prevent certain apps from stealing focus/causing workspace switches
 # Provide bundle identifiers (e.g., "com.apple.Spotlight")
 # Examples:
