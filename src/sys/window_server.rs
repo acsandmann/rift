@@ -1079,8 +1079,7 @@ pub(crate) fn make_key_window_while(
         }
         if authorized() {
             cg_ok(SLPSPostEventRecordTo(&psn, event1.as_ptr()))?;
-        }
-        if authorized() {
+            // Once the first record is sent, finish the pair even on supersession.
             cg_ok(SLPSPostEventRecordTo(&psn, event2.as_ptr()))?;
         }
     }

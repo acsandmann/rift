@@ -577,8 +577,34 @@ impl Apps {
     pub fn simulate_until_quiet(&mut self, reactor: &mut Reactor) {
         let mut requests = self.requests();
         while !requests.is_empty() {
+            let focus = requests.iter().find_map(|request| match request {
+                Request::Focus(window, authority, _) if authority.is_current() => {
+                    Some((*window, authority.clone()))
+                }
+                _ => None,
+            });
             for event in self.simulate_events_for_requests(requests) {
                 reactor.handle_event(event);
+            }
+            if let Some((window, authority)) = focus
+                && authority.try_issue()
+                && let Some(space) = reactor.focus.pending().and_then(|intent| intent.space)
+            {
+                if !reactor.main_window_tracker.is_globally_frontmost(window.pid) {
+                    reactor.handle_event(Event::ApplicationGloballyActivated(window.pid));
+                    reactor.handle_event(Event::ApplicationMainWindowChanged(
+                        window.pid,
+                        Some(window),
+                        Quiet::No,
+                    ));
+                    reactor.handle_event(Event::ApplicationActivated(window.pid, Quiet::No));
+                }
+                reactor.handle_event(Event::WindowServerFocusChanged(window, space, None));
+                reactor.handle_event(Event::FocusExecuted(
+                    window,
+                    authority.generation,
+                    super::focus::FocusExecution::Issued,
+                ));
             }
             requests = self.requests();
         }

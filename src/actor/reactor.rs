@@ -31,9 +31,7 @@ use std::cell::RefCell;
 use std::rc::Rc;
 use std::sync::Arc;
 use std::thread;
-#[cfg(test)]
-use std::time::Duration;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use animation::AnimationSender;
 use changes::{Changes, Presentation, SpaceChange};
@@ -257,9 +255,9 @@ pub enum Event {
     #[serde(skip)]
     WindowInventoryRefreshRequested(pid_t),
     #[serde(skip)]
-    FocusFailed(WindowId, u64, bool),
+    FocusExecuted(WindowId, u64, focus::FocusExecution),
     #[serde(skip)]
-    FocusAlreadyObserved(WindowId, u64),
+    FocusVerified(u64, SpaceId, Option<WindowId>, Instant),
     #[serde(skip)]
     StackFinished(u64),
     #[serde(skip)]
@@ -400,7 +398,6 @@ pub struct Reactor {
     focus: FocusState,
     #[cfg(test)]
     focus_plans: Option<actor::Sender<FocusPlan>>,
-    overview_focus: Option<(SpaceId, WindowId, Instant)>,
     mouse_inventory_hit: Option<WindowServerId>,
     drag_manager: managers::DragManager,
     workspace_switch_manager: managers::WorkspaceSwitchManager,
@@ -499,7 +496,6 @@ impl Reactor {
             focus: FocusState::default(),
             #[cfg(test)]
             focus_plans: None,
-            overview_focus: None,
             mouse_inventory_hit: None,
             drag_manager: managers::DragManager {
                 actor: crate::actor::drag::DragActor::new(config.settings.drag_drop),
@@ -525,7 +521,7 @@ impl Reactor {
             notification_manager: managers::NotificationManager {
                 last_sls_notification_ids: Vec::new(),
                 last_layout_modes_by_space: HashMap::default(),
-                _window_notify_tx: window_notify_tx,
+                window_notify_tx,
             },
             transaction_manager: transaction_manager::TransactionManager::new(window_tx_store),
             menu_manager: managers::MenuManager {
@@ -1078,30 +1074,25 @@ impl Reactor {
     async fn run_reactor_loop(reactor: Rc<RefCell<Reactor>>, mut events: Receiver) {
         const MAX_EVENT_BATCH: usize = 64;
 
-        let mut stack_timer = None;
+        let mut timer = crate::sys::timer::Timer::manual();
+        let mut armed_deadline = None;
         loop {
             let deadline = reactor.borrow().focus.deadline();
-            let next = if let Some((generation, at)) = deadline {
-                let delay = at.saturating_duration_since(Instant::now());
-                if delay.is_zero() {
-                    reactor.borrow_mut().advance_stacking(generation, true);
+            if deadline != armed_deadline {
+                timer.set_next_fire(
+                    deadline
+                        .map_or(Duration::MAX, |at| at.saturating_duration_since(Instant::now())),
+                );
+                armed_deadline = deadline;
+            }
+            let next = tokio::select! {
+                biased;
+                _ = &mut timer, if deadline.is_some() => {
+                    armed_deadline = None;
+                    reactor.borrow_mut().expire_focus(Instant::now());
                     continue;
                 }
-                if !matches!(&stack_timer, Some((id, _)) if *id == generation) {
-                    stack_timer = Some((generation, crate::sys::timer::Timer::sleep(delay)));
-                }
-                let (_, timer) = stack_timer.as_mut().unwrap();
-                tokio::select! {
-                    biased;
-                    _ = timer => {
-                        reactor.borrow_mut().advance_stacking(generation, true);
-                        continue;
-                    }
-                    event = events.recv() => event,
-                }
-            } else {
-                stack_timer = None;
-                events.recv().await
+                event = events.recv() => event,
             };
             let Some((span, event)) = next else { break };
             let _guard = span.enter();
@@ -1369,12 +1360,11 @@ impl Reactor {
         // This signal only releases the lifecycle guard. Ordinary typing must
         // not commit camera presentations or trigger layout/focus side effects.
         if matches!(event, Event::FocusInput) {
-            self.focus.external_input();
-            self.overview_focus = None;
+            self.focus_input();
             self.suppress_auto_workspace_switch_until_input = false;
             return;
         }
-        self.focus.expire();
+        self.expire_focus(Instant::now());
         if matches!(event, Event::KeyboardInput) {
             self.suppress_auto_workspace_switch_until_input = false;
             self.recording_manager.record.on_event(&event);
@@ -1450,7 +1440,9 @@ impl Reactor {
             | Event::TopologyInvalidated(_)
             | Event::SpaceStateChanged(_)
             | Event::SystemWoke => {
-                self.focus.external_input();
+                if !matches!(event, Event::SpaceStateChanged(_)) {
+                    self.focus_input();
+                }
                 let windows = self.state.windows.iter_windows().map(|(wid, _)| wid).collect();
                 self.cancel_window_presentations(windows);
             }
@@ -1465,14 +1457,22 @@ impl Reactor {
                 | Event::MenuOpened(_)
                 | Event::MenuClosed(_)
                 | Event::WindowInventoryRefreshRequested(_)
-                | Event::FocusAlreadyObserved(..)
-                | Event::FocusFailed(..)
+                | Event::FocusExecuted(..)
+                | Event::FocusVerified(..)
+                | Event::ApplicationGloballyActivated(..)
                 | Event::StackFinished(..)
                 | Event::ApplicationDeactivated(_)
                 | Event::ApplicationGloballyDeactivated(_)
                 | Event::SessionDidBecomeActive
                 | Event::ActiveDisplayChanged { .. }
-        ) {
+        ) && !(self.focus.pending().is_some()
+            && matches!(
+                event,
+                Event::WindowServerFocusChanged(..)
+                    | Event::ApplicationActivated(..)
+                    | Event::ApplicationMainWindowChanged(..)
+            ))
+        {
             self.commit_presentations();
         }
         self.log_event(&event);
@@ -1491,7 +1491,6 @@ impl Reactor {
 
         match event {
             Event::TopologyInvalidated(revision) => {
-                self.focus.external_input();
                 self.invalidate_native_topology(revision);
                 return Ok(());
             }
@@ -1502,7 +1501,7 @@ impl Reactor {
                 return Ok(());
             }
             Event::SessionDidBecomeActive => {
-                self.focus.external_input();
+                self.focus_input();
                 self.suppress_auto_workspace_switch_until_input = true;
                 return Ok(());
             }
@@ -1523,6 +1522,11 @@ impl Reactor {
             return Ok(());
         }
 
+        if let Event::WindowServerFocusChanged(_, _, Some(at)) = event
+            && self.main_window_tracker.native_sample_is_stale(at)
+        {
+            return Ok(());
+        }
         let previous_native_focus = self.main_window_tracker.window_server_focus();
         let raised_window = self.main_window_tracker.handle_event(&event);
         match event {
@@ -1573,6 +1577,12 @@ impl Reactor {
                 changes.refresh_menu |= self.app_manager.apps.remove(&pid).is_some();
                 return Ok(());
             }
+            Event::ApplicationMainWindowChanged(pid, window, _)
+                if self.focus.pending().is_some() =>
+            {
+                self.observe_ax_focus(pid, window);
+                return Ok(());
+            }
             Event::ApplicationActivated(pid, quiet) => {
                 let globally_frontmost = self.main_window_tracker.is_globally_frontmost(pid);
                 if globally_frontmost {
@@ -1591,7 +1601,10 @@ impl Reactor {
                             .filter(|wid| self.state.windows.is_admitted(*wid))
                             .or_else(|| self.sole_admitted_window(pid))
                     };
-                    if self.accept_resolved_activation(changes, pid, activation_window) {
+                    if self.accept_resolved_activation(
+                        pid,
+                        self.main_window_tracker.app_main_window(pid),
+                    ) {
                         self.auto_switch_to_window_workspace(changes, activation_window);
                         self.reconcile_observed_focus(changes, activation_window);
                     }
@@ -1601,6 +1614,9 @@ impl Reactor {
                 return Ok(());
             }
             Event::ApplicationDeactivated(pid) | Event::ApplicationGloballyDeactivated(pid) => {
+                if matches!(event, Event::ApplicationGloballyDeactivated(_)) {
+                    self.focus_app_deactivated(pid);
+                }
                 self.clear_menu_state_for_pid(pid);
             }
             Event::ApplicationGloballyActivated(pid) => {
@@ -1626,7 +1642,7 @@ impl Reactor {
                 return Ok(());
             }
             Event::WindowServerFocusChanged(window, reported_space, sampled_at) => {
-                let selection = self.observe_focus(changes, window, sampled_at);
+                let selection = self.observe_focus(window, reported_space, sampled_at);
                 if self.window_needs_inventory(window) {
                     // Recover stale admission before the cached-layout-focus
                     // fast path as well, without rescanning excluded windows.
@@ -2086,18 +2102,22 @@ impl Reactor {
                     .get(workspace)
                     .map(|workspace| workspace.space)
                 else {
+                    if let Some(stamp) = transition {
+                        self.overview_focus_outcome(stamp, false);
+                    }
                     return Ok(());
                 };
                 if !self.is_space_active(space) {
+                    if let Some(stamp) = transition {
+                        self.overview_focus_outcome(stamp, false);
+                    }
                     return Ok(());
                 }
                 let changed =
                     self.layout_manager.layout_engine.workspaces().active_workspace(space)
                         != Some(workspace);
-                if let Some(stamp) = transition {
-                    self.overview_focus = window.map(|window| (space, window, stamp));
-                }
-                if transition.is_some() || self.overview_focus.is_some() {
+                self.cancel_focus();
+                if transition.is_some() {
                     self.stop_camera(space);
                 }
                 self.store_current_floating_positions(space);
@@ -2121,7 +2141,7 @@ impl Reactor {
                         .start_workspace_switch(space, WorkspaceSwitchOrigin::Manual);
                 }
                 if response.changed {
-                    let policy = if transition.is_some() || self.overview_focus.is_some() {
+                    let policy = if transition.is_some() {
                         Presentation::Instant
                     } else if changed {
                         Presentation::WorkspaceSwitch
@@ -2130,7 +2150,8 @@ impl Reactor {
                     };
                     changes.arrange(Some(space), policy);
                 }
-                changes.overview_activation = transition.map(|stamp| (workspace, window, stamp));
+                changes.overview_activation =
+                    transition.map(|stamp| (space, workspace, window, stamp));
                 // Follow only a workspace that lives on another display.
                 if self
                     .space_state
@@ -2292,7 +2313,6 @@ impl Reactor {
                 return Ok(());
             }
             Event::MissionControlNativeEntered => {
-                self.focus.external_input();
                 self.drag_manager.reset();
                 self.set_mission_control_active(true);
                 return Ok(());
@@ -2303,12 +2323,12 @@ impl Reactor {
                 self.refresh_windows_after_mission_control(changes);
                 return Ok(());
             }
-            Event::FocusAlreadyObserved(window, generation) => {
-                self.focus_result(changes, window, generation, None);
+            Event::FocusExecuted(window, generation, result) => {
+                self.focus_result(window, generation, result);
                 return Ok(());
             }
-            Event::FocusFailed(window, generation, missing) => {
-                self.focus_result(changes, window, generation, Some(missing));
+            Event::FocusVerified(generation, space, window, at) => {
+                self.focus_verified(generation, space, window, at);
                 return Ok(());
             }
             Event::StackFinished(generation) => {
@@ -2660,6 +2680,7 @@ impl Reactor {
                     target_screen.frame.size,
                 );
                 if response.changed {
+                    self.cancel_focus();
                     self.workspace_switch_manager
                         .start_workspace_switch(target_space, WorkspaceSwitchOrigin::Manual);
                     changes.move_between(source_space, target_space, Presentation::WorkspaceSwitch);
@@ -2729,9 +2750,6 @@ impl Reactor {
             return;
         }
         let recovering = self.refreshes_blocked();
-        if recovering || snapshot.presentation_changed(&self.space_state) {
-            self.focus.external_input();
-        }
         if recovering {
             self.abandon_window_inventories_from_instability();
         } else if snapshot.revision != self.space_state.revision {
@@ -2748,11 +2766,7 @@ impl Reactor {
 
     fn reconcile_observed_focus(&mut self, changes: &mut Changes, window: Option<WindowId>) {
         if let Some(window) = window
-            && !self.focus.shadows_activation(
-                window.pid,
-                self.main_window_tracker.window_server_focus(),
-                Some(window),
-            )
+            && self.focus.pending().is_none()
             && let Some(space) = self
                 .best_space_for_window_id(window)
                 .filter(|space| self.is_space_active(*space))
@@ -2849,23 +2863,23 @@ impl Reactor {
         if self.focus.pending().is_some_and(|intent| {
             (intent.pointer && self.transient_blocks_mouse_focus())
                 || !self.state.windows.contains_window(intent.window)
-                || self.state.windows.is_temporarily_unavailable(intent.window)
+                || (intent.pointer && self.state.windows.is_temporarily_unavailable(intent.window))
+                || self.state.windows.is_window_native_fullscreen_suspended(intent.window)
+                || intent.space.is_some_and(|space| !self.is_space_active(space))
         }) {
-            self.focus.cancel();
-        }
-        if changes.fallback_focus.is_some() {
-            self.focus.cancel();
+            self.cancel_focus();
         }
 
         self.retire_presentations();
         self.resolve_fallback_focus(&mut changes);
         if changes.focus.is_none()
+            && self.focus.pending().is_none()
             && let Some(space) = changes.desktop_focus
         {
             self.focus_desktop_if_active_workspace_empty(space);
         }
         if changes.focus.as_ref().is_some_and(|plan| plan.focus_window.is_some()) {
-            self.focus.cancel();
+            self.cancel_focus();
         }
         let dragging = self.is_in_drag();
         let layout_modes_may_have_changed = changes.has_layouts();
@@ -2920,22 +2934,28 @@ impl Reactor {
             self.warp_mouse(center);
         }
         let mut warp_authority = None;
-        if let Some(mut focus) = changes.focus.take() {
-            if let Some((_, selected, stamp)) = changes.overview_activation
-                && selected == focus.focus_window.map(|(window, _)| window)
+        let mut covered_focus = false;
+        if let Some(focus) = changes.focus.take() {
+            let overview = changes.overview_activation.and_then(|(space, _, selected, stamp)| {
+                let (target, _) = focus.focus_window?;
+                (selected.is_none_or(|selected| selected == target)
+                    && self.app_manager.apps.contains_key(&target.pid))
+                .then_some((space, stamp))
+            });
+            covered_focus = overview.is_some();
+            self.submit_focus(focus, overview);
+            if changes.mouse_warp.is_some()
+                || changes.focus_warp.is_some()
+                || changes.display_warp.is_some()
             {
-                focus.overview = Some(stamp);
-            } else if focus.focus_window.is_some() {
-                self.overview_focus = None;
+                warp_authority = self.focus.warp_authority();
             }
-            self.submit_focus(focus);
-            warp_authority = self.focus.warp_authority();
         }
         if let Some(point) = changes.mouse_warp {
             self.queue_warp(point, warp_authority.clone());
         }
 
-        if let Some((workspace, window, stamp)) = changes.overview_activation
+        if let Some((_, workspace, window, stamp)) = changes.overview_activation
             && let Some(wm) = &self.communication_manager.wm_sender
         {
             let frames = self
@@ -2955,6 +2975,11 @@ impl Reactor {
                 stamp,
                 frames,
             }));
+        }
+        if let Some((_, _, selected, stamp)) = changes.overview_activation
+            && !covered_focus
+        {
+            self.overview_focus_outcome(stamp, selected.is_none());
         }
         if (changes.overview_changed
             || changes.refresh_notifications
@@ -4913,10 +4938,14 @@ impl Reactor {
             changes.membership_for(Some(space));
         }
         changes.refresh_menu |= removes_assignment || (membership_event && response.changed);
-        if response.focus_window.is_some() || !response.raise_windows.is_empty() {
+        if self.focus.pending().is_none()
+            && (response.focus_window.is_some() || !response.raise_windows.is_empty())
+        {
             self.reconcile_layout_response(changes, response, None);
         }
-        if let Some(request) = layout_outcome.app_rules.workspace_focus {
+        if let Some(request) = layout_outcome.app_rules.workspace_focus
+            && self.focus.pending().is_none()
+        {
             self.store_current_floating_positions(request.space);
             self.workspace_switch_manager
                 .start_workspace_switch(request.space, WorkspaceSwitchOrigin::Auto);
@@ -5449,7 +5478,7 @@ impl Reactor {
             return;
         }
         if changes.focus.as_ref().is_some_and(|plan| plan.focus_window.is_some())
-            || (changes.fallback_focus.is_none() && self.focus.pending().is_some())
+            || self.focus.pending().is_some()
         {
             self.refocus_manager.refocus_state = RefocusState::None;
             return;
@@ -5621,7 +5650,7 @@ impl Reactor {
             );
             return false;
         }
-        self.focus.external_input();
+        self.focus_input();
         window_server::make_key_window(info.pid, wsid).is_ok()
     }
 
@@ -5639,10 +5668,10 @@ impl Reactor {
         let Some(screen) = self.space_state.screen_by_space(space) else {
             return false;
         };
-        self.focus.external_input();
         if !window_server::focus_desktop_window(screen) {
             return false;
         }
+        self.focus_input();
 
         self.layout_manager.layout_engine.commit_workspace_focus(
             &mut self.state.windows,
@@ -5938,7 +5967,7 @@ impl Reactor {
     }
 
     fn request_close_window(&mut self, pid: pid_t, window_server_id: Option<WindowServerId>) {
-        self.focus.external_input();
+        self.focus_input();
         if let Some(app) = self.app_manager.apps.get(&pid) {
             if let Err(err) = app.handle.send(Request::CloseWindow(window_server_id)) {
                 warn!(

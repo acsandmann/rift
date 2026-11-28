@@ -36,8 +36,12 @@ pub(super) struct Changes {
     pub(super) refresh_ffm: bool,
     pub(super) refresh_menu: bool,
     pub(super) overview_changed: bool,
-    pub(super) overview_activation:
-        Option<(crate::model::VirtualWorkspaceId, Option<WindowId>, Instant)>,
+    pub(super) overview_activation: Option<(
+        SpaceId,
+        crate::model::VirtualWorkspaceId,
+        Option<WindowId>,
+        Instant,
+    )>,
     pub(super) selection_changed: Option<SpaceId>,
     pub(super) post_arrange_mouse_warp: Option<WindowId>,
     pub(super) drop_haptic: bool,

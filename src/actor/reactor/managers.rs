@@ -138,7 +138,7 @@ impl DragManager {
 pub struct NotificationManager {
     pub last_sls_notification_ids: Vec<u32>,
     pub last_layout_modes_by_space: HashMap<SpaceId, crate::common::config::LayoutMode>,
-    pub _window_notify_tx: Option<window_notify::Sender>,
+    pub window_notify_tx: Option<window_notify::Sender>,
 }
 
 /// Manages menu state and interactions
@@ -344,9 +344,11 @@ impl LayoutManager {
             {
                 presentation = Presentation::Instant;
             }
-            if reactor.overview_focus.is_some_and(|(covered, _, started)| {
-                covered == space && started.elapsed() < std::time::Duration::from_secs(1)
-            }) {
+            if reactor.focus.covers(space)
+                || changes
+                    .overview_activation
+                    .is_some_and(|(destination, ..)| destination == space)
+            {
                 presentation = presentation.max(Presentation::Instant);
             }
             let mut update = CalculatedLayout {

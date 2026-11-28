@@ -1708,6 +1708,7 @@ enum Phase {
         window: Option<WindowId>,
         start: Instant,
         target_ready: bool,
+        focus_ready: bool,
     },
 }
 
@@ -2242,6 +2243,7 @@ impl OverviewSession {
         if !self.needs_handoff() {
             return action.or(Some(OverviewAction::Dismiss));
         }
+        let dismiss = dismiss || action.is_none();
         self.reveal = None;
         self.pressed = None;
         let window = if dismiss { None } else { self.selection.window };
@@ -2258,6 +2260,7 @@ impl OverviewSession {
             window,
             start: now,
             target_ready: dismiss,
+            focus_ready: dismiss,
         };
         // Existing layout geometry gives immediate feedback. The reactor still
         // owns the destination and native reveal; its reply retargets from the
@@ -2276,7 +2279,7 @@ impl OverviewSession {
     }
 
     pub(crate) fn activation_target(&mut self, prepared: OverviewTarget) {
-        if !matches!(self.phase, Phase::Exiting { window, start, target_ready: false }
+        if !matches!(self.phase, Phase::Exiting { window, start, target_ready: false, .. }
             if window == prepared.window && start == prepared.stamp)
         {
             return;
@@ -3459,21 +3462,45 @@ impl OverviewSession {
         // close and refresh from the reactor so another selection can succeed.
         if start.elapsed().as_secs_f64() >= HANDOFF_RECOVERY {
             tracing::warn!("Overview handoff did not converge; restoring interactive overview");
-            self.interrupt();
-            let _tx = LayerTransaction::disabled().flush_on_commit();
-            for d in &mut self.displays {
-                d.animate(d.home, self.duration);
-                d.apply_camera(1.);
+            self.recover_handoff();
+        }
+        false
+    }
+
+    pub(crate) fn focus_outcome(&mut self, stamp: Instant, focused: bool) -> bool {
+        if let Phase::Exiting { start, focus_ready, .. } = &mut self.phase
+            && *start == stamp
+        {
+            if focused {
+                *focus_ready = true;
+                return true;
+            } else {
+                self.recover_handoff();
             }
         }
         false
     }
 
+    fn recover_handoff(&mut self) {
+        self.interrupt();
+        let _tx = LayerTransaction::disabled().flush_on_commit();
+        for d in &mut self.displays {
+            d.animate(d.home, self.duration);
+            d.apply_camera(1.);
+        }
+    }
+
     fn native_handoff_ready(&self) -> bool {
-        let Phase::Exiting { window, target_ready, .. } = self.phase else {
+        let Phase::Exiting {
+            window,
+            target_ready,
+            focus_ready,
+            ..
+        } = self.phase
+        else {
             return false;
         };
-        if !target_ready || self.displays.iter().any(|d| d.motion.is_some()) {
+        if !target_ready || !focus_ready || self.displays.iter().any(|d| d.motion.is_some()) {
             return false;
         }
         let d = &self.displays[self.active];

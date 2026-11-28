@@ -837,7 +837,10 @@ impl Input {
                 if forward
                     && event_type == CGEventType::KeyDown
                     && CGEvent::flags(Some(event)).contains(CGEventFlags::MaskCommand)
-                    && matches!(key_code_from_event(event), Some(KeyCode::Tab | KeyCode::Space))
+                    && matches!(
+                        key_code_from_event(event),
+                        Some(KeyCode::Tab | KeyCode::Space | KeyCode::Backquote)
+                    )
                 {
                     self.events_tx.send(Event::FocusInput);
                 }

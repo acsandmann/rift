@@ -26,6 +26,7 @@ pub enum Event {
     RefreshCurrentWorkspace,
     DropFinished(super::app::WindowId, bool),
     ActivationTarget(reactor::OverviewTarget),
+    FocusOutcome(std::time::Instant, bool),
     Configure(MissionControlSettings, bool),
     Input(Input),
 }
@@ -360,6 +361,14 @@ impl MissionControlActor {
             Event::ActivationTarget(target) => {
                 if let Some(session) = &mut self.session {
                     session.activation_target(target);
+                }
+            }
+            Event::FocusOutcome(stamp, focused) => {
+                if let Some(session) = &mut self.session
+                    && session.focus_outcome(stamp, focused)
+                    && session.handoff_ready()
+                {
+                    self.close();
                 }
             }
             Event::DropFinished(window, changed) => {

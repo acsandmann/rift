@@ -18,7 +18,7 @@ use tokio::select;
 use tracing::{Span, debug, info, instrument, trace, warn};
 
 use crate::actor;
-use crate::actor::reactor::focus::FocusAuthority;
+use crate::actor::reactor::focus::{FocusAuthority, FocusExecution};
 use crate::actor::reactor::transaction_manager::TransactionId;
 use crate::actor::reactor::{self, Event, Requested};
 use crate::actor::wm_controller::{self, WmEvent};
@@ -514,6 +514,12 @@ impl AppThreadHandle {
             Request::BeginWindowAnimation(_, authority)
             | Request::EndWindowAnimation(_, authority) => {
                 *authority = self.frame_authority.clone()
+            }
+            Request::Focus(..) | Request::Stack(..) => {
+                return self
+                    .requests_tx
+                    .try_send(req)
+                    .map_err(|_| anyhow::anyhow!("app actor request channel closed"));
             }
             _ => (),
         }
@@ -1172,7 +1178,7 @@ impl State {
         let mut should_terminate = false;
         for (span, request) in batch.drain(..) {
             if matches!(&request,
-                Request::Focus(_, authority, _) | Request::Stack(_, authority)
+                Request::Stack(_, authority)
                     if !authority.is_current()
             ) {
                 continue;
@@ -1617,11 +1623,10 @@ impl State {
                     None,
                 ));
             }
-            Request::Focus(window, authority, force_raise) => {
-                if authority.is_current() {
-                    self.flush_focus_frames(pending_frames, eui, &authority, &[window]);
-                    self.focus_window(window, &authority, force_raise);
-                }
+            Request::Focus(window, authority, already_focused) => {
+                self.flush_focus_frames(pending_frames, eui, &authority, &[window]);
+                let result = self.focus_window(window, &authority, already_focused);
+                self.send_event(Event::FocusExecuted(window, authority.generation, result));
             }
             Request::Stack(windows, authority) => {
                 self.flush_focus_frames(pending_frames, eui, &authority, &windows);
@@ -1856,23 +1861,24 @@ impl State {
         }
     }
 
-    fn focus_window(&mut self, wid: WindowId, authority: &FocusAuthority, force_raise: bool) {
+    fn focus_window(
+        &mut self,
+        wid: WindowId,
+        authority: &FocusAuthority,
+        already_focused: bool,
+    ) -> FocusExecution {
         let result = (|| {
             if !authority.is_current() {
-                return Ok(false);
+                return Ok(FocusExecution::Cancelled);
             }
             let window = self.window(wid)?;
-            // Only query AXFrontmost when it could avoid the entire mutation.
-            if !force_raise
-                && self.main_window == Some(wid)
-                && self.app.frontmost().unwrap_or(false)
-            {
-                return Ok(true);
+            if already_focused {
+                return Ok(FocusExecution::AlreadyFocused);
             }
             let server =
                 window.window_server_id.or_else(|| WindowServerId::try_from(&window.elem).ok());
             if !authority.try_issue() {
-                return Ok(false);
+                return Ok(FocusExecution::Cancelled);
             }
             // Select AXMain before make-key and raise immediately afterwards.
             // Otherwise apps can restore a different window on another display.
@@ -1880,7 +1886,7 @@ impl State {
                 debug!(?wid, ?error, "Failed to select AX main window");
             }
             if !authority.is_current() {
-                return Ok(false);
+                return Ok(FocusExecution::Cancelled);
             }
             let made_key = server.is_some_and(|server| {
                 trace!(?wid, age = ?authority.focus_age(), "Invoking native make-key");
@@ -1892,7 +1898,7 @@ impl State {
                 result.is_ok()
             });
             if !authority.is_current() {
-                return Ok(false);
+                return Ok(FocusExecution::Cancelled);
             }
             if let Err(error) = window.elem.raise() {
                 if !made_key || matches!(error, AxError::Ax(AXError::InvalidUIElement)) {
@@ -1900,22 +1906,29 @@ impl State {
                 }
                 debug!(?wid, ?error, "AXRaise failed after make-key");
             }
-            // AX is a fallback for windows without a usable native make-key path.
-            Ok(!made_key
-                && self.app.frontmost().unwrap_or(false)
-                && self.on_main_window_changed(None, true) == Some(wid))
+            if server.is_none() {
+                // AX fallback is limited to windows without a native identity.
+                let observed = self
+                    .app
+                    .frontmost()
+                    .unwrap_or(false)
+                    .then(|| self.on_main_window_changed(Some(wid), true))
+                    .flatten();
+                Ok(FocusExecution::AxFallback(observed))
+            } else {
+                Ok(FocusExecution::Issued)
+            }
         })();
-        if !authority.is_current() {
-            return;
-        }
         match result {
-            Ok(true) => self.send_event(Event::FocusAlreadyObserved(wid, authority.generation)),
-            Ok(false) => {}
+            Ok(result) => result,
             Err(error) => {
                 debug!(?wid, ?error, "Focus mutation failed");
-                let missing =
-                    matches!(error, AxError::NotFound | AxError::Ax(AXError::InvalidUIElement));
-                self.send_event(Event::FocusFailed(wid, authority.generation, missing));
+                match error {
+                    AxError::NotFound | AxError::Ax(AXError::InvalidUIElement) => {
+                        FocusExecution::Missing
+                    }
+                    _ => FocusExecution::Failed,
+                }
             }
         }
     }

@@ -1,6 +1,9 @@
+use std::time::Instant;
+
 use super::Event;
 use crate::actor::app::{Quiet, WindowId, pid_t};
 use crate::common::collections::HashMap;
+use crate::sys::screen::SpaceId;
 
 #[derive(Default)]
 pub(crate) struct MainWindowTracker {
@@ -8,6 +11,8 @@ pub(crate) struct MainWindowTracker {
     global_frontmost: Option<pid_t>,
     window_server_focus: Option<WindowId>,
     window_server_focus_authoritative: bool,
+    native_space: Option<SpaceId>,
+    sampled_at: Option<Instant>,
 }
 
 struct AppState {
@@ -70,7 +75,12 @@ impl MainWindowTracker {
                 app.main_window = wid;
                 (pid, quiet)
             }
-            &Event::WindowServerFocusChanged(wid, _, _) => {
+            &Event::WindowServerFocusChanged(wid, space, at) => {
+                if at.is_some_and(|at| self.native_sample_is_stale(at)) {
+                    return None;
+                }
+                self.native_space = Some(space);
+                self.sampled_at = at;
                 self.window_server_focus_authoritative = true;
                 self.window_server_focus = Some(wid);
                 return None;
@@ -94,7 +104,7 @@ impl MainWindowTracker {
 
     pub(super) fn replace_window(&mut self, wid: WindowId, replacement: Option<WindowId>) {
         if self.window_server_focus == Some(wid) {
-            self.window_server_focus = replacement;
+            self.window_server_focus = None;
         }
         if let Some(app) = self.apps.get_mut(&wid.pid)
             && app.main_window == Some(wid)
@@ -118,6 +128,14 @@ impl MainWindowTracker {
             }) => Some(window),
             _ => None,
         }
+    }
+
+    pub fn native_sample_is_stale(&self, at: Instant) -> bool {
+        self.sampled_at.is_some_and(|last| at < last)
+    }
+
+    pub fn native_focus_at(&self, window: WindowId, space: Option<SpaceId>) -> bool {
+        self.window_server_focus == Some(window) && self.native_space == space
     }
 
     pub fn window_server_focus(&self) -> Option<WindowId> { self.window_server_focus }

@@ -1,9 +1,10 @@
 use std::num::NonZeroU32;
-use std::sync::{Arc, mpsc};
+use std::sync::{Arc, Mutex, mpsc};
 use std::time::{Duration, Instant};
 
 use tracing::{debug, trace, warn};
 
+use super::reactor::focus::FocusAuthority;
 use super::reactor::{self, Event};
 use super::spaces;
 use crate::actor::app::WindowId;
@@ -73,6 +74,7 @@ impl Clone for Ignored {
 pub enum Request {
     Subscribe(CGSEventType),
     UpdateWindowNotifications(Vec<u32>),
+    VerifyFocus(SpaceId, FocusAuthority),
     Stop,
 }
 
@@ -94,6 +96,8 @@ pub struct WindowNotify {
     requests_rx: Option<Receiver>,
     subscribed: HashSet<CGSEventType>,
     initial_events: Vec<CGSEventType>,
+    focus_wake: FocusWakeSender,
+    focus_target: Arc<Mutex<Option<(SpaceId, FocusAuthority)>>>,
 }
 
 /// Fans WindowServer notifications out to the actors that consume them.
@@ -113,18 +117,22 @@ impl WindowNotify {
         tx_store: Option<WindowTxStore>,
     ) -> Self {
         let (focus_wake_tx, focus_wake_rx) = mpsc::sync_channel(1);
-        Self::spawn_focus_resolver(events_tx.clone(), focus_wake_rx);
+        let focus_wake = FocusWakeSender { wake: focus_wake_tx };
+        let focus_target = Arc::new(Mutex::new(None));
+        Self::spawn_focus_resolver(events_tx.clone(), focus_wake_rx, focus_target.clone());
         Dispatcher {
             events_tx,
             spaces_tx,
             tx_store,
-            focus_wake: FocusWakeSender { wake: focus_wake_tx },
+            focus_wake: focus_wake.clone(),
         }
         .spawn();
         Self {
             requests_rx: Some(requests_rx),
             subscribed: HashSet::default(),
             initial_events: initial_events.iter().copied().collect(),
+            focus_wake,
+            focus_target,
         }
     }
 
@@ -178,6 +186,12 @@ impl WindowNotify {
                 window_notify::update_window_notifications(&window_ids);
             }
 
+            Request::VerifyFocus(space, authority) => {
+                if authority.is_current() {
+                    *self.focus_target.lock().unwrap() = Some((space, authority));
+                    self.focus_wake.notify();
+                }
+            }
             Request::Stop => {}
         }
     }
@@ -190,7 +204,11 @@ impl WindowNotify {
         }
     }
 
-    fn spawn_focus_resolver(events_tx: reactor::Sender, focus_wake_rx: mpsc::Receiver<()>) {
+    fn spawn_focus_resolver(
+        events_tx: reactor::Sender,
+        focus_wake_rx: mpsc::Receiver<()>,
+        focus_target: Arc<Mutex<Option<(SpaceId, FocusAuthority)>>>,
+    ) {
         std::thread::Builder::new()
             .name("window-focus-resolver".to_string())
             .spawn(move || {
@@ -205,7 +223,16 @@ impl WindowNotify {
                         }
 
                         let query_started = Instant::now();
-                        let space = window_server::active_space();
+                        let target = {
+                            let mut target = focus_target.lock().unwrap();
+                            if target.as_ref().is_some_and(|(_, authority)| !authority.is_current())
+                            {
+                                *target = None;
+                            }
+                            target.as_ref().map(|(space, authority)| (*space, authority.generation))
+                        };
+                        let space =
+                            target.map_or_else(window_server::active_space, |(space, _)| space);
                         let window = window_server::key_focused_window(space);
                         let query_elapsed = query_started.elapsed();
 
@@ -223,7 +250,14 @@ impl WindowNotify {
                             ?window,
                             "resolved coalesced WindowServer focus"
                         );
-                        if let Some(window) = window {
+                        if let Some((_, generation)) = target {
+                            events_tx.send(Event::FocusVerified(
+                                generation,
+                                space,
+                                window,
+                                query_started,
+                            ));
+                        } else if let Some(window) = window {
                             events_tx.send(Event::WindowServerFocusChanged(
                                 window,
                                 space,
@@ -283,6 +317,7 @@ impl Dispatcher {
             }
             CGSEventType::Known(KnownCGSEvent::SpaceCurrentChanged) => {
                 spaces_tx.send(spaces::Event::ActiveSpaceChanged);
+                focus_wake.notify();
             }
             CGSEventType::Known(KnownCGSEvent::ManagedSpaceMembershipUpdated)
             | CGSEventType::Known(KnownCGSEvent::SpaceWindowManagementCapabilitiesChanged) => {
@@ -311,7 +346,9 @@ impl Dispatcher {
                     SpaceId::new(space_id),
                 ));
             }
-            CGSEventType::Known(KnownCGSEvent::WindowReordered)
+            CGSEventType::Known(
+                KnownCGSEvent::WindowReordered | KnownCGSEvent::WorkspaceDidChange,
+            )
             | CGSEventType::Known(KnownCGSEvent::WindowManagerSpaceFrontConnectionChanged)
             | CGSEventType::Known(KnownCGSEvent::WindowManagerGlobalFrontConnectionChanged) => {
                 focus_wake.notify()

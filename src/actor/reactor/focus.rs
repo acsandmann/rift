@@ -9,14 +9,16 @@ use std::time::{Duration, Instant};
 use objc2_core_foundation::CGPoint;
 use tracing::trace;
 
-use super::{Changes, Presentation, Reactor};
+use super::{Event, Reactor};
 use crate::actor::app::{Quiet, Request, WindowId};
-use crate::layout_engine::LayoutEvent;
+use crate::actor::window_notify;
+use crate::actor::wm_controller::WmEvent;
+use crate::sys::screen::SpaceId;
 
 const QUEUED: u8 = 0;
 const ISSUED: u8 = 1;
 const REVOKED: u8 = 2;
-const CONFIRMED: u8 = 3;
+const FINISHED: u8 = 3;
 const FOCUS_LIFETIME: Duration = Duration::from_secs(1);
 const STACK_BUDGET: Duration = Duration::from_millis(250);
 
@@ -58,9 +60,21 @@ impl FocusAuthority {
         self.state.load(Ordering::Acquire) != REVOKED && Instant::now() < self.deadline
     }
 
+    fn finish(&self) { self.state.store(FINISHED, Ordering::Release); }
+
     fn issued(&self) -> bool { self.state.load(Ordering::Acquire) == ISSUED }
 
     fn revoke(&self) -> bool { self.state.swap(REVOKED, Ordering::AcqRel) == ISSUED }
+}
+
+#[derive(Clone, Copy, Debug)]
+pub enum FocusExecution {
+    Issued,
+    AlreadyFocused,
+    AxFallback(Option<WindowId>),
+    Cancelled,
+    Failed,
+    Missing,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -69,7 +83,6 @@ pub(super) struct FocusPlan {
     pub focus_window: Option<(WindowId, Option<CGPoint>)>,
     pub focus_quiet: Quiet,
     pub pointer: bool,
-    pub overview: Option<Instant>,
 }
 
 pub(super) struct FocusIntent {
@@ -77,12 +90,15 @@ pub(super) struct FocusIntent {
     pub pointer: bool,
     quiet: Quiet,
     authority: FocusAuthority,
-    created: Instant,
-    outgoing: Option<WindowId>,
+    sample_after: Instant,
+    observed: Option<(Instant, Option<WindowId>)>,
+    execution: Option<FocusExecution>,
+    awaiting_activation: bool,
+    pub(super) space: Option<SpaceId>,
     corrected: bool,
     force_raise: bool,
     warp: Option<CGPoint>,
-    overview: Option<Instant>,
+    pub overview: Option<Instant>,
 }
 
 struct Stacking {
@@ -96,6 +112,7 @@ pub(super) struct FocusState {
     latest: Option<FocusIntent>,
     generation: u64,
     stacking: Option<Stacking>,
+    warp: Option<FocusAuthority>,
     // Only issued operations can have late native effects. Keep a bounded
     // history while another intent is pending. Native events have no request ID.
     superseded: VecDeque<(WindowId, Instant)>,
@@ -109,11 +126,14 @@ impl FocusState {
         self.superseded.push_back((window, deadline));
     }
 
-    pub fn cancel(&mut self) {
+    fn cancel(&mut self) {
         if let Some(intent) = self.latest.take()
             && intent.authority.revoke()
         {
             self.remember(intent.window, intent.authority.deadline);
+        }
+        if let Some(warp) = self.warp.take() {
+            warp.revoke();
         }
         if let Some(stack) = self.stacking.take()
             && stack.authority.revoke()
@@ -124,47 +144,35 @@ impl FocusState {
         }
     }
 
-    pub fn external_input(&mut self) {
-        self.cancel();
-        self.superseded.clear();
+    pub fn deadline(&self) -> Option<Instant> {
+        self.latest
+            .iter()
+            .map(|intent| intent.authority.deadline)
+            .chain(self.stacking.iter().map(|stack| stack.authority.deadline))
+            .min()
     }
 
-    pub fn deadline(&self) -> Option<(u64, Instant)> {
-        let stack = self.stacking.as_ref()?;
-        Some((stack.authority.generation, stack.authority.deadline))
+    pub fn covers(&self, space: SpaceId) -> bool {
+        self.latest
+            .as_ref()
+            .is_some_and(|intent| intent.overview.is_some() && intent.space == Some(space))
     }
 
-    pub fn expire(&mut self) {
-        if self.latest.as_ref().is_some_and(|intent| !intent.authority.allows_warp()) {
-            self.cancel();
-        }
-    }
+    pub fn pending(&self) -> Option<&FocusIntent> { self.latest.as_ref() }
 
-    pub fn shadows_activation(
-        &self,
-        pid: i32,
-        native: Option<WindowId>,
-        ax: Option<WindowId>,
-    ) -> bool {
-        self.pending().is_some()
-            || self.latest.as_ref().is_some_and(|intent| {
-                intent.window.pid == pid
-                    && (native == Some(intent.window) || ax == Some(intent.window))
-                    && intent.authority.allows_warp()
-            })
-    }
-
-    pub fn pending(&self) -> Option<&FocusIntent> {
-        self.latest.as_ref().filter(|intent| intent.authority.is_current())
-    }
-
-    pub fn warp_authority(&self) -> Option<FocusAuthority> {
-        self.latest.as_ref().map(|intent| intent.authority.clone())
+    pub fn warp_authority(&mut self) -> Option<FocusAuthority> {
+        let authority = self.latest.as_ref()?.authority.clone();
+        self.warp = Some(authority.clone());
+        Some(authority)
     }
 }
 
 impl Reactor {
-    pub(super) fn submit_focus(&mut self, mut plan: FocusPlan) {
+    pub(super) fn submit_focus(
+        &mut self,
+        mut plan: FocusPlan,
+        overview: Option<(SpaceId, Instant)>,
+    ) {
         #[cfg(test)]
         if let Some(tx) = &self.focus_plans {
             let _ = tx.send(plan.clone());
@@ -176,7 +184,10 @@ impl Reactor {
         {
             return;
         }
-        self.focus.cancel();
+        if plan.focus_window.is_none() && self.focus.pending().is_some() {
+            return;
+        }
+        self.cancel_focus();
         self.focus.generation += 1;
         let generation = self.focus.generation;
         let now = Instant::now();
@@ -191,17 +202,26 @@ impl Reactor {
             self.focus.latest = Some(FocusIntent {
                 window,
                 pointer: plan.pointer,
-                quiet: plan.focus_quiet,
+                quiet: overview.map_or(plan.focus_quiet, |_| Quiet::Yes),
                 authority: FocusAuthority::new(generation, now + FOCUS_LIFETIME),
-                created: now,
-                outgoing: self
-                    .main_window_tracker
-                    .window_server_focus()
-                    .or_else(|| self.main_window()),
+                sample_after: now,
+                observed: None,
+                execution: None,
+                awaiting_activation: !self.main_window_tracker.is_globally_frontmost(window.pid),
+                space: overview
+                    .map(|(space, _)| space)
+                    .or_else(|| self.assigned_space_for_window_id(window))
+                    .or_else(|| self.state.windows.native_space(window))
+                    .or_else(|| {
+                        self.state
+                            .windows
+                            .window(window)
+                            .and_then(|state| self.best_space_for_frame(&state.frame_monotonic))
+                    }),
                 corrected: false,
                 force_raise,
                 warp,
-                overview: plan.overview,
+                overview: overview.map(|(_, stamp)| stamp),
             });
         }
 
@@ -257,183 +277,262 @@ impl Reactor {
                     .send(Request::Focus(
                         window,
                         intent.authority.clone(),
-                        intent.force_raise
-                            || self
-                                .main_window_tracker
-                                .window_server_focus()
-                                .is_some_and(|focused| focused != window),
+                        !intent.force_raise
+                            && !intent.awaiting_activation
+                            && self
+                                .focus
+                                .superseded
+                                .iter()
+                                .all(|(_, until)| *until <= Instant::now())
+                            && self.main_window_tracker.native_focus_at(window, intent.space),
                     ))
                     .is_err()
             })
         {
-            self.focus.cancel();
+            self.cancel_focus();
         } else if let Some(point) = intent.warp.take()
             && let Some(input) = &self.communication_manager.input_tx
         {
-            _ = input.send(crate::actor::input::Request::Warp(
-                point,
-                Some(intent.authority.clone()),
-            ));
+            let authority = intent.authority.clone();
+            self.focus.warp = Some(authority.clone());
+            _ = input.send(crate::actor::input::Request::Warp(point, Some(authority)));
         }
     }
 
-    // Quiet confirmations update the command display without replaying layout
-    // selection. An ignored observation still updates the native metadata.
-    pub(super) fn observe_focus(
-        &mut self,
-        changes: &mut Changes,
-        window: WindowId,
-        sampled_at: Option<Instant>,
-    ) -> Option<Quiet> {
-        self.focus.expire();
-        let now = Instant::now();
-        let obsolete = self
+    pub(super) fn cancel_focus(&mut self) {
+        if let Some(stamp) = self.focus.latest.as_ref().and_then(|intent| intent.overview) {
+            self.overview_focus_outcome(stamp, false);
+        }
+        self.focus.cancel();
+    }
+
+    pub(super) fn focus_input(&mut self) {
+        self.cancel_focus();
+        self.focus.superseded.clear();
+    }
+
+    pub(super) fn expire_focus(&mut self, now: Instant) {
+        if self
             .focus
-            .superseded
-            .iter()
-            .any(|(old, deadline)| *old == window && now < *deadline);
-        let Some(intent) = self.focus.pending() else {
-            if let Some(stack) = &self.focus.stacking
-                && stack.current.contains(&window)
-            {
-                return None;
-            }
-            if let Some(confirmed) = &self.focus.latest
-                && confirmed.window != window
-            {
-                if sampled_at.is_some_and(|sampled| sampled < confirmed.created) {
-                    return None;
-                }
-                if obsolete && confirmed.authority.allows_warp() && !confirmed.corrected {
-                    self.correct_focus();
-                    return None;
-                }
-                self.focus.external_input();
-            }
-            return Some(Quiet::No);
-        };
-        if sampled_at.is_some_and(|sampled| sampled < intent.created) {
-            return None;
+            .latest
+            .as_ref()
+            .is_some_and(|intent| now >= intent.authority.deadline)
+        {
+            self.cancel_focus();
         }
         if let Some(stack) = &self.focus.stacking
-            && (window == intent.window || stack.current.contains(&window))
+            && now >= stack.authority.deadline
         {
-            return None;
+            self.advance_stacking(stack.authority.generation, true);
         }
-        if window == intent.window {
-            if !intent.authority.issued() && intent.overview.is_none() {
-                // An observation can satisfy a queued intent, but it cannot be
-                // attributed to an app actor that has issued no mutation.
-                self.focus.cancel();
-                return Some(Quiet::No);
-            }
-            let quiet = intent.quiet;
-            trace!(?window, age = ?intent.authority.focus_age(), "Native focus confirmed");
-            self.confirm_focus(changes, window);
-            return Some(quiet);
-        }
+    }
 
-        let restored = intent.authority.issued() && window.pid == intent.window.pid;
-        if obsolete || restored || Some(window) == intent.outgoing {
-            if (restored || obsolete) && intent.authority.issued() && !intent.corrected {
-                self.correct_focus();
-            }
-            return None;
+    pub(super) fn overview_focus_outcome(&self, stamp: Instant, focused: bool) {
+        if let Some(wm) = &self.communication_manager.wm_sender {
+            wm.send(WmEvent::OverviewFocusOutcome(stamp, focused));
         }
+    }
 
-        // A different target without evidence of an outgoing mutation is an
-        // external focus change. Input edges also revoke before observation.
-        self.focus.external_input();
-        Some(Quiet::No)
+    pub(super) fn observe_focus(
+        &mut self,
+        window: WindowId,
+        space: SpaceId,
+        sampled_at: Option<Instant>,
+    ) -> Option<Quiet> {
+        let Some(intent) = &self.focus.latest else {
+            let intermediate = self
+                .focus
+                .stacking
+                .as_ref()
+                .is_some_and(|stack| stack.current.contains(&window));
+            return (!intermediate).then_some(Quiet::No);
+        };
+        let matching = window == intent.window
+            && intent.space.is_none_or(|dest| dest == space)
+            && sampled_at.is_none_or(|at| at >= intent.sample_after);
+        let selection = matching.then_some(intent.quiet);
+        if self.focus.stacking.is_none() {
+            let at = sampled_at.unwrap_or_else(Instant::now);
+            if intent.space.is_none_or(|dest| dest == space) {
+                self.record_focus_sample(Some(window), at);
+            } else if window != intent.window
+                && intent
+                    .observed
+                    .is_some_and(|(last, wid)| at >= last && wid == Some(intent.window))
+            {
+                // A different Space cannot identify the destination key
+                // window, but can invalidate an older matching sample.
+                self.focus.latest.as_mut().unwrap().observed = Some((at, None));
+                self.reconcile_focus(true);
+            }
+        }
+        selection.map(|quiet| {
+            if self.focus.pending().is_some() {
+                Quiet::Yes
+            } else {
+                quiet
+            }
+        })
+    }
+
+    fn record_focus_sample(&mut self, window: Option<WindowId>, at: Instant) {
+        let Some(intent) = &mut self.focus.latest else { return };
+        if at >= intent.sample_after && intent.observed.is_none_or(|(last, _)| at >= last) {
+            intent.observed = Some((at, window));
+            self.reconcile_focus(false);
+        }
     }
 
     pub(super) fn accept_resolved_activation(
         &mut self,
-        changes: &mut Changes,
         pid: i32,
         window: Option<WindowId>,
     ) -> bool {
-        let native = self.main_window_tracker.window_server_focus();
-        let Some(intent) = self.focus.pending() else {
-            return !self.focus.shadows_activation(pid, native, window);
+        let Some(intent) = &mut self.focus.latest else {
+            return true;
         };
-        if intent.window.pid == pid {
-            if native.is_none() && window == Some(intent.window) && self.focus.stacking.is_none() {
-                if intent.authority.issued() {
-                    self.confirm_focus(changes, intent.window);
-                    return false;
-                }
-                self.focus.cancel();
-                return true;
+        if intent.window.pid == pid && intent.awaiting_activation {
+            intent.awaiting_activation = false;
+            // The app can restore its old main window after an early native
+            // sample. Recheck the destination if resolved activation disagrees.
+            if window != Some(intent.window)
+                && intent.observed.is_some_and(|(_, observed)| observed == Some(intent.window))
+            {
+                intent.sample_after = Instant::now();
+                intent.observed = None;
             }
-            return false;
+            if matches!(intent.execution, Some(FocusExecution::AxFallback(_))) {
+                intent.execution = Some(FocusExecution::AxFallback(window));
+            }
+            self.reconcile_focus(true);
         }
-
-        // Carbon + resolved AX can still supply an external activation when 808/815
-        // cannot resolve a usable window. An outgoing app or an issued obsolete
-        // mutation can also produce this edge, so wait for native evidence there.
-        if intent.outgoing.is_some_and(|outgoing| outgoing.pid == pid)
-            || self
-                .focus
-                .stacking
-                .as_ref()
-                .is_some_and(|stack| stack.current.iter().any(|window| window.pid == pid))
-            || self
-                .focus
-                .superseded
-                .iter()
-                .any(|(old, expires)| old.pid == pid && Instant::now() < *expires)
-        {
-            return false;
-        }
-        self.focus.external_input();
-        true
+        false
     }
 
-    fn correct_focus(&mut self) {
-        let intent = self.focus.latest.as_mut().unwrap();
-        self.focus.generation += 1;
-        intent.authority.revoke();
-        intent.authority = FocusAuthority::new(self.focus.generation, intent.authority.deadline);
-        intent.corrected = true;
-        intent.force_raise = true;
-        self.dispatch_focus();
+    pub(super) fn focus_app_deactivated(&mut self, pid: i32) {
+        if let Some(intent) = &mut self.focus.latest
+            && intent.window.pid == pid
+        {
+            intent.awaiting_activation = true;
+            intent.sample_after = Instant::now();
+            intent.observed = None;
+        }
+    }
+
+    pub(super) fn observe_ax_focus(&mut self, pid: i32, window: Option<WindowId>) {
+        if let Some(intent) = &mut self.focus.latest
+            && intent.window.pid == pid
+            && self.main_window_tracker.is_globally_frontmost(pid)
+            && matches!(intent.execution, Some(FocusExecution::AxFallback(_)))
+        {
+            intent.execution = Some(FocusExecution::AxFallback(window));
+            self.reconcile_focus(false);
+        }
+    }
+
+    pub(super) fn focus_verified(
+        &mut self,
+        generation: u64,
+        space: SpaceId,
+        window: Option<WindowId>,
+        at: Instant,
+    ) {
+        let Some(intent) = &self.focus.latest else { return };
+        if intent.authority.generation != generation
+            || intent.space != Some(space)
+            || at < intent.sample_after
+            || intent.observed.is_some_and(|(last, _)| at < last)
+        {
+            return;
+        }
+        if let Some(window) = window {
+            let _ = self.main_window_tracker.handle_event(&Event::WindowServerFocusChanged(
+                window,
+                space,
+                Some(at),
+            ));
+        }
+        self.record_focus_sample(window, at);
     }
 
     pub(super) fn focus_result(
         &mut self,
-        changes: &mut Changes,
         window: WindowId,
         generation: u64,
-        failed: Option<bool>,
+        result: FocusExecution,
     ) {
-        if !self.focus.pending().is_some_and(|intent| {
-            intent.window == window && intent.authority.generation == generation
-        }) {
+        let Some(intent) = &mut self.focus.latest else { return };
+        if intent.window != window || intent.authority.generation != generation {
             return;
         }
-        if let Some(missing) = failed {
-            self.focus.cancel();
-            if missing {
-                self.request_window_inventory(window.pid);
+        match result {
+            FocusExecution::Failed | FocusExecution::Cancelled | FocusExecution::Missing => {
+                self.cancel_focus();
+                if matches!(result, FocusExecution::Missing) {
+                    self.request_window_inventory(window.pid);
+                }
             }
-        } else {
-            self.confirm_focus(changes, window);
+            _ => {
+                intent.execution = Some(result);
+                self.reconcile_focus(true);
+            }
         }
     }
 
-    fn confirm_focus(&mut self, changes: &mut Changes, window: WindowId) {
-        let intent = self.focus.latest.as_ref().unwrap();
-        intent.authority.state.store(CONFIRMED, Ordering::Release);
-        let overview = intent.overview;
-        if let Some((space, selected, stamp)) = self.overview_focus
-            && window == selected
-            && overview == Some(stamp)
+    fn reconcile_focus(&mut self, verify: bool) {
+        let Some(intent) = &mut self.focus.latest else { return };
+        let Some(execution) = intent.execution else { return };
+        if intent.awaiting_activation {
+            return;
+        }
+        let observed = match execution {
+            FocusExecution::AxFallback(window) => window,
+            _ => intent.observed.and_then(|(_, window)| window),
+        };
+        if observed == Some(intent.window) {
+            let intent = self.focus.latest.take().unwrap();
+            trace!(window = ?intent.window, age = ?intent.authority.focus_age(), "Native focus converged");
+            intent.authority.finish();
+            if let Some(stamp) = intent.overview {
+                self.overview_focus_outcome(stamp, true);
+            }
+            return;
+        }
+        if verify
+            && !matches!(execution, FocusExecution::AxFallback(_))
+            && let Some(space) = intent.space
+            && let Some(tx) = &self.notification_manager.window_notify_tx
+            && tx
+                .try_send(window_notify::Request::VerifyFocus(
+                    space,
+                    intent.authority.clone(),
+                ))
+                .is_ok()
         {
-            self.overview_focus = None;
-            self.stop_camera(space);
-            self.reconcile_layout_event(changes, LayoutEvent::WindowFocused(space, selected));
-            changes.arrange(Some(space), Presentation::Instant);
+            return;
+        }
+        if !intent.corrected
+            && (matches!(execution, FocusExecution::AlreadyFocused) && intent.observed.is_some()
+                || observed.is_some_and(|window| {
+                    window.pid == intent.window.pid
+                        || self
+                            .focus
+                            .superseded
+                            .iter()
+                            .any(|(old, until)| *old == window && Instant::now() < *until)
+                }))
+        {
+            trace!(target = ?intent.window, ?observed, "Correcting native focus underneath the current presentation");
+            self.focus.generation += 1;
+            intent.authority.revoke();
+            intent.authority =
+                FocusAuthority::new(self.focus.generation, intent.authority.deadline);
+            intent.corrected = true;
+            intent.force_raise = true;
+            intent.sample_after = Instant::now();
+            intent.observed = None;
+            intent.execution = None;
+            self.dispatch_focus();
         }
     }
 }

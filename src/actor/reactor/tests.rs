@@ -4,6 +4,7 @@ use test_log::test;
 use super::testing::*;
 use super::*;
 use crate::actor::app::{AppThreadHandle, Request, pid_t};
+use crate::actor::window_notify::Request::VerifyFocus;
 use crate::actor::wm_controller::WmEvent;
 use crate::common::config::{LayoutMode, OuterGaps, WorkspaceSelector};
 use crate::layout_engine::systems::{LayoutSystem, WindowChange};
@@ -4050,7 +4051,11 @@ fn rapid_navigation_dispatches_latest_intent_without_activation_and_ignores_old_
     assert_ne!(visited[2], visited[0]);
 
     let (target, stale_generation) = first.unwrap();
-    reactor.handle_event(Event::FocusAlreadyObserved(target, stale_generation));
+    reactor.handle_event(Event::FocusExecuted(
+        target,
+        stale_generation,
+        focus::FocusExecution::AlreadyFocused,
+    ));
     let latest = previous.unwrap();
     assert!(
         latest.is_current(),
@@ -4085,8 +4090,20 @@ fn rapid_navigation_dispatches_latest_intent_without_activation_and_ignores_old_
     );
     assert!(current.try_issue());
     reactor.handle_event(Event::WindowServerFocusChanged(target, space, None));
-    assert!(!current.is_current(), "native focus retires the current intent");
+    assert!(
+        current.is_current(),
+        "native focus cannot interrupt its own operation"
+    );
     reactor.handle_event(Event::WindowServerFocusChanged(stale.0, space, None));
+    assert!(apps.requests().is_empty(), "repair must wait for execution");
+    reactor.handle_event(Event::ApplicationGloballyActivated(target.pid));
+    apps.requests();
+    reactor.handle_event(Event::ApplicationActivated(target.pid, Quiet::No));
+    reactor.handle_event(Event::FocusExecuted(
+        target,
+        current.generation,
+        focus::FocusExecution::Issued,
+    ));
     let repair = apps.requests();
     let [Request::Focus(window, repair_authority, _)] = repair.as_slice() else {
         panic!("expected one repair for the late native mutation: {repair:?}");
@@ -4109,6 +4126,58 @@ fn rapid_navigation_dispatches_latest_intent_without_activation_and_ignores_old_
 }
 
 #[test]
+fn already_focused_target_uses_destination_sample_or_expires() {
+    let (mut apps, mut reactor) = test_context();
+    let (verify_tx, mut verify_rx) = actor::channel();
+    reactor.notification_manager.window_notify_tx = Some(verify_tx);
+    let space = SpaceId::new(1);
+    let window = WindowId::new(1, 1);
+    let screen = CGRect::new(CGPoint::ZERO, CGSize::new(1000., 1000.));
+    apps.make_app_and_settle_on_screen(&mut reactor, screen, space, 1, make_windows(1));
+    reactor.handle_event(Event::ApplicationGloballyActivated(window.pid));
+    reactor.handle_event(Event::WindowServerFocusChanged(window, space, None));
+    apps.requests();
+
+    for resolves in [true, false] {
+        reactor.commit_test(|reactor, changes| reactor.stage_focus(changes, window));
+        let requests = apps.requests();
+        let authority = requests
+            .iter()
+            .find_map(|request| match request {
+                Request::Focus(target, authority, true) if *target == window => Some(authority),
+                _ => None,
+            })
+            .expect("cached native focus should avoid issuing another raise");
+        reactor.handle_event(Event::FocusExecuted(
+            window,
+            authority.generation,
+            focus::FocusExecution::AlreadyFocused,
+        ));
+        let (_, VerifyFocus(destination, verification)) = verify_rx.try_recv().unwrap() else {
+            panic!("execution without a native notification must request verification");
+        };
+        assert_eq!(destination, space);
+        assert_eq!(verification.generation, authority.generation);
+        assert!(reactor.focus.pending().is_some());
+
+        if resolves {
+            reactor.handle_event(Event::FocusVerified(
+                verification.generation,
+                destination,
+                Some(window),
+                Instant::now(),
+            ));
+        } else {
+            reactor.expire_focus(reactor.focus.deadline().unwrap());
+        }
+        assert!(reactor.focus.pending().is_none());
+        assert!(!authority.is_current());
+        assert!(reactor.focus.deadline().is_none());
+        assert!(apps.requests().is_empty());
+    }
+}
+
+#[test]
 fn missing_focus_target_refreshes_inventory_without_replaying_focus() {
     let (mut apps, mut reactor) = test_context();
     let space = SpaceId::new(1);
@@ -4124,7 +4193,11 @@ fn missing_focus_target_refreshes_inventory_without_replaying_focus() {
             _ => None,
         })
         .unwrap();
-    reactor.handle_event(Event::FocusFailed(window, generation, true));
+    reactor.handle_event(Event::FocusExecuted(
+        window,
+        generation,
+        focus::FocusExecution::Missing,
+    ));
     let requests = apps.requests();
     assert!(
         requests
@@ -4503,6 +4576,7 @@ fn refreshing_hidden_window_does_not_steal_focus_across_displays() {
 
         // The same refresh must still repair focus when the hidden window itself
         // is native focus, rather than an unrelated inventory entry.
+        reactor.handle_event(Event::FocusInput);
         reactor.handle_event(Event::ApplicationGloballyActivated(1));
         reactor.handle_event(Event::WindowServerFocusChanged(hidden, left_space, None));
         reactor.handle_test_layout_event(LayoutEvent::WindowAdded(left_space, hidden));
@@ -4783,6 +4857,8 @@ fn auto_workspace_switch_follows_activated_window_when_same_app_is_visible_elsew
     assert!(!reactor.state.windows.is_temporarily_unavailable(activated));
     // Drain the coalesced inventory request before testing activation itself.
     apps.requests();
+    reactor.handle_event(Event::FocusInput);
+    reactor.handle_event(Event::ApplicationGloballyDeactivated(activated.pid));
     reactor.handle_event(Event::ApplicationGloballyActivated(activated.pid));
     reactor.handle_event(Event::WindowServerFocusChanged(same_app_visible, space, None));
     reactor.handle_event(Event::ApplicationMainWindowChanged(
@@ -5291,6 +5367,11 @@ fn wake_restored_activation_does_not_switch_workspace_before_user_input() {
                 Event::SessionDidBecomeActive
             });
             reactor.handle_event(Event::ApplicationGloballyActivated(activated.pid));
+            reactor.handle_event(Event::ApplicationMainWindowChanged(
+                activated.pid,
+                Some(activated),
+                Quiet::No,
+            ));
             reactor.handle_event(Event::ApplicationActivated(activated.pid, Quiet::No));
 
             assert_eq!(
@@ -13005,7 +13086,11 @@ fn restored_window_can_be_explicitly_moved_into_the_active_workspace() {
 
 #[test]
 fn overview_activation_arranges_and_focuses_under_cover() {
-    for switch_workspace in [false, true] {
+    for (switch_workspace, restore, fails) in [
+        (false, false, false),
+        (true, true, false),
+        (true, false, true),
+    ] {
         let (mut apps, mut reactor) = test_context();
         let screen = CGRect::new(CGPoint::ZERO, CGSize::new(1000., 1000.));
         let space = SpaceId::new(1);
@@ -13043,6 +13128,9 @@ fn overview_activation_arranges_and_focuses_under_cover() {
         reactor.animation_tx = Some(animation_tx);
         let (wm_tx, mut wm_rx) = actor::channel();
         reactor.communication_manager.wm_sender = Some(wm_tx);
+        let (verify_tx, mut verify_rx) = actor::channel();
+        reactor.notification_manager.window_notify_tx = Some(verify_tx);
+        reactor.handle_event(Event::ApplicationGloballyDeactivated(target.pid));
         let stamp = Instant::now();
         let display = reactor.space_state.screen_by_space(space).unwrap().display_uuid.clone();
         let (raise_tx, mut raise_rx) = actor::channel();
@@ -13085,8 +13173,88 @@ fn overview_activation_arranges_and_focuses_under_cover() {
             "stale native visibility must not replace the explicitly selected window"
         );
         animation_rx.commands.try_iter().for_each(drop);
-        reactor.handle_event(Event::WindowServerFocusChanged(target, space, None));
-        assert!(reactor.overview_focus.is_none());
+        let authority = requests
+            .iter()
+            .find_map(|request| match request {
+                Request::Focus(window, authority, _) if *window == target => Some(authority),
+                _ => None,
+            })
+            .unwrap();
+        assert!(authority.try_issue());
+        reactor.handle_event(Event::ApplicationGloballyActivated(target.pid));
+        let sibling = WindowId::new(target.pid, 1);
+        if !fails {
+            // The target can be observed while the app is still executing. On
+            // activation, macOS may restore a different window in the same app.
+            reactor.handle_event(Event::WindowServerFocusChanged(target, space, None));
+        }
+        reactor.handle_event(Event::ApplicationMainWindowChanged(
+            target.pid,
+            Some(if restore { sibling } else { target }),
+            Quiet::No,
+        ));
+        reactor.handle_event(Event::ApplicationActivated(target.pid, Quiet::No));
+        assert!(authority.is_current());
+        assert!(
+            !std::iter::from_fn(|| wm_rx.try_recv().ok())
+                .any(|(_, event)| matches!(event, WmEvent::OverviewFocusOutcome(_, _)))
+        );
+        let deadline = reactor.focus.deadline();
+        reactor.handle_event(Event::FocusExecuted(
+            target,
+            authority.generation,
+            if fails {
+                focus::FocusExecution::Failed
+            } else {
+                focus::FocusExecution::Issued
+            },
+        ));
+
+        if restore {
+            // The active native Space can differ from the destination. A
+            // notification from the active Space cannot authorize the reveal.
+            reactor.handle_event(Event::WindowServerFocusChanged(target, SpaceId::new(42), None));
+            let (_, VerifyFocus(destination, verification)) = verify_rx.try_recv().unwrap() else {
+                panic!("expected destination verification");
+            };
+            assert_eq!(destination, space);
+            assert!(reactor.focus.pending().is_some());
+            reactor.handle_event(Event::FocusVerified(
+                verification.generation,
+                destination,
+                Some(sibling),
+                Instant::now(),
+            ));
+            let repair = apps
+                .requests()
+                .into_iter()
+                .find_map(|request| match request {
+                    Request::Focus(window, authority, false) if window == target => Some(authority),
+                    _ => None,
+                })
+                .expect("restored sibling should cause one corrective execution");
+            assert_eq!(reactor.focus.deadline(), deadline);
+            assert!(repair.try_issue());
+            reactor.handle_event(Event::FocusExecuted(
+                target,
+                repair.generation,
+                focus::FocusExecution::Issued,
+            ));
+            assert!(
+                reactor.focus.pending().is_some(),
+                "execution alone cannot authorize reveal"
+            );
+            reactor.handle_event(Event::WindowServerFocusChanged(target, space, None));
+        } else {
+            assert!(
+                verify_rx.try_recv().is_err(),
+                "fresh matching evidence needs no resolver wake"
+            );
+        }
+        assert!(reactor.focus.pending().is_none());
+        assert!(std::iter::from_fn(|| wm_rx.try_recv().ok()).any(
+            |(_, event)| matches!(event, WmEvent::OverviewFocusOutcome(at, focused) if at == stamp && focused != fails)
+        ));
         assert!(
             animation_rx.commands.try_iter().all(|message| !matches!(
                 message,
@@ -13428,15 +13596,18 @@ fn ax_dialog_is_unmanaged_and_blocks_mouse_focus_until_hidden() {
 #[test]
 fn native_only_transient_appearance_preserves_discovery_and_scopes_hover_cancellation() {
     for background in [false, true] {
-        let (_, mut reactor, space, main, mut info) = pending_activation_context();
+        let (_apps, mut reactor, space, main, mut info) = pending_activation_context();
         if background {
             info.pid += 1;
         }
-        reactor.submit_focus(FocusPlan {
-            focus_window: Some((main, None)),
-            pointer: true,
-            ..Default::default()
-        });
+        reactor.submit_focus(
+            FocusPlan {
+                focus_window: Some((main, None)),
+                pointer: true,
+                ..Default::default()
+            },
+            None,
+        );
         reactor.transient_focus.native(info.id, info.pid, space, true);
         let app = reactor.app_manager.apps.get(&info.pid).is_some();
         if !app {
@@ -13842,6 +14013,8 @@ fn native_fullscreen_restores_middle_window_exactly_across_notification_ordering
             let original = test_layout(&mut reactor, space, screen);
             let native_frames: Vec<_> =
                 original.iter().map(|(wid, _)| (*wid, apps.windows[wid].frame)).collect();
+            reactor
+                .handle_test_layout_event(LayoutEvent::WindowFocused(space, WindowId::new(1, 1)));
             let topology =
                 reactor.layout_manager.layout_engine.serialize_to_string(&reactor.state.windows);
             if early >= 6 {

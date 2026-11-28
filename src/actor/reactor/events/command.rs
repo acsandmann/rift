@@ -144,9 +144,10 @@ impl Reactor {
         // Only begin the switch lifecycle once a real transition has been produced.
         let destination = response.workspace_space.or(workspace_space);
         if is_workspace_switch
-            && response.changed
             && let Some(space) = destination
+            && (response.changed || Some(space) != command_space)
         {
+            self.cancel_focus();
             self.workspace_switch_manager
                 .start_workspace_switch(space, WorkspaceSwitchOrigin::Manual);
         }
@@ -324,7 +325,7 @@ impl Reactor {
                 self.focus_window_in_space(changes, space, window);
             }
         } else if let Some(server) = server {
-            self.focus.external_input();
+            self.focus_input();
             if let Err(error) = window_server::make_key_window(window.pid, server) {
                 warn!(?error, "failed to make key window");
             }
@@ -338,6 +339,7 @@ impl Reactor {
         {
             return;
         }
+        self.cancel_focus();
         self.reconcile_layout_event(changes, LayoutEvent::WindowFocused(space, window));
         self.stage_focus(changes, window);
     }
@@ -372,7 +374,7 @@ impl Reactor {
                     .into_iter()
                     .next()
             });
-            self.focus.cancel();
+            self.cancel_focus();
             if let Some(window) = target {
                 if !move_mouse {
                     warp = self

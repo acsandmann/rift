@@ -129,13 +129,8 @@ impl Reactor {
 
     fn replace_window_references(&mut self, old: WindowId, replacement: Option<WindowId>) {
         self.main_window_tracker.replace_window(old, replacement);
-        if let Some((space, window, stamp)) = self.overview_focus
-            && window == old
-        {
-            self.overview_focus = replacement.map(|window| (space, window, stamp));
-        }
         if self.focus.pending().is_some_and(|intent| intent.window == old) {
-            self.focus.cancel();
+            self.cancel_focus();
         }
     }
 
@@ -153,7 +148,9 @@ impl Reactor {
             self.layout_manager.layout_engine.retire_window(wid);
         }
         self.cancel_window_presentations(windows);
-        self.overview_focus = self.overview_focus.filter(|(_, window, _)| window.pid != pid);
+        if self.focus.pending().is_some_and(|intent| intent.window.pid == pid) {
+            self.cancel_focus();
+        }
         self.transient_focus.windows.retain(|_, transient| transient.pid != pid);
         self.state.windows.remove_windows_for_app(pid);
         self.reconcile_layout_event(changes, LayoutEvent::AppClosed(pid));

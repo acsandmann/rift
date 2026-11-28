@@ -59,6 +59,7 @@ pub enum WmEvent {
     KeyboardLayoutChanged,
     OverviewChanged,
     OverviewActivationTarget(reactor::OverviewTarget),
+    OverviewFocusOutcome(std::time::Instant, bool),
     ConfigUpdated(crate::common::config::Config),
     Command(WmCommand),
 }
@@ -305,6 +306,11 @@ impl WmController {
             OverviewActivationTarget(target) => {
                 if let Some(tx) = &self.mission_control_tx {
                     tx.send(mission_control::Event::ActivationTarget(target));
+                }
+            }
+            OverviewFocusOutcome(stamp, focused) => {
+                if let Some(tx) = &self.mission_control_tx {
+                    tx.send(mission_control::Event::FocusOutcome(stamp, focused));
                 }
             }
             OverviewChanged => {
